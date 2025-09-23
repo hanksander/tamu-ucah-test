@@ -5,7 +5,14 @@ import scipy as sp
 from condor.backend import operators as ops
 
 
-"""This script optimizes the a blunted cone. It's base is taken from the condor glider example."""
+"""This script optimizes the a blunted cone. It's base is taken from the condor glider example.
+
+    To run you'll need to have condor installed. You can install it with pip:
+    pip install condor
+
+    you should also have updated versions of numpy, scipy, matplotlib, and pandas:
+    pip install numpy scipy matplotlib pandas --upgrade
+"""
 
 #UTILITIES
 
@@ -51,7 +58,7 @@ class StandardAtmosphere20km(co.ExplicitSystem):
     rho     : density [kg/m^3]
     a_sound : speed of sound [m/s]
     """
-    h = co.parameter()
+    h = parameter()
 
     R = 287.05          # specific gas constant for air [J/(kg*K)]
     g0 = 9.80665        # gravitational acceleration [m/s^2]
@@ -70,20 +77,24 @@ class StandardAtmosphere20km(co.ExplicitSystem):
     T_tropopause = T0 + a * h_tropopause  # 216.65 K
 
     # Temperature: linear decrease in troposphere, constant above up to 20 km
-    T = co.switch(h < h_tropopause,
-                  T0 + a * h,           # troposphere
-                  T_tropopause)         # lower stratosphere (isothermal up to 20 km)
+    T = variable()
+    #T = if else something(h < h_tropopause,
+    #              T0 + a * h,           # troposphere
+    #              T_tropopause)         # lower stratosphere (isothermal up to 20 km)
 
     # Pressure:
+    P = variable()
     P_trop = P0 * (T_tropopause / T0) ** (-g0 / (a * R))
-    P = co.switch(h < h_tropopause,
-                  P0 * (T / T0) ** (-g0 / (a * R)),
-                  P_trop * sp.exp(-g0 * (h - h_tropopause) / (R * T_tropopause)))
+    #P = co.switch(h < h_tropopause,
+    #              P0 * (T / T0) ** (-g0 / (a * R)),
+    #              P_trop * ops.exp(-g0 * (h - h_tropopause) / (R * T_tropopause)))
 
     # Density from ideal gas law
+    rho = variable()
     rho = P / (R * T)
 
     # Speed of sound
+    a_sound = variable()
     a_sound = ops.sqrt(gamma * R * T)
 
 
@@ -199,6 +210,8 @@ class SC(co.ExplicitSystem):'''
 # ------------------------------------------------------- #
 
 #Trajectory
+
+#All of this is adapted from the condor glider example, not right rn (and not mine)
 
 class Glider(co.ODESystem):
     r = state()
