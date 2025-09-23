@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import scipy as sp
 from condor.backend import operators as ops
 
-from aerodynamics import *
-from thermal import *
+#from aerodynamics import *
+#from thermal import *
 
 """This script optimizes the a blunted cone. It's base is taken from the condor glider example.
 
@@ -80,7 +80,7 @@ class Glider(co.ODESystem):
     CD_i_q = parameter()
     g = parameter()
 
-    CL = CL_alpha * alpha
+    CL = 
     CD = CD_0 + CD_i_q * CL**2
 
     dot[r] = v * ops.cos(gamma)
@@ -148,6 +148,13 @@ class GlideOpt(co.OptimizationProblem):
         warm_start=False,
     )
 
+    cl = variable(
+        initializer=0.11,
+        lower_bound=0.01,
+        upper_bound=1,
+        warm_start=False,
+    )
+
     # alpha_coeff_2 = variable(
     #     initializer=0.001,
     #     lower_bound=-1,
@@ -157,13 +164,13 @@ class GlideOpt(co.OptimizationProblem):
 
     A = 3e-1
 
-    sim = AlphaSim(CL_alpha=0.11 * A, CD_0=0.05 * A, CD_i_q=0.05, g=1.0, 
+    sim = AlphaSim(CL_alpha=cl, CD_0=0.05 * A, CD_i_q=0.05, g=1.0, 
                    alpha_coeff_0=alpha_coeff_0, alpha_coeff_1=alpha_coeff_1, alpha_coeff_2=0.)#alpha_coeff_2)
     
     objective = sim.max_r
 
-    constrain = sim.max_h <= 110.0
-    constrain = sim.v >= 20.0
+    constrain(sim.max_h <= 110.0)
+    constrain(sim.v >= 20.0)
 
 
     class Options:

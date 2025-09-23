@@ -74,8 +74,14 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     L = parameter()  #length of cone
     Rb = variable()  #base radius
     Rb = L * ops.tan(phi)  #base radius
+    zeta = variable()  #bluntness ratio
+    zeta = Rn / Rb  #bluntness ratio
     A_ref = variable()  #reference area
     A_ref = ops.pi * Rb**2  #reference area, m^2
+    SA = variable()  #surface area
+    SA = ops.pi * Rn * (Rn + ops.sqrt(L**2 + Rb**2))  #surface area, m^2 
+    #double check SA
+    
 
     #flight conditions
     h = parameter() #height
@@ -104,9 +110,11 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     q_dot = 7.207 * rho**0.47 * Rn**(-0.54) * V**3.5   #convective heat rate, W/m^2. See equation 4, https://ntrs.nasa.gov/api/citations/20200002354/downloads/20200002354.pdf
 
     CDf = variable() # viscous Cd
-    CDf = 
+    CDf = SA*0.664/sqrt(Re) #this is for a low speed laminar flat plate. It needs to be updated. Equation 6.75 from anderson is a better model
+    
     CDp = variable() # pressure Cd
-    CDp = 
+    CDp = #modified newtonian theory https://apps.dtic.mil/sti/tr/pdf/AD0631149.pdf
+    
     CD = variable() # total Cd
     CD = CDf + CDp
 
