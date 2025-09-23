@@ -113,7 +113,7 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     CDf = SA*0.664/sqrt(Re) #this is for a low speed laminar flat plate. It needs to be updated. Equation 6.75 from anderson is a better model
     
     CDp = variable() # pressure Cd
-    CDp = #modified newtonian theory https://apps.dtic.mil/sti/tr/pdf/AD0631149.pdf
+    CDp = CN....#modified newtonian theory https://apps.dtic.mil/sti/tr/pdf/AD0631149.pdf
     
     CD = variable() # total Cd
     CD = CDf + CDp
