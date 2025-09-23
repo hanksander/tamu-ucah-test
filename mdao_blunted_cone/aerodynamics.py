@@ -113,5 +113,5 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     CL = variable()
 
     Clalpha = variable()
-    CLalpha = 
+    CLalpha = 1.1 #close enough (I have a citation I promise)
 
