@@ -104,6 +104,11 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     mu_freestream = 1.7894e-5 * (T_freestream / 273.15)**(3/2) * (273.15 + 110.4)/(T_freestream + 110.4)  #Sutherland's formula for dynamic viscosity, at T atmos
     Re = variable()
     Re = rho * V * (2 * Rn) / (mu)  #Reynolds number
+    K = 1.82 / 4 # proportionality constant
+    Cn = variable()
+    Cn = ((K * Rb**2) / A_ref) * ((ops.pi * ops.sin(alpha) * ops.cos(alpha) * ops.cos(phi)**2 * (1 - (zeta**2/2)*ops.cos(phi)**2)))
+    Ca = variable()
+    Ca = ((K * Rb**2) / A_ref) * ((ops.pi / 2)*(1 - (zeta**2/2)*ops.cos(phi)**2) * (2 * ops.cos(alpha)**2 * ops.sin(phi)**2 + ops.sin(alpha)**2 * ops.cos(phi)**2) + (zeta**2 * ops.cos(alpha)**2 * ops.cos(phi)**2))
 
     #aerodynamic coefficients
     q_dot = variable()
@@ -113,7 +118,7 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     CDf = SA*0.664/sqrt(Re) #this is for a low speed laminar flat plate. It needs to be updated. Equation 6.75 from anderson is a better model
     
     CDp = variable() # pressure Cd
-    CDp = CN....#modified newtonian theory https://apps.dtic.mil/sti/tr/pdf/AD0631149.pdf
+    CDp = Cn * ops.sin(alpha) + Ca * ops.cos(alpha) #modified newtonian theory https://apps.dtic.mil/sti/tr/pdf/AD0631149.pdf
     
     CD = variable() # total Cd
     CD = CDf + CDp
