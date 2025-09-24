@@ -124,6 +124,7 @@ class HypersonicBluntedConeAero(co.ExplicitSystem):
     CD = CDf + CDp
 
     CL = variable()
+    CL = Cn * ops.cos(alpha) - Ca * ops.sin(alpha)
 
     Clalpha = variable()
     CLalpha = 1.1 #close enough (I have a citation I promise)
