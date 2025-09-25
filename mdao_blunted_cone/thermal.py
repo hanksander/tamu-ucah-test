@@ -1,3 +1,9 @@
+import condor as co
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy as sp
+from condor.backend import operators as ops
+
 class Thermal(co.ODESystem):
     """
     Simple thermal model with convective heating.

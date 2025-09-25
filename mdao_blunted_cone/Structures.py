@@ -1,5 +1,106 @@
 # do mass properties here for now
+import condor as co
 import numpy as np
+import matplotlib.pyplot as plt
+import scipy as sp
+from condor.backend import operators as ops
+
+
+class ConeShellMass(co.ExplicitSystem):
+    """
+    Mass of a conical shell with finite thickness and rounded nose.
+    """
+    phi = input()       # cone half angle [rad]
+    r_cone = input()   # base radius [m]
+    r_nose = input()    # nose radius [m]
+    thickness = input() # shell thickness [m]
+    rho = input()       # material density [kg/m^3]
+
+    m = 2 * ops.pi * thickness * (
+        -r_nose * (2 * phi - ops.pi) / 2
+        + ops.sqrt((r_cone - r_nose * ops.cos(phi))**2 / ops.sin(phi)**2)
+    ) * rho
+
+    output.m = m
+
+
+class ConeShellCG(co.ExplicitSystem):
+    """
+    Center of gravity of a conical shell with a rounded nose.
+    """
+    phi = input()
+    r_cone = input()
+    r_nose = input()
+
+    cg = -(r_cone * ops.cos(phi) + r_nose * ops.sin(phi) - r_nose)**2 / (
+        (r_nose * (2 * phi - ops.pi)
+         - 2 * ops.sqrt((r_cone - r_nose * ops.cos(phi))**2 / ops.sin(phi)**2))
+        * ops.sin(phi)**2
+    )
+
+    output.cg = cg
+
+
+# class PayloadCG(co.ExplicitSystem):
+#     """
+#     Center of mass location of payload, assuming it sits as far forward
+#     as possible for stability.
+#     """
+#     phi = input()
+#     r_cone = input()
+#     r_nose = input()
+
+#     payload_radius = 0.0640 / 2  # m
+#     payload_length = 0.161       # m
+
+#     cond1 = r_nose**2 - payload_radius**2 >= 0
+#     x_payload = ops.if_else(
+#         cond1,
+#         ops.sqrt(r_nose**2 - payload_radius**2) + r_nose,
+#         (payload_radius - r_nose * ops.sin(ops.pi / 2 - phi)) / ops.tan(phi)
+#         + r_nose * (1 - ops.cos(ops.pi / 2 - phi)),
+#     )
+
+#     cg = x_payload + payload_length / 2
+
+#     output.cg = cg
+
+
+class OverallCG(co.ExplicitSystem):
+    """
+    Overall CG along the X axis given multiple components.
+    NOTE: CG measured from the tip of the nose.
+    """
+    m_aero = input()  # aeroshell mass
+    x_aero = input()  # aeroshell CG
+
+    m_payload = input()  # payload mass
+    x_payload = input() # payload CG
+
+    num = m_aero * x_aero + m_payload * x_payload
+    den = m_aero + m_payload
+    cg_total = num / den
+
+    output.cg = cg_total
+
+if __name__ == "__main__":
+    # test mass and cg calculations
+    phi = np.deg2rad(14)
+    r_cone = 0.2
+    r_nose = 0.01
+
+    mass_test = ConeShellMass(
+        phi=phi,
+        r_cone=r_cone,
+        r_nose=r_nose,
+        thickness=0.005,
+        rho=2700,
+    )
+    print("\nCone Shell Mass:")
+    print(mass_test.output)
+
+
+'''
 
 class MassElement:
     def __init__(self, m, x, y, z):
@@ -93,3 +194,4 @@ print(f'overall CG: {CG(payload, aeroshell)}')
 #   consider effeccts of thickness
 #   consider effects of variable thickness (perhaps thicker near the faces experiencing most heating per mass)
 
+'''
