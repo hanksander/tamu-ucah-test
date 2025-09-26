@@ -81,8 +81,8 @@ class Glider(co.ODESystem):
     L = parameter()  # length of cone
 
     aero = HypersonicBluntedConeAero(Rn=Rn, phi=phi, L=L, h=h, V=v, alpha=alpha)
-    #mass = ConeShellMass(phi=phi, r_cone=L*ops.tan(phi), r_nose=Rn, thickness=0.0005, rho=1500)
-    mass = 25
+    mass = ConeShellMass(phi=phi, r_cone=L*ops.tan(phi), r_nose=Rn, thickness=0.005, rho=1500)
+    #mass = 25
 
     g = 9.81  # m/s^2
     #rho = atm_lookup(h=h).rho
@@ -91,15 +91,15 @@ class Glider(co.ODESystem):
 
     L =  rho* v**2 * aero.A_ref * aero.CL / 2
     D = rho * v**2 * aero.A_ref * aero.CD / 2
-    #W = mass.m * g
-    W = mass*g
+    W = mass.m * g
+    #W = mass*g
 
     dot[r] = v * ops.cos(gamma)
     dot[h] = v * ops.sin(gamma)
-    #dot[gamma] = (L - W * ops.cos(gamma)) / (v * mass.m)
-    #dot[v] = -D/mass.m - g * ops.sin(gamma)
-    dot[gamma] = (L - W * ops.cos(gamma)) / (v * mass)
-    dot[v] = -D/mass - g * ops.sin(gamma)
+    dot[gamma] = (L - W * ops.cos(gamma)) / (v * mass.m)
+    dot[v] = -D/mass.m - g * ops.sin(gamma)
+    #dot[gamma] = (L - W * ops.cos(gamma)) / (v * mass)
+    #dot[v] = -D/mass - g * ops.sin(gamma)
 
     initial[r] = 0.0
     initial[h] = 8000
@@ -226,7 +226,7 @@ class GlideOpt(co.OptimizationProblem):
     objective = sim.max_r
 
     constrain = sim.max_h <= 9000
-    
+
     #constrain(sim.v >= 20.0)
 
 

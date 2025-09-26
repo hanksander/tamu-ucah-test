@@ -41,29 +41,27 @@ class ConeShellCG(co.ExplicitSystem):
     output.cg = cg
 
 
-# class PayloadCG(co.ExplicitSystem):
-#     """
-#     Center of mass location of payload, assuming it sits as far forward
-#     as possible for stability.
-#     """
-#     phi = input()
-#     r_cone = input()
-#     r_nose = input()
+class PayloadCG(co.ExplicitSystem):
+    """
+    Center of mass location of payload, assuming it sits as far forward
+    as possible for stability.
+    """
+    phi = input()
+    r_cone = input()
+    r_nose = input()
 
-#     payload_radius = 0.0640 / 2  # m
-#     payload_length = 0.161       # m
+    payload_radius = 0.0640 / 2  # m
+    payload_length = 0.161       # m
 
-#     cond1 = r_nose**2 - payload_radius**2 >= 0
-#     x_payload = ops.if_else(
-#         cond1,
-#         ops.sqrt(r_nose**2 - payload_radius**2) + r_nose,
-#         (payload_radius - r_nose * ops.sin(ops.pi / 2 - phi)) / ops.tan(phi)
-#         + r_nose * (1 - ops.cos(ops.pi / 2 - phi)),
-#     )
+    cond1 = r_nose**2 - payload_radius**2 >= 0
+    x_payload = ops.if_else(
+        (cond1, ops.sqrt(r_nose**2 - payload_radius**2) + r_nose),
+        (payload_radius - r_nose * ops.sin(ops.pi / 2 - phi)) / ops.tan(phi) + r_nose * (1 - ops.cos(ops.pi / 2 - phi)),
+    )
 
-#     cg = x_payload + payload_length / 2
+    cg = x_payload + payload_length / 2
 
-#     output.cg = cg
+    output.cg = cg
 
 
 class OverallCG(co.ExplicitSystem):
