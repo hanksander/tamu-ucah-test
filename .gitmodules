@@ -1,0 +1,3 @@
+[submodule "openvsp"]
+	path = openvsp
+	url = https://github.com/the-real-josh/vehicle-VSP-interface
