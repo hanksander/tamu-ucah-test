@@ -49,6 +49,11 @@ k_s = co.input()  # W/(m·K) effective through-thickness conductivity
 L_thk = co.input()  # m wall/TPS thickness
 T_back = co.input()  # K back-face/structure temp target/limit
 
+#Transpiration cooling params
+mdot_pp = co.input()     # mass flux of coolant (kg/m²·s)
+cp_cool = co.input()     # coolant specific heat (J/kg·K)
+T_c_out = co.input()     # coolant exit temp (K)
+
 
 class StagHeating(co.AlgebraicSystem):
     # design variables
@@ -56,11 +61,12 @@ class StagHeating(co.AlgebraicSystem):
     eps = co.variable(initializer=0.85, lower_bound=0.5,  upper_bound=0.98) # emissivity (wall properties)
 
     # wall temp 
-    Tw  = co.variable(initializer=800.0, lower_bound=250.0, upper_bound=3000.0)  # K
+    Tw  = co.variable(initializer=1000.0, lower_bound=250.0, upper_bound=2000.0)  # K
 
     q_conv  = co.output()
     q_rerad = co.output()
     q_cond  = co.output()
+    q_trans = co.output()
     q_net = co.output()
 
     # freestream conditions
@@ -71,6 +77,7 @@ class StagHeating(co.AlgebraicSystem):
     co.residual(q_conv  == k_SG * ops.sqrt(rho_inf / Rn) * V_inf**3) #Sutton-Graves law convective heating
     co.residual(q_rerad == eps * sigmaSB * Tw**4) #stefan-boltzmann law radiative cooling
     co.residual(q_cond  == (k_s / L_thk) * (Tw - T_back)) #conduction cooling
+    co.residual(q_trans == mdot_pp * cp_cool * (Tw - T_c_out)) #Transpiration Cooling
   
     co.residual(q_net == q_conv - (q_rerad + q_cond)) #energy balance
 
