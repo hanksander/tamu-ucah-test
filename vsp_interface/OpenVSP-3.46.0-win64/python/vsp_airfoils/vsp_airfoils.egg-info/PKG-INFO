@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: vsp_airfoils
+Version: 0.0.0
+Requires-Dist: numpy>=1.7
+Requires-Dist: matplotlib
+Dynamic: requires-dist

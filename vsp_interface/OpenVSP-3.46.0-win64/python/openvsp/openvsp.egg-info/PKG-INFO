@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: openvsp
+Version: 3.46.0
+Summary: OpenVSP Python Wrapper
+Author: Uber Technologies
+Author-email: 
+License: MIT
+Requires-Dist: degen_geom
+Requires-Dist: utilities
+Requires-Dist: openvsp_config
+Dynamic: author
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: summary
