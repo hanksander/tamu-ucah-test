@@ -57,32 +57,6 @@ def extract_geometry_from_dir(dirname, prefix="waverider"):
     parts = dirname.replace(prefix + "_", "").split("_")
     return {f"x{i+1}": int(p) for i, p in enumerate(parts)}
 
-
-# def extract_geometry_from_dir(dirname, prefix="waverider"):
-#     """
-#     Extracts geometry parameters from directory name.
-#     Supports both integer and floating-point geometry identifiers.
-
-#     Examples:
-#         waverider_4_2_3     -> {"x1": 4.0, "x2": 2.0, "x3": 3.0}
-#         waverider_0.2_1.2_3 -> {"x1": 0.2, "x2": 1.2, "x3": 3.0}
-#     """
-#     pattern = re.escape(prefix) + r"_(.*)"
-#     match = re.match(pattern, dirname)
-#     if not match:
-#         return {}
-
-#     suffix = match.group(1)
-#     parts = suffix.split("_")
-
-#     geom = {}
-#     for i, part in enumerate(parts):
-#         try:
-#             geom[f"x{i+1}"] = float(part)
-#         except ValueError:
-#             geom[f"x{i+1}"] = np.nan
-#     return geom
-
 def collect_data_across_dirs(param, model_prefix="waverider"):
     all_data = []
 
