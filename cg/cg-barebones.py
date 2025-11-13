@@ -5,7 +5,7 @@ import vedo # it looks
 stl = 'test.stl' # path to the STL file
 class Waverider:
     def __init__(self, stl_fname):
-        self.mesh = vedo.mesh(stl_fname)
+        self.mesh = vedo.Mesh(stl_fname)
 
         self.additional_masses = [] # list of dictionaries with the data for all the components in the aircraft
 
