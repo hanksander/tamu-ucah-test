@@ -1,5 +1,5 @@
 import numpy as np
-import vedo
+import vedo # it looks
 
 
 stl = 'test.stl' # path to the STL file
