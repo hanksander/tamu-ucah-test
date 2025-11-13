@@ -1,5 +1,0 @@
-vsp_airfoils
-numpy
-scipy
-utilities
-fortranformat

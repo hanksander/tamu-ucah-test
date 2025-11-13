@@ -1,8 +1,0 @@
-setup.py
-vsp_airfoils/__init__.py
-vsp_airfoils/vsp_airfoils.py
-vsp_airfoils.egg-info/PKG-INFO
-vsp_airfoils.egg-info/SOURCES.txt
-vsp_airfoils.egg-info/dependency_links.txt
-vsp_airfoils.egg-info/requires.txt
-vsp_airfoils.egg-info/top_level.txt
