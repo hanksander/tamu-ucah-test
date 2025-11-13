@@ -450,7 +450,7 @@ class RocketBoostEOM(om.ExplicitComponent):
         CD = self.model_list[0].predict(self.scalers['X_scaler'].transform(
             np.column_stack((
                 outputs['Mach'],
-                q/10E5, #convert to bar
+                q/1E5, #convert to bar
                 alpha,
                 np.zeros_like(h),  # beta = 0 for 2D
             ))))
@@ -458,7 +458,7 @@ class RocketBoostEOM(om.ExplicitComponent):
         q_dot = self.model_list[3].predict(self.scalers['X_scaler'].transform(
             np.column_stack((
                 outputs['Mach'],
-                q/10E5, #convert to bar
+                q/1E5, #convert to bar
                 alpha,
                 np.zeros_like(h),  # beta = 0 for 2D
             ))))
