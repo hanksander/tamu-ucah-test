@@ -1,20 +1,30 @@
+
+
+# notes
+# pip install trimesh
+# pip install "pyglet<2"
+
 # goals:
  # see if payload stl fits inside vehicle
  # calculate CG
-import vedo
-import os
+import os as os
 import numpy as np
 import scipy as sp
+import trimesh as tm
 
 class WaveriderCase:
     def __init__(self, mesh_stl_fname):
         assert os.path.exists(f'cg'), "TAMU-UCAH must be the CWD"
-        self.vehicle_mesh = vedo.Mesh(f'cg/{mesh_stl_fname}')    
-        self.payload_mesh = vedo.Mesh(r'cg\\payload.stl')
+        self.vehicle_mesh = tm.load_mesh(f'cg/{mesh_stl_fname}')    
+        self.payload_mesh = tm.load_mesh(f'cg/payload.stl')
 
-        self._payload_rotation = 0.0 # current position of the cylinder in radians
-        c = self.vehicle_mesh.center_of_mass() # default position is the center of mass of the vehicle
-        self.payload_mesh.pos(x=c[0], y=c[1], z=c[2])
+        # snap the payload to the centroid of the vehicle
+        c=self.vehicle_mesh.centroid
+        to_coincide_centroids = c - self.payload_mesh.centroid
+        print(f'moving {to_coincide_centroids} to make centroids coincident')
+        self.payload_mesh.apply_translation(to_coincide_centroids)
+
+        self.vehicle_volume = self.vehicle_mesh.volume
 
         # all masses that are not the vehicle's aeroshell go here for 
         self.additional_masses = [{"fname":"payload.stl",
@@ -22,97 +32,58 @@ class WaveriderCase:
                                        "pos":[c[0], c[1], c[2]]
                                        }]
 
-    # rotation tracking (not currently used)
-    @property
-    def payload_rotation(self):
-        return self._payload_rotation
-    @payload_rotation.setter
-    def payload_rotation_setter(self, value):
-        # put it back then rotate to new
-        self.payload_mesh.rotate_y(-self._payload_rotation + value)
-        self._payload_rotation = value
 
     # grapher (for debugging)
     def graph(self):
-        """graphs the payload and vehicle with Vedo"""
-        plt = vedo.Plotter(title="Multiple STL files", axes=1)
-        print(f'about to show...')
-        plt.show([self.payload_mesh, self.vehicle_mesh.alpha(0.5)], interactive=True)
-
-    # interferance checkers
-    def __intersection_len__(self):
-        """Returns float length of the intersection curve between the payload and the geometry"""
-        intersection = self.vehicle_mesh.intersect_with(self.payload_mesh).points
-        if len(intersection) in [0, 1]:
-            return 0.0
-        dist = lambda p1, p2: np.sqrt(np.dot(np.array(p1)-np.array(p2), np.array(p1)-np.array(p2))) # distance between points in n-D space
-        length = sum([dist(intersection[i], intersection[i+1]) for i in range(len(intersection)-1)])
-        return length
-    
-    def payload_clears(self):
-        """return boolean 
-            True the payload fits in its current without intersecting the vehicle
-            False if else"""
-        if np.isclose(self.__intersection_len__(), 0):
-            return True # if there is no intersection curve, then yea it clears!
-        else:
-            return True
-        
-    def payload_inside(self):
-        """Returns boolean
-            True if the centroid of the payload is inside the vehicle"""
-        # make a vector from payload centroid to infinity
-        # if the vector crosses an odd number of borders then it's inside
-        p_CG = self.payload_mesh.center_of_mass()
-        ray_intersections = self.vehicle_mesh.intersect_with_line(p_CG, np.array([1000.0, 0.0, 0.0], dtype=float))
-        if len(ray_intersections)%2==1:
-            return True
-        return False
+        # needs "pyglet<2"
+        total_mesh = self.vehicle_mesh.union(self.payload_mesh)
+        total_mesh.show()
     
     def payload_fit(self):
         """returns boolean 
-            True if the payload both clears and is inside the vehicle
-            False if the payload does not meet either one of the criteria"""
-        if self.payload_clears() and self.payload_inside():
-            return True
-        return False
+            True if the payload fits entirely inside the vehicle
+            False if it does not
+            """
+        combined = self.vehicle_mesh.union(self.payload_mesh)
+        return np.isclose(self.vehicle_volume, combined.volume)
     
-    def try_fit_payload(self):
+    def try_fit_payload(self, verbose=False):
         def F(params):
-            """function to be minimized
-            punishment terms for:
-                1) being outside the vehicle
-                2) clipping through the vehicle
-
-
-            returns whether it was able to get it to fit
+            """function to be minimized. Is the volume of the payload that sticks outside the vehicle
             """
             x, z = params
-            # change the location of the payload
-            self.payload_mesh.pos(x=x,y=0,z=z)
-            
-            interferance = self.__intersection_len__()
+            # change the absolute location of the payload
+            current_centroid = self.payload_mesh.centroid
+            target_centroid = np.array([x, current_centroid[1], z])
+            tran_vec = target_centroid - current_centroid
+            self.payload_mesh.apply_translation(tran_vec)
 
-            if self.payload_fit():
-                exclusion = 0
-            else:
-                d = self.payload_mesh.center_of_mass() - self.vehicle_mesh.center_of_mass() # type: ignore
-                exclusion = np.dot(d, d) + 10
-            
-            return interferance + exclusion 
-        res = sp.optimize.minimize(F, [0.0, 0.0], method="Powell") 
-        print(f'x, z = {res.x}\n'
-              f'successful? {res.success}\n'
-              f'statusmmsg: {res.status}\n'
-              f'function: {res.fun}')
-        if np.isclose(res.fun, 0.0):
+            # do the join and get the volume
+            bool_mesh = self.vehicle_mesh.union(self.payload_mesh)
+            return bool_mesh.volume - self.vehicle_volume
+
+        starting_pt = self.vehicle_mesh.centroid
+        res = sp.optimize.minimize(F, [starting_pt[0], starting_pt[2]], method="tnc", tol=1e-5) 
+        # CG - 8 seconds
+        # tnc - <1 second
+        # Powell - 51 seconds
+        # BFGS - >15 seconds
+
+        if verbose:
+            print(f'x, z = {res.x}\n'
+                f'successful? {res.success}\n'
+                f'statusmmsg: {res.status}\n'
+                f'function: {res.fun}')
+        is_zero = lambda x: bool(np.abs(x)<5e-5)
+        if is_zero(res.fun):
             return True
         else:
             return False
             
 
-    # shell CG + payload
+    # shell CG + payload (requires vedo)
     def get_cg(self):
+
         """Calculate the CG of the vehicle based on the VSP file and all included additional masses"""
         def material_thickness(x,y,z):
             """return the estimated thickness of the material. Should be proportional to the aerodynamic heating.
@@ -142,9 +113,9 @@ class WaveriderCase:
             """a mesh object is a series of triangles. 
             We will calculate the centroid and size of each of the triangles in order to do calculate the shell-center of area of the craft.
             returns the center of area and the surface area"""
-
-            mesh = self.vehicle_mesh
-            mesh.triangulate # type:  ignore
+            import vedo
+            mesh = vedo.Mesh(f'cg/{mesh_stl_fname}')    
+            self.payload_mesh = vedo.Mesh(r'cg\\payload.stl')            mesh.triangulate # type:  ignore
             points = mesh.points # type: ignore
             face_indeces = mesh.cells # type: ignore
             faces = points[face_indeces]
@@ -225,19 +196,16 @@ class WaveriderCase:
 
 def __test__():
     inst = WaveriderCase('example.stl')
-    # inst.__intersection_len__()
-    # print(f'payload inside: {inst.payload_inside()}\n'
-    #       f'payload interfere: {inst.payload_clears()}\n'
-    #       f'payload fit: {inst.payload_fit()}')
-    inst.graph()
-    inst.try_fit_payload()
-    print(f'payload inside: {inst.payload_inside()}\n'
-          f'payload clears: {inst.payload_clears()}\n'
-          f'payload fit: {inst.payload_fit()}')
-    print(inst.get_cg())
+
+    print(f'beginning case:\n'
+          f'payload fit? {'yes' if inst.payload_fit() else 'no'}\n')
+
+    print(f'fitting payload...')
+    successful = inst.try_fit_payload(verbose=True)
+
+    print(f'{'successful!' if successful else "failed"}')
     inst.graph()
 
 if __name__ == "__main__":
     __test__()
-    
     
