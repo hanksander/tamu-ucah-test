@@ -203,202 +203,338 @@ def generate_parametric_body_point_cloud(body, n_axial=100, n_circumferential=60
     
     return points, grid
 
-
-def triangulate_parametric_body(grid, add_nose_cap=True, add_tail_cap=True):
+def orient_triangle_normals(vertices, triangles):
     """
-    Triangulate parametric body including cut plane bottom.
-    
-    FIXED: Better handling of degenerate quads and nose/tail caps
-    
-    Returns
-    -------
-    vertices : np.ndarray
-    triangles : np.ndarray
+    Ensure triangle winding so that normals point outward (radially).
+    For each triangle compute normal = cross(v1-v0, v2-v0) and centroid.
+    If dot(normal, centroid_radial) < 0 flip the triangle.
+    """
+    verts = vertices
+    tris = triangles.copy()
+    for i in range(len(tris)):
+        a, b, c = tris[i]
+        v0 = verts[a]; v1 = verts[b]; v2 = verts[c]
+        normal = np.cross(v1 - v0, v2 - v0)
+        # centroid
+        cent = (v0 + v1 + v2) / 3.0
+        # radial direction from axis (ignore x-axis)
+        radial = np.array([0.0, cent[1], cent[2]])
+        # if radial is near zero (centroid on axis), use small perturbation in Y
+        if np.linalg.norm(radial) < 1e-12:
+            radial = np.array([0.0, 1.0, 0.0])
+        if np.dot(normal, radial) < 0:
+            # flip winding
+            tris[i] = [a, c, b]
+    return tris
+
+
+def triangulate_parametric_body(grid, add_nose_cap=True, add_tail_cap=True, clip_tol=1e-12):
+    """
+    Triangulate parametric body including robust clipping for a flat bottom (z = z_cut).
+    This implementation clips each quad against the cut plane and reuses intersection
+    vertices for shared edges to guarantee consistent connectivity.
     """
     n_axial = grid['n_axial']
     n_circ = grid['n_circumferential']
-    
+
     X = grid['X']
     Y = grid['Y']
     Z = grid['Z']
     R_y = grid['R_y']
-    
+
     vertices_body = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
-    
-    # Triangulate body surface
+
     triangles_body = []
-    
-    for i in range(n_circ):
-        i_next = (i + 1) % n_circ
-        
-        for j in range(n_axial - 1):
-            v0 = i * n_axial + j
-            v1 = i * n_axial + (j + 1)
-            v2 = i_next * n_axial + j
-            v3 = i_next * n_axial + (j + 1)
-            
-            # Get quad vertices
-            pts = vertices_body[[v0, v1, v2, v3]]
-            
-            # Check if quad is degenerate (all points nearly coincident)
-            quad_size = np.max(np.linalg.norm(pts - pts.mean(axis=0), axis=1))
-            if quad_size < 1e-10:
-                continue  # Skip degenerate quad
-            
-            # Check for degenerate edges (radius near zero at one end)
-            r_j = R_y[i, j]
-            r_j1 = R_y[i, j+1]
-            
-            if r_j < 1e-10 and r_j1 > 1e-10:
-                # Collapsed at j, triangle fan from v0
-                triangles_body.append([v0, v1, v3])
-                triangles_body.append([v0, v3, v2])
-            elif r_j1 < 1e-10 and r_j > 1e-10:
-                # Collapsed at j+1, triangle fan from v1
-                triangles_body.append([v1, v2, v0])
-                triangles_body.append([v1, v3, v2])
-            elif r_j > 1e-10 and r_j1 > 1e-10:
-                # Normal quad, split into two triangles
-                triangles_body.append([v0, v1, v2])
-                triangles_body.append([v2, v1, v3])
-            # else: both radii near zero, skip
-    
-    triangles_body = np.array(triangles_body) if triangles_body else np.zeros((0, 3), dtype=int)
-    
-    all_vertices = [vertices_body]
-    all_triangles = [triangles_body] if len(triangles_body) > 0 else []
-    
-    # Add nose cap
+    all_vertices = [vertices_body.copy()]  # list of arrays (we'll vstack at end)
+    # We'll collect extra vertices (intersection points, caps) into extra_vertices list
+    extra_vertices = []
+    extra_triangles = []
+
+    # Helper to add/reuse vertex for intersection points
+    intersection_map = {}  # edge_key -> index (global index in final array will be offset)
+    # We'll store intersection points in extra_vertices and map keys to their index (relative to final after stacking)
+    # But we need a consistent local indexing while building triangles. We'll keep intersections indexed relative
+    # to the extra_vertices array and convert later by adding base offset.
+
+    # local list of triangles referencing body indices (initially body-only indices)
+    triangles_local = []
+
+    # Precompute a small function to get 1D index
+    def vid(i_theta, j_axial):
+        return i_theta * n_axial + j_axial
+
+    z_cut = grid.get('z_cut', None)
+    has_cut = grid.get('has_cut', False)
+
+    # Tolerance check lambda
+    def is_above(z):
+        # consider points at or above plane as "kept"
+        return (z - z_cut) >= -clip_tol
+
+    # If no cut -> simple quad split like before
+    if (not has_cut) or (z_cut is None):
+        for i in range(n_circ):
+            i_next = (i + 1) % n_circ
+            for j in range(n_axial - 1):
+                v0 = vid(i, j)
+                v1 = vid(i, j + 1)
+                v2 = vid(i_next, j)
+                v3 = vid(i_next, j + 1)
+
+                r_j = R_y[i, j]
+                r_j1 = R_y[i, j+1]
+
+                # if r_j < 1e-10 and r_j1 > 1e-10:
+                #     triangles_local.append([v0, v1, v3])
+                #     triangles_local.append([v0, v3, v2])
+                if r_j > 1e-10 and r_j1 > 1e-10:
+                    # Normal quad, reversed winding to fix normals
+                    triangles_body.append([v0, v2, v1])
+                    triangles_body.append([v2, v3, v1])
+                elif r_j1 < 1e-10 and r_j > 1e-10:
+                    triangles_local.append([v1, v2, v0])
+                    triangles_local.append([v1, v3, v2])
+                elif r_j > 1e-10 and r_j1 > 1e-10:
+                    triangles_local.append([v0, v1, v2])
+                    triangles_local.append([v2, v1, v3])
+                # else both tiny -> skip
+        # We'll handle caps later (nose/tail), same as previous logic
+    else:
+        # Clipping logic: iterate quads and clip with plane z=z_cut
+        # We'll also store intersection vertices in extra_vertices and reuse them via intersection_map.
+        # For each quad, get its 4 points in consistent order (v0,v1,v3,v2) forming a loop.
+        for i in range(n_circ):
+            i_next = (i + 1) % n_circ
+            for j in range(n_axial - 1):
+                quad_idx = [vid(i, j), vid(i, j + 1), vid(i_next, j + 1), vid(i_next, j)]
+                quad_pts = [vertices_body[idx] for idx in quad_idx]
+                quad_z = [p[2] for p in quad_pts]
+                above_flags = [is_above(z) for z in quad_z]
+
+                if all(above_flags):
+                    # keep the two triangles as before (no clipping)
+                    # use same splitting ordering as earlier for consistency
+                    v0, v1, v3, v2 = quad_idx[0], quad_idx[1], quad_idx[2], quad_idx[3]
+                    r_j = R_y[i, j]
+                    r_j1 = R_y[i, j+1]
+                    if r_j < 1e-10 and r_j1 > 1e-10:
+                        triangles_local.append([v0, v1, v3])
+                        triangles_local.append([v0, v3, v2])
+                    elif r_j1 < 1e-10 and r_j > 1e-10:
+                        triangles_local.append([v1, v2, v0])
+                        triangles_local.append([v1, v3, v2])
+                    elif r_j > 1e-10 and r_j1 > 1e-10:
+                        triangles_local.append([v0, v1, v2])
+                        triangles_local.append([v2, v1, v3])
+                    # else skip
+                elif not any(above_flags):
+                    # completely below plane -> skip entire quad
+                    continue
+                else:
+                    # Mixed: need to produce clipped polygon
+                    # We'll follow quad in loop order: p0,p1,p2,p3 (note ordering)
+                    poly_indices = []
+                    poly_points = []
+
+                    # There are 4 edges (p_k -> p_{k+1})
+                    for k in range(4):
+                        idx_k = quad_idx[k]
+                        p_k = vertices_body[idx_k]
+                        z_k = p_k[2]
+                        keep_k = is_above(z_k)
+                        # If vertex is above, include it
+                        if keep_k:
+                            poly_indices.append(idx_k)
+                            poly_points.append(p_k.copy())
+
+                        # Check edge to next vertex
+                        next_k = (k + 1) % 4
+                        idx_n = quad_idx[next_k]
+                        p_n = vertices_body[idx_n]
+                        z_n = p_n[2]
+                        # if edge crosses plane (one above, one below), compute intersection
+                        if (z_k - z_cut) * (z_n - z_cut) < -clip_tol:
+                            # compute t so that z = z_cut: p = p_k + t*(p_n - p_k)
+                            denom = (z_n - z_k)
+                            if abs(denom) < 1e-16:
+                                t = 0.5
+                            else:
+                                t = (z_cut - z_k) / denom
+                            t = np.clip(t, 0.0, 1.0)
+                            p_int = p_k + t * (p_n - p_k)
+                            p_int[2] = z_cut  # enforce exact plane value
+                            # Reuse intersection if present on this undirected edge
+                            edge_key = tuple(sorted((int(idx_k), int(idx_n))))
+                            if edge_key in intersection_map:
+                                inter_idx = intersection_map[edge_key]
+                            else:
+                                inter_idx = len(extra_vertices)
+                                extra_vertices.append(p_int)
+                                intersection_map[edge_key] = inter_idx
+                            # we will reference intersection by a special negative index scheme temporarily:
+                            # store as negative (-(1 + inter_idx)) to convert later
+                            poly_indices.append(-(1 + inter_idx))
+                            poly_points.append(p_int)
+
+                    # Now poly_points / poly_indices make up the clipped polygon in-order.
+                    # Remove extremely small polygons
+                    if len(poly_points) < 3:
+                        continue
+
+                    # Triangulate polygon by fan from first point (sufficient for clipped quads)
+                    # But skip tiny-area triangles
+                    for kk in range(1, len(poly_indices) - 1):
+                        ia = poly_indices[0]
+                        ib = poly_indices[kk]
+                        ic = poly_indices[kk + 1]
+
+                        # Convert indices to actual vertex positions (handle extra vertices)
+                        def resolve_index(idx):
+                            if idx >= 0:
+                                return int(idx), vertices_body[int(idx)]
+                            else:
+                                ei = - (idx + 1)
+                                return None, extra_vertices[ei]
+
+                        a_idx_body, a_pt = resolve_index(ia)
+                        b_idx_body, b_pt = resolve_index(ib)
+                        c_idx_body, c_pt = resolve_index(ic)
+
+                        # If all resolved to body indices, append directly to triangles_local
+                        if (a_idx_body is not None) and (b_idx_body is not None) and (c_idx_body is not None):
+                            tri = [a_idx_body, b_idx_body, c_idx_body]
+                            # area check
+                            area = np.linalg.norm(np.cross(b_pt - a_pt, c_pt - a_pt)) * 0.5
+                            if area > 1e-14:
+                                triangles_local.append(tri)
+                        else:
+                            # At least one vertex is from extra_vertices. We'll create triangle using global appended indices later.
+                            # For now store triangle as tuple of possibly-negative indices
+                            extra_triangles.append([ia, ib, ic])
+
+        # End quad loop
+
+    # Convert local triangles and extra triangles to global indices by stacking arrays
+    # Final vertex ordering: [vertices_body, extra_vertices, (caps/nose/tail if added later)]
+    extra_vertices_arr = np.array(extra_vertices) if extra_vertices else np.zeros((0, 3), dtype=float)
+    all_vertices_arr = np.vstack([all_vertices[0], extra_vertices_arr]) if extra_vertices_arr.size else all_vertices[0].copy()
+
+    # Build triangles list converting negative indices for extra vertices
+    triangles_out = []
+    for tri in triangles_local:
+        triangles_out.append([int(tri[0]), int(tri[1]), int(tri[2])])
+
+    base_extra_idx = len(all_vertices[0])  # offset where extra_vertices start
+
+    for tri in extra_triangles:
+        conv = []
+        for idx in tri:
+            if idx >= 0:
+                conv.append(int(idx))
+            else:
+                ei = -(idx + 1)
+                conv.append(base_extra_idx + ei)
+        # area filter
+        a, b, c = [all_vertices_arr[ii] for ii in conv]
+        area = np.linalg.norm(np.cross(b - a, c - a)) * 0.5
+        if area > 1e-14:
+            triangles_out.append(conv)
+
+    # Now handle nose and tail caps (these were previously added referencing only vertices_body indices)
+    # We'll re-create them but make sure indices are adjusted to match all_vertices_arr
+    # Nose cap
     if add_nose_cap:
         x_nose = grid['x'][0]
-        
-        # Check if nose is pointed (radius near zero)
-        first_ring = vertices_body[::n_axial][:n_circ]
-        nose_radius = np.linalg.norm(first_ring[0, 1:])  # Distance from axis
-        
+        first_ring = vertices_body[0:n_axial * n_circ:n_axial]  # first axial ring, shape (n_circ,3)
+        nose_radius = np.linalg.norm(first_ring[0, 1:])
         if nose_radius < 1e-8:
-            # Pointed nose - single apex
-            apex = np.array([[x_nose, 0, 0]])
-            apex_idx = len(vertices_body)
-            all_vertices.append(apex)
-            
-            nose_tris = []
+            apex = np.array([[x_nose, 0.0, 0.0]])
+            apex_idx = len(all_vertices_arr)
+            all_vertices_arr = np.vstack([all_vertices_arr, apex])
             for i in range(n_circ):
                 i_next = (i + 1) % n_circ
-                v1 = i * n_axial
-                v2 = i_next * n_axial
-                # Check if edge is degenerate
+                v1 = vid(i, 0)
+                v2 = vid(i_next, 0)
                 if np.linalg.norm(vertices_body[v1] - vertices_body[v2]) > 1e-10:
-                    nose_tris.append([apex_idx, v2, v1])
-            
-            if nose_tris:
-                all_triangles.append(np.array(nose_tris))
+                    triangles_out.append([apex_idx, v2, v1])
         else:
-            # Blunt nose - flat cap
-            center = np.array([[x_nose, 0, grid['Z'][0, 0]]])  # Use actual Z
-            center_idx = len(vertices_body)
-            all_vertices.append(center)
-            
-            nose_tris = []
+            center = np.array([[x_nose, 0.0, grid['Z'][0, 0]]])
+            center_idx = len(all_vertices_arr)
+            all_vertices_arr = np.vstack([all_vertices_arr, center])
             for i in range(n_circ):
                 i_next = (i + 1) % n_circ
-                v1 = i * n_axial
-                v2 = i_next * n_axial
-                # Check if triangle is degenerate
+                v1 = vid(i, 0)
+                v2 = vid(i_next, 0)
                 tri_pts = np.array([center[0], vertices_body[v1], vertices_body[v2]])
                 tri_area = np.linalg.norm(np.cross(tri_pts[1] - tri_pts[0], tri_pts[2] - tri_pts[0]))
                 if tri_area > 1e-10:
-                    nose_tris.append([center_idx, v1, v2])
-            
-            if nose_tris:
-                all_triangles.append(np.array(nose_tris))
-    
-    # Add tail cap
+                    triangles_out.append([center_idx, v1, v2])
+
+    # Tail cap
     if add_tail_cap:
-        n_verts_so_far = sum(len(v) for v in all_vertices)
         x_tail = grid['x'][-1]
-        
-        last_ring = vertices_body[n_axial-1::n_axial][:n_circ]
+        last_ring = vertices_body[n_axial - 1::n_axial][:n_circ]
         tail_radius = np.linalg.norm(last_ring[0, 1:])
-        
         if tail_radius < 1e-8:
-            # Pointed tail - single apex
-            apex = np.array([[x_tail, 0, 0]])
-            apex_idx = n_verts_so_far
-            all_vertices.append(apex)
-            
-            tail_tris = []
+            apex = np.array([[x_tail, 0.0, 0.0]])
+            apex_idx = len(all_vertices_arr)
+            all_vertices_arr = np.vstack([all_vertices_arr, apex])
             for i in range(n_circ):
                 i_next = (i + 1) % n_circ
-                v1 = i * n_axial + (n_axial - 1)
-                v2 = i_next * n_axial + (n_axial - 1)
+                v1 = vid(i, n_axial - 1)
+                v2 = vid(i_next, n_axial - 1)
                 if np.linalg.norm(vertices_body[v1] - vertices_body[v2]) > 1e-10:
-                    tail_tris.append([apex_idx, v1, v2])
-            
-            if tail_tris:
-                all_triangles.append(np.array(tail_tris))
+                    triangles_out.append([apex_idx, v1, v2])
         else:
-            # Blunt tail - flat cap
-            center = np.array([[x_tail, 0, grid['Z'][-1, -1]]])
-            center_idx = n_verts_so_far
-            all_vertices.append(center)
-            
-            tail_tris = []
+            center = np.array([[x_tail, 0.0, grid['Z'][-1, -1]]])
+            center_idx = len(all_vertices_arr)
+            all_vertices_arr = np.vstack([all_vertices_arr, center])
             for i in range(n_circ):
                 i_next = (i + 1) % n_circ
-                v1 = i * n_axial + (n_axial - 1)
-                v2 = i_next * n_axial + (n_axial - 1)
+                v1 = vid(i, n_axial - 1)
+                v2 = vid(i_next, n_axial - 1)
                 tri_pts = np.array([center[0], vertices_body[v2], vertices_body[v1]])
                 tri_area = np.linalg.norm(np.cross(tri_pts[1] - tri_pts[0], tri_pts[2] - tri_pts[0]))
                 if tri_area > 1e-10:
-                    tail_tris.append([center_idx, v2, v1])
-            
-            if tail_tris:
-                all_triangles.append(np.array(tail_tris))
-    
-    # Add flat bottom from cut plane
-    if grid['has_cut']:
-        n_verts_so_far = sum(len(v) for v in all_vertices)
-        
-        # Find vertices on cut plane
-        cut_verts_idx = np.where(np.abs(vertices_body[:, 2] - grid['z_cut']) < 1e-9)[0]
-        
-        if len(cut_verts_idx) > 2:
-            # We have a cut plane with vertices on it
-            # Triangulate the flat bottom
-            
-            # Get cut plane vertices
-            cut_verts = vertices_body[cut_verts_idx]
-            
-            # Sort by angle around centroid for proper triangulation
-            centroid = cut_verts.mean(axis=0)
-            angles = np.arctan2(cut_verts[:, 1] - centroid[1], 
-                               cut_verts[:, 0] - centroid[0])
-            sort_idx = np.argsort(angles)
-            cut_verts_sorted_idx = cut_verts_idx[sort_idx]
-            
-            # Create center point for fan triangulation
+                    triangles_out.append([center_idx, v2, v1])
+
+    # Build flat bottom cap if we have intersection vertices on plane
+    if has_cut and extra_vertices_arr.size:
+        # Intersection vertices reside in all_vertices_arr[base_extra_idx : base_extra_idx + len(extra_vertices)]
+        cut_verts_indices = list(range(base_extra_idx, base_extra_idx + len(extra_vertices)))
+        if len(cut_verts_indices) >= 3:
+            cut_pts = all_vertices_arr[cut_verts_indices]
+            # sort by angle around centroid in Y-X plane (x,y) to create consistent polygon
+            centroid = cut_pts.mean(axis=0)
+            angles = np.arctan2(cut_pts[:, 1] - centroid[1], cut_pts[:, 0] - centroid[0])
+            order = np.argsort(angles)
+            ordered_idx = [cut_verts_indices[k] for k in order]
+            # create fan triangulation (center at centroid_on_plane)
             center = centroid.copy()
-            center[2] = grid['z_cut']
-            center_idx = n_verts_so_far
-            all_vertices.append(center.reshape(1, 3))
-            
-            # Fan triangulation from center
-            bottom_tris = []
-            n_cut = len(cut_verts_sorted_idx)
-            for i in range(n_cut):
-                v1 = cut_verts_sorted_idx[i]
-                v2 = cut_verts_sorted_idx[(i + 1) % n_cut]
-                # Inward normal (pointing down, into body)
-                bottom_tris.append([center_idx, v2, v1])
-            
-            all_triangles.append(np.array(bottom_tris))
-    
-    # Combine
-    vertices = np.vstack(all_vertices)
-    triangles = np.vstack(all_triangles) if all_triangles else np.zeros((0, 3), dtype=int)
-    
-    return vertices, triangles
+            center[2] = z_cut
+            center_idx = len(all_vertices_arr)
+            all_vertices_arr = np.vstack([all_vertices_arr, center.reshape(1, 3)])
+            n_cut = len(ordered_idx)
+            for k in range(n_cut):
+                v1 = ordered_idx[k]
+                v2 = ordered_idx[(k + 1) % n_cut]
+                # triangle (center, v2, v1) to point normal inward (down) consistent with earlier code
+                tri_pts = np.array([all_vertices_arr[center_idx], all_vertices_arr[v2], all_vertices_arr[v1]])
+                area = np.linalg.norm(np.cross(tri_pts[1] - tri_pts[0], tri_pts[2] - tri_pts[0])) * 0.5
+                if area > 1e-14:
+                    triangles_out.append([center_idx, v2, v1])
+
+    # Convert triangles_out to array and orient normals
+    if len(triangles_out) == 0:
+        triangles_arr = np.zeros((0, 3), dtype=int)
+    else:
+        triangles_arr = np.array(triangles_out, dtype=int)
+
+    # Ensure triangle winding / orientation
+    triangles_arr = orient_triangle_normals(all_vertices_arr, triangles_arr)
+
+    return all_vertices_arr, triangles_arr
+
 
 
 def generate_parametric_body_mesh(body, n_axial=100, n_circumferential=60,
@@ -597,7 +733,7 @@ if __name__ == "__main__":
     print("EXAMPLE 4: Lifting Body")
     print("="*70)
     
-    lifting = create_lifting_body(length=1, max_width=0.2, z_cut=0, z_squash=0.3)
+    lifting = create_lifting_body(length=1, max_width=0.2, z_cut=-0.5, z_squash=0.3)
     v4, t4, s4 = generate_parametric_body_mesh(lifting, n_axial=100, n_circumferential=60)
     write_tri_file("lifting_body_fixed.tri", v4, t4)
     

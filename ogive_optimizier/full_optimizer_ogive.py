@@ -9,7 +9,10 @@ import numpy as np
 import scipy as sp
 import trimesh as tm
 from fit_optimizer_3 import WaveriderCase
-from simple_trajectory import run_dymos_optimization
+
+#from simple_trajectory import run_dymos_optimization
+from diff_trajectory_optimizer import run_dymos_optimization
+
 from parametric_body_generator import (
     ParametricBody, 
     generate_parametric_body_mesh,
@@ -19,7 +22,7 @@ from parameter_solver import compute_reference_parameters
 
 # ============ CONFIGURATION ============
 # Toggle features on/off
-USE_Z_SQUASH = False  # Set True to enable elliptical cross-section
+USE_Z_SQUASH = True  # Set True to enable elliptical cross-section
 USE_Z_CUT = False     # Set True to enable flat bottom cut
 
 # Default values when features are disabled
@@ -31,6 +34,10 @@ FIXED_CP_X = [0.1, 0.2, 0.45, 0.7, 1.0]
 
 # GLOBAL MAXIMUM RADIUS CONSTRAINT (meters)
 MAX_RADIUS_CONSTRAINT = 0.1  # Never exceed this radius
+
+# RESTART CAPABILITY
+ENABLE_RESTART = False  # Set True to initialize from previous run
+RESTART_LOG_FILE = "control_points.log"
 # ========================================
 
 def set_up_ogive(params):
@@ -307,7 +314,7 @@ def calculate_ogive_range(body):
     """Calculate range for ogive geometry using simple trajectory solver."""
     path = os.getcwd()
     # Use simple trajectory solver (drop-in replacement for Dymos)
-    max_range, max_q_dot = run_dymos_optimization(path, plotting=False, surrogate_type="linear")
+    max_range, max_q_dot = run_dymos_optimization(path, plotting=True, surrogate_type="linear", workers = 16)
     return max_range, max_q_dot
 
 def cost_function(range_val, max_q_dot, q_dot_limit=1200000):
@@ -645,17 +652,303 @@ def initialize_particle_near_profile(bounds, profile_blend=0.5, perturbation=0.1
     
     return position
 
+def parse_control_points_log(log_file):
+    """
+    Parse control_points.log to extract particle configurations.
+    
+    Returns:
+        list of dicts: Each dict contains 'params' and 'cost' for a particle
+    """
+    if not os.path.exists(log_file):
+        return []
+    
+    particles = []
+    
+    try:
+        with open(log_file, 'r') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Look for particle header
+            if line.startswith('=') and i + 1 < len(lines):
+                header = lines[i + 1].strip()
+                if header.startswith('Particle'):
+                    # Parse header: "Particle X | Iteration Y | Cost: Z"
+                    parts = header.split('|')
+                    if len(parts) >= 3:
+                        cost_str = parts[2].split(':')[1].strip()
+                        try:
+                            cost = float(cost_str)
+                        except:
+                            cost = float('inf')
+                        
+                        # Skip separator line
+                        i += 2
+                        
+                        # Parse geometry parameters
+                        params = {}
+                        
+                        # Look for Length and Max Radius line
+                        while i < len(lines):
+                            line = lines[i].strip()
+                            
+                            if line.startswith('Length:'):
+                                # Parse: "Length: X m | Max Radius: Y m"
+                                parts = line.split('|')
+                                length_str = parts[0].split(':')[1].strip().replace('m', '').strip()
+                                radius_str = parts[1].split(':')[1].strip().replace('m', '').strip()
+                                
+                                try:
+                                    params['length'] = float(length_str)
+                                    params['max_radius'] = float(radius_str)
+                                except:
+                                    pass
+                                
+                                i += 1
+                                break
+                            
+                            i += 1
+                        
+                        # Look for optional parameters
+                        while i < len(lines):
+                            line = lines[i].strip()
+                            
+                            if line.startswith('Z-Squash:'):
+                                try:
+                                    params['z_squash'] = float(line.split(':')[1].strip())
+                                except:
+                                    pass
+                            
+                            elif line.startswith('Z-Cut:'):
+                                try:
+                                    z_cut_str = line.split(':')[1].strip().replace('m', '').strip()
+                                    params['z_cut'] = float(z_cut_str)
+                                except:
+                                    pass
+                            
+                            elif line.startswith('Control Points'):
+                                # Skip to the table
+                                i += 2  # Skip header and separator
+                                
+                                # Skip nose point (always 0)
+                                i += 1
+                                
+                                # Parse 5 control points
+                                cp_names = ['cp1_r', 'cp2_r', 'cp3_r', 'cp4_r', 'cp5_r']
+                                for cp_name in cp_names:
+                                    if i < len(lines):
+                                        line = lines[i].strip()
+                                        parts = line.split()
+                                        if len(parts) >= 3:
+                                            try:
+                                                # Third column is r/R_max (normalized)
+                                                params[cp_name] = float(parts[2])
+                                            except:
+                                                pass
+                                        i += 1
+                                
+                                break
+                            
+                            i += 1
+                        
+                        # Check if we got valid parameters
+                        required_keys = ['cp1_r', 'cp2_r', 'cp3_r', 'cp4_r', 'cp5_r', 
+                                       'length', 'max_radius']
+                        if all(k in params for k in required_keys):
+                            particles.append({'params': params, 'cost': cost})
+                        
+                        continue
+            
+            i += 1
+        
+        print(f"  Parsed {len(particles)} particle configurations from log")
+        return particles
+    
+    except Exception as e:
+        print(f"  Warning: Error parsing log file: {e}")
+        return []
+
+def params_dict_to_position(params, bounds):
+    """
+    Convert parameter dictionary to position vector matching bounds order.
+    
+    Args:
+        params: Dictionary with keys cp1_r, cp2_r, ..., length, max_radius, etc.
+        bounds: List of (min, max) tuples defining parameter order
+    
+    Returns:
+        position: List of parameter values in correct order
+    """
+    position = []
+    
+    # First 5 are control point radii
+    for i in range(1, 6):
+        cp_name = f'cp{i}_r'
+        value = params.get(cp_name, 0.5)  # Default to middle if missing
+        # Clip to bounds
+        lo, hi = bounds[i-1]
+        value = max(lo + 1e-12, min(hi - 1e-12, value))
+        position.append(value)
+    
+    # Length
+    value = params.get('length', 0.75)
+    lo, hi = bounds[5]
+    value = max(lo + 1e-12, min(hi - 1e-12, value))
+    position.append(value)
+    
+    # Max radius
+    value = params.get('max_radius', 0.05)
+    lo, hi = bounds[6]
+    value = max(lo + 1e-12, min(hi - 1e-12, value))
+    position.append(value)
+    
+    # Optional parameters
+    idx = 7
+    if USE_Z_SQUASH:
+        value = params.get('z_squash', 1.0)
+        lo, hi = bounds[idx]
+        value = max(lo + 1e-12, min(hi - 1e-12, value))
+        position.append(value)
+        idx += 1
+    
+    if USE_Z_CUT:
+        value = params.get('z_cut', -0.025)
+        lo, hi = bounds[idx]
+        value = max(lo + 1e-12, min(hi - 1e-12, value))
+        position.append(value)
+    
+    return position
+
+def initialize_swarm_with_restart(num_particles, bounds, vel_bounds, log_file):
+    """
+    Initialize swarm, optionally using data from previous run.
+    
+    Args:
+        num_particles: Number of particles to create
+        bounds: Parameter bounds
+        vel_bounds: Velocity bounds
+        log_file: Path to control_points.log
+    
+    Returns:
+        swarm: List of Particle objects
+        restart_info: Dict with restart statistics
+    """
+    dim = len(bounds)
+    swarm = []
+    restart_info = {
+        'used_restart': False,
+        'n_from_log': 0,
+        'n_new': 0
+    }
+    
+    # Try to load previous particles if restart is enabled
+    previous_particles = []
+    if ENABLE_RESTART and os.path.exists(log_file):
+        print(f"\n{'='*70}")
+        print("RESTART MODE ENABLED")
+        print(f"{'='*70}")
+        print(f"Loading previous particles from {log_file}...")
+        previous_particles = parse_control_points_log(log_file)
+        
+        if previous_particles:
+            # Sort by cost (best first)
+            previous_particles.sort(key=lambda x: x['cost'])
+            
+            print(f"\nFound {len(previous_particles)} previous evaluations")
+            print(f"  Best cost: {previous_particles[0]['cost']:.6g}")
+            print(f"  Worst cost: {previous_particles[-1]['cost']:.6g}")
+            
+            restart_info['used_restart'] = True
+    
+    # Initialize particles
+    n_from_log = min(len(previous_particles), num_particles)
+    
+    if n_from_log > 0:
+        print(f"\nInitializing {n_from_log} particles from previous run...")
+        
+        # Use best particles from previous run
+        for i in range(n_from_log):
+            p = Particle(dim, bounds, vel_bounds)
+            
+            # Convert params to position vector
+            prev_params = previous_particles[i]['params']
+            p.position = params_dict_to_position(prev_params, bounds)
+            
+            # Initialize velocity randomly
+            p.velocity = [random.uniform(vb[0], vb[1]) for vb in vel_bounds]
+            
+            # Set best position and cost from log
+            p.best_pos = p.position[:]
+            p.best_cost = previous_particles[i]['cost']
+            
+            swarm.append(p)
+            
+            print(f"  Particle {i+1}: cost={p.best_cost:.6g}, "
+                  f"L={prev_params['length']:.3f}m, R={prev_params['max_radius']:.4f}m")
+        
+        restart_info['n_from_log'] = n_from_log
+    
+    # Fill remaining particles with new random initializations
+    n_new = num_particles - n_from_log
+    
+    if n_new > 0:
+        print(f"\nInitializing {n_new} new particles with profile blending...")
+        
+        for i in range(n_new):
+            p = Particle(dim, bounds, vel_bounds)
+            
+            particle_idx = n_from_log + i
+            
+            if particle_idx == 0 and n_from_log == 0:
+                # First particle: Pure cone
+                blend = 0.0
+                pert = 0.0
+            elif particle_idx == 1 and n_from_log <= 1:
+                # Second particle: Pure von Karman
+                blend = 1.0
+                pert = 0.0
+            elif particle_idx == 2 and n_from_log <= 2:
+                # Third particle: 50/50 blend
+                blend = 0.5
+                pert = 0.05
+            elif particle_idx < num_particles // 2:
+                # First half: Varied blends with small perturbation
+                blend = particle_idx / (num_particles // 2)
+                pert = 0.10
+            else:
+                # Second half: Random exploration
+                blend = random.uniform(0.0, 1.0)
+                pert = 0.20
+            
+            p.position = initialize_particle_near_profile(bounds, profile_blend=blend, perturbation=pert)
+            p.velocity = [random.uniform(vb[0], vb[1]) for vb in vel_bounds]
+            swarm.append(p)
+        
+        restart_info['n_new'] = n_new
+    
+    return swarm, restart_info
+
 def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     """PSO optimization for ogive geometry."""
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
     
-    # Clear log files at start
-    if os.path.exists("control_points.log"):
-        os.remove("control_points.log")
-    if os.path.exists("best_solution.log"):
-        os.remove("best_solution.log")
+    # Check if we should backup existing log (if not restarting)
+    if not ENABLE_RESTART:
+        if os.path.exists("control_points.log"):
+            # Backup old log
+            import shutil
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            backup_name = f"control_points_backup_{timestamp}.log"
+            shutil.move("control_points.log", backup_name)
+            print(f"\nBacked up previous log to {backup_name}")
+        
+        if os.path.exists("best_solution.log"):
+            os.remove("best_solution.log")
     
     # Build bounds based on active features
     bounds = []
@@ -663,18 +956,18 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     # Radius control (normalized 0-1, will be scaled by max_radius)
     # These will be enforced to be monotonically non-decreasing
     cp_r_bounds = [
-        (0.0, 0.3),   # cp1_r at x=0.1L
-        (0.0, 0.5),   # cp2_r at x=0.2L
-        (0.0, 0.8),   # cp3_r at x=0.45L
-        (0.0, 1.0),   # cp4_r at x=0.7L
-        (0.0, 1.0),   # cp5_r at x=1.0L (end)
+        (0.05, 0.3),   # cp1_r at x=0.1L
+        (0.1, 0.5),   # cp2_r at x=0.2L
+        (0.2, 0.8),   # cp3_r at x=0.45L
+        (0.2, 1.0),   # cp4_r at x=0.7L
+        (0.2, 1.0),   # cp5_r at x=1.0L (end)
     ]
     bounds.extend(cp_r_bounds)
     
     # Basic geometry parameters
     bounds.extend([
         (0.5, 1.0),     # length (meters)
-        (0.02, MAX_RADIUS_CONSTRAINT),   # max_radius (constrained)
+        (0.04, MAX_RADIUS_CONSTRAINT),   # max_radius (constrained)
     ])
     
     # Optional parameters
@@ -697,7 +990,9 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     print(f"  Z-Squash (elliptical): {'ENABLED' if USE_Z_SQUASH else 'DISABLED'}")
     print(f"  Z-Cut (flat bottom):   {'ENABLED' if USE_Z_CUT else 'DISABLED'}")
     print(f"  Parameter dimensions:  {dim}")
-    print(f"  Initialization: Blend of cone and von Karman profiles")
+    print(f"  Restart capability:    {'ENABLED' if ENABLE_RESTART else 'DISABLED'}")
+    if ENABLE_RESTART:
+        print(f"  Restart log file:      {RESTART_LOG_FILE}")
     print("="*70)
     
     # Show reference profiles
@@ -711,39 +1006,21 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
             print(f"{x:<8.2f} {cone[i]:<10.4f} {vk[i]:<12.4f}")
         print()
     
-    # Initialize swarm with smart initialization
-    swarm = []
+    # Initialize swarm with restart capability
+    swarm, restart_info = initialize_swarm_with_restart(
+        num_particles, bounds, vel_bounds, RESTART_LOG_FILE
+    )
     
-    # Create particles with varying blends of cone/von Karman
-    for i in range(num_particles):
-        p = Particle(dim, bounds, vel_bounds)
-        
-        if i == 0:
-            # First particle: Pure cone
-            blend = 0.0
-            pert = 0.0
-        elif i == 1:
-            # Second particle: Pure von Karman
-            blend = 1.0
-            pert = 0.0
-        elif i == 2:
-            # Third particle: 50/50 blend
-            blend = 0.5
-            pert = 0.05
-        elif i < num_particles // 2:
-            # First half: Varied blends with small perturbation
-            blend = i / (num_particles // 2)
-            pert = 0.10
-        else:
-            # Second half: Random exploration
-            blend = random.uniform(0.0, 1.0)
-            pert = 0.20
-        
-        p.position = initialize_particle_near_profile(bounds, profile_blend=blend, perturbation=pert)
-        p.velocity = [random.uniform(vb[0], vb[1]) for vb in vel_bounds]
-        swarm.append(p)
-    
-    if verbose:
+    # Print initialization summary
+    if restart_info['used_restart']:
+        print(f"\n{'='*70}")
+        print("INITIALIZATION SUMMARY")
+        print(f"{'='*70}")
+        print(f"  From previous run: {restart_info['n_from_log']} particles")
+        print(f"  Newly generated:   {restart_info['n_new']} particles")
+        print(f"  Total particles:   {num_particles}")
+        print(f"{'='*70}")
+    else:
         print("\nParticle initialization strategy:")
         print(f"  Particle 1: Pure cone (linear)")
         print(f"  Particle 2: Pure von Karman (optimal theoretical)")
@@ -757,20 +1034,38 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     gbest_range = 0
     gbest_q_dot = 0
     
-    # Evaluate initial swarm
-    print("\nEvaluating initial swarm...")
-    for i, p in enumerate(swarm):
-        p.position = enforce_bounds(p.position, bounds)
-        cost = evaluate_particle(p.position, verbose=verbose, particle_id=i+1, iteration=0)
-        p.best_cost = cost
-        p.best_pos = p.position[:]
-        
-        if cost < gbest_cost:
-            gbest_cost = cost
-            gbest_pos = p.position[:]
-        
-        if verbose:
-            print(f"  Particle {i+1}/{num_particles}: cost = {cost:.6g}")
+    # Find initial global best from swarm
+    for p in swarm:
+        if p.best_cost < gbest_cost:
+            gbest_cost = p.best_cost
+            gbest_pos = p.best_pos[:]
+    
+    # If we have a valid global best from restart, skip initial evaluation
+    skip_initial_eval = restart_info['used_restart'] and gbest_cost < float('inf')
+    
+    if not skip_initial_eval:
+        # Evaluate initial swarm (only needed for new particles)
+        print("\nEvaluating initial swarm...")
+        for i, p in enumerate(swarm):
+            # Skip if already evaluated from restart
+            if restart_info['used_restart'] and i < restart_info['n_from_log']:
+                if verbose:
+                    print(f"  Particle {i+1}/{num_particles}: cost = {p.best_cost:.6g} (from restart)")
+                continue
+            
+            p.position = enforce_bounds(p.position, bounds)
+            cost = evaluate_particle(p.position, verbose=verbose, particle_id=i+1, iteration=0)
+            p.best_cost = cost
+            p.best_pos = p.position[:]
+            
+            if cost < gbest_cost:
+                gbest_cost = cost
+                gbest_pos = p.position[:]
+            
+            if verbose:
+                print(f"  Particle {i+1}/{num_particles}: cost = {cost:.6g}")
+    else:
+        print(f"\nUsing global best from restart: cost = {gbest_cost:.6g}")
     
     # Write initial best solution
     idx = 0
@@ -930,9 +1225,13 @@ if __name__ == "__main__":
     print("OGIVE GEOMETRY OPTIMIZER (Simple Trajectory Solver)")
     print("="*70)
     
+    # Example usage with restart capability
+    # First run: Set ENABLE_RESTART = False to start fresh
+    # Subsequent runs: Set ENABLE_RESTART = True to continue from previous best
+    
     best, best_range, hist = pso_optimize(
         num_particles=4, 
-        iterations=50, 
+        iterations=10, 
         seed=42, 
         verbose=True
     )
@@ -957,3 +1256,8 @@ if __name__ == "__main__":
     print(f"\nLog files generated:")
     print(f"  - control_points.log: All particle evaluations")
     print(f"  - best_solution.log: Current best solution (updated each iteration)")
+    
+    if ENABLE_RESTART:
+        print(f"\nRESTART MODE: To continue optimization, run this script again with:")
+        print(f"  ENABLE_RESTART = True (already set)")
+        print(f"  The optimizer will initialize from the best {min(4, len(hist))} particles")

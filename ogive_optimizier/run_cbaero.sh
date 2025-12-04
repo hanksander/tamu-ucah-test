@@ -7,7 +7,7 @@ set -e         # Exit immediately if a command exits with a non-zero status
 set -u         # Treat unset variables as an error
 set -o pipefail # The return value of a pipeline is the status of the last command 
 
-sudo rm -rf /tmp/.X11-unix
+# sudo rm -rf /tmp/.X11-unix
 
 PATH_TO_BINS="/root/401/CBaero/bin"
 
@@ -55,20 +55,24 @@ mv -f output.msh "${MODEL_NAME}.msh"
 echo "Mesh renamed to ${MODEL_NAME}.msh"
 
 # --- Step 2: Run cbsetup HEADLESS using Xvfb and xdotool ---
-echo "[2/5] Running cbsetup headless..."
+# --- Step 2: Run cbsetup HEADLESS using Xvfb and xdotool ---
+echo "[2/5] Running cbsetup headless (Bypassing /tmp)..."
 
-# Ensure twm and Xvfb are available
-if ! command -v Xvfb &> /dev/null || ! command -v twm &> /dev/null; then
-    echo "Error: Xvfb or twm not found. Install with: apt-get install Xvfb twm" >&2
-    exit 1
-fi
-
+# --- Define Custom X Environment ---
+# 1. Define custom, safe temporary paths
 export DISPLAY=":99"
+X_AUTH_FILE="/root/.Xauthority_cbsetup"
+X_SOCKET_DIR="/root/x_sockets"
+mkdir -p $X_SOCKET_DIR
 
-# Start virtual display
-Xvfb $DISPLAY -screen 0 1024x768x24 &
+# 2. Start Xvfb, telling it where to put the socket using the -logfile option
+# Note: We must also tell Xvfb not to use the default /tmp/.X11-unix
+# We use -listen tcp and -nolisten unix to avoid using the broken /tmp/.X11-unix
+
+# Start virtual display, listening only on TCP and disabling the default UNIX socket
+Xvfb $DISPLAY -screen 0 1024x768x24 -nolisten unix -listen tcp &
 Xvfb_PID=$!
-sleep 1 # Wait for Xvfb to start
+sleep 1.5 # Wait for Xvfb to start
 
 # Start the lightweight Window Manager (twm) inside Xvfb
 twm &
@@ -149,7 +153,7 @@ python3 "${PATH_TO_BINS}/gen_cbaero.py" "$MODEL_NAME" "$SREF" "$CREF" "$BREF"
 [ -f "${MODEL_NAME}.cbaero" ] || { echo "Error: ${MODEL_NAME}.cbaero was not created" >&2; exit 1; }
 
 # --- Step 4: Run CBAERO ---
-echo "[4/5] Running CBAERO with 8 processes..."
-"${PATH_TO_BINS}/cbaero" -mp 8 "$MODEL_NAME"
+echo "[4/5] Running CBAERO with 16 processes..."
+"${PATH_TO_BINS}/cbaero" -mp 16 "$MODEL_NAME"
 
 echo "=== CBAERO run complete for model: $MODEL_NAME ==="

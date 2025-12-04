@@ -1,3 +1,4 @@
 playground.py
 *.pyc
 my_env/
+/vsp_interface
