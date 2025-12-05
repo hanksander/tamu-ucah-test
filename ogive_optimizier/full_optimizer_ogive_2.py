@@ -10,49 +10,38 @@ import scipy as sp
 import trimesh as tm
 from fit_optimizer_3 import WaveriderCase
 import multiprocessing
-
-
 #from simple_trajectory import run_dymos_optimization
 from diff_trajectory_optimizer import run_dymos_optimization
-
 from parametric_body_generator import (
     ParametricBody, 
     generate_parametric_body_mesh,
     write_tri_file
 )
 from parameter_solver import compute_reference_parameters
-
 # ============ CONFIGURATION ============
 # Toggle features on/off
 USE_Z_SQUASH = True  # Set True to enable elliptical cross-section
 USE_Z_CUT = True     # Set True to enable flat bottom cut
-
 # Default values when features are disabled
 DEFAULT_Z_SQUASH = 1.0  # Circular cross-section
 DEFAULT_Z_CUT = None    # No cut
-
 # NOSE CAP CONFIGURATION
 use_hemisphere = True  # Set True to enable hemisphere nose cap
 USE_NOSE_CAP = False  # Set True to enable old spherical nose cap
 DEFAULT_NOSE_RADIUS = 0.005  # 5mm default nose radius
 NOSE_RADIUS_BOUNDS = (0.001, 0.040)  # 1mm to 4cm
-
 # Fixed control point x-positions (as fractions of length)
 # Now includes 7 body control points
 FIXED_CP_X = [0.05, 0.15, 0.25, 0.40, 0.55, 0.75, 1.0]  # 7 control points
-
 # GLOBAL MAXIMUM RADIUS CONSTRAINT (meters)
 MAX_RADIUS_CONSTRAINT = 0.1  # Never exceed this radius
-
 # HEAT FLUX LIMITS (W/m²)
 Q_DOT_LIMIT = 0.8e6  # Optimizer cost function limit: 1.2 MW/m²
 Q_DOT_LIMIT_TRAJECTORY = 0.8e6  # Trajectory solver limit (can be different)
-
 # RESTART CAPABILITY
 ENABLE_RESTART = False  # Set True to initialize from previous run
 RESTART_LOG_FILE = "control_points.log"
 # ========================================
-
 def set_up_ogive(params):
     """
     Set up ogive geometry from parameters with hemisphere nose support.
@@ -266,7 +255,6 @@ def compute_aerodatabase(ogive_trimesh_path):
     finally:
         os.chdir(current_dir)
 
-
 def read_tri_file(tri_path):
     """Read a .tri file and return vertices and triangles."""
     with open(tri_path, 'r') as f:
@@ -304,7 +292,6 @@ def read_tri_file(tri_path):
                         f"but only {n_verts} vertices (valid range [0, {n_verts-1}])")
     
     return vertices, triangles
-
 
 def calculate_ogive_range(body):
     """Calculate range for ogive geometry using simple trajectory solver."""
@@ -366,7 +353,7 @@ def write_control_points_log(params, particle_id, iteration, cost, log_file="con
         f.write(f"{'='*80}\n")
         f.write(f"Length: {length:.6f} m | Max Radius: {max_radius:.6f} m\n")
         
-        if USE_NOSE_CAP:
+        if USE_NOSE_CAP or use_hemisphere:
             nose_r = params.get('nose_radius', DEFAULT_NOSE_RADIUS)
             f.write(f"Nose Radius: {nose_r*1000:.3f} mm\n")
         
@@ -380,7 +367,7 @@ def write_control_points_log(params, particle_id, iteration, cost, log_file="con
         f.write(f"{'-'*42}\n")
         
         # Nose
-        if USE_NOSE_CAP:
+        if USE_NOSE_CAP or use_hemisphere:
             nose_r = params.get('nose_radius', DEFAULT_NOSE_RADIUS)
             nose_r_clamped = min(nose_r, MAX_RADIUS_CONSTRAINT)
             f.write(f"{'NOSE':>8} {nose_r_clamped:>10.6f} {'N/A':>10} {nose_r_clamped:>10.6f}\n")
@@ -419,7 +406,7 @@ def write_best_solution(params, iteration, cost, range_km, q_dot_kw, log_file="b
         f.write(f"  Length:     {length:.6f} m\n")
         f.write(f"  Max Radius: {max_radius:.6f} m\n")
         
-        if USE_NOSE_CAP:
+        if USE_NOSE_CAP or use_hemisphere:
             nose_r = params.get('nose_radius', DEFAULT_NOSE_RADIUS)
             f.write(f"  Nose Radius: {nose_r*1000:.3f} mm\n")
         
@@ -432,7 +419,7 @@ def write_best_solution(params, iteration, cost, range_km, q_dot_kw, log_file="b
         f.write(f"{'X/L':>8} {'X (m)':>10} {'r/R_max':>10} {'r (m)':>10}\n")
         f.write(f"{'-'*42}\n")
         
-        if USE_NOSE_CAP:
+        if USE_NOSE_CAP or use_hemisphere:
             nose_r = params.get('nose_radius', DEFAULT_NOSE_RADIUS)
             nose_r_clamped = min(nose_r, MAX_RADIUS_CONSTRAINT)
             f.write(f"{'NOSE':>8} {nose_r_clamped:>10.6f} {'N/A':>10} {nose_r_clamped:>10.6f}\n")
@@ -455,8 +442,8 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
     # Unpack position vector based on active features
     idx = 0
     
-    # Nose radius (if enabled)
-    if USE_NOSE_CAP:
+    # Nose radius (if enabled - for EITHER hemisphere or tangent sphere)
+    if USE_NOSE_CAP or use_hemisphere:
         nose_radius = pos[idx]
         nose_radius = min(nose_radius, MAX_RADIUS_CONSTRAINT)
         idx += 1
@@ -507,13 +494,13 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
         'z_cut': z_cut
     }
     
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         params['nose_radius'] = nose_radius
     
     # Create working directory
     os.makedirs('temp_ogive_cases', exist_ok=True)
     case_name = f"ogive-L{length:.3f}-R{max_radius:.3f}"
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         case_name += f"-nr{nose_radius*1000:.1f}mm"
     if USE_Z_SQUASH:
         case_name += f"-zs{z_squash:.3f}"
@@ -530,6 +517,8 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
         # [1/4] Set up ogive geometry
         if verbose:
             print(f"[1/4] Setting up ogive geometry...")
+            if USE_NOSE_CAP or use_hemisphere:
+                print(f"      Nose radius: {nose_radius*1000:.2f} mm")
         try:
             body, stl_filename, tri_filename = set_up_ogive(params)
         except Exception as e:
@@ -561,7 +550,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
             write_control_points_log(params, particle_id, iteration, 1e9,
                                     log_file=os.path.join(original_dir, "control_points.log"))
             return 1e9
-
+        
         # [3/4] Compute aerodynamic database
         try:
             if verbose:
@@ -642,8 +631,8 @@ def initialize_particle_near_profile(bounds, profile_blend=0.5, perturbation=0.1
     position = []
     idx = 0
     
-    # Nose radius (if enabled)
-    if USE_NOSE_CAP:
+    # Nose radius (if enabled - for EITHER hemisphere or tangent sphere)
+    if USE_NOSE_CAP or use_hemisphere:
         lo, hi = bounds[idx]
         # Start from default value with perturbation
         base_value = DEFAULT_NOSE_RADIUS
@@ -802,8 +791,8 @@ def params_dict_to_position(params, bounds):
     position = []
     idx = 0
     
-    # Nose radius (if enabled)
-    if USE_NOSE_CAP:
+    # Nose radius (if enabled - for EITHER hemisphere or tangent sphere)
+    if USE_NOSE_CAP or use_hemisphere:
         value = params.get('nose_radius', DEFAULT_NOSE_RADIUS)
         lo, hi = bounds[idx]
         value = max(lo + 1e-12, min(hi - 1e-12, value))
@@ -934,7 +923,6 @@ def initialize_swarm_with_restart(num_particles, bounds, vel_bounds, log_file):
     return swarm, restart_info
 
 # PSO optimization function - add to main optimizer file
-
 def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     """PSO optimization for ogive geometry with 7 control points and optional nose cap."""
     if seed is not None:
@@ -956,20 +944,20 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     # Build bounds based on active features
     bounds = []
     
-    # Nose radius (if enabled)
-    if USE_NOSE_CAP:
+    # Nose radius (if enabled - for EITHER hemisphere or tangent sphere)
+    if USE_NOSE_CAP or use_hemisphere:
         bounds.append(NOSE_RADIUS_BOUNDS)
     
     # 7 radius control points (normalized 0-1, will be scaled by max_radius)
-    # These will be enforced to be monotonically non-decreasing
+    # FIXED: More reasonable bounds for cp6 and cp7
     cp_r_bounds = [
         (0.05, 0.3),   # cp1_r at x=0.05L
         (0.1, 0.5),    # cp2_r at x=0.15L
         (0.15, 0.6),   # cp3_r at x=0.25L
         (0.2, 0.8),    # cp4_r at x=0.40L
         (0.25, 0.9),   # cp5_r at x=0.55L
-        (0.3, 1.0),    # cp6_r at x=0.75L
-        (0.3, 1.0),    # cp7_r at x=1.0L (end)
+        (0.3, 1.0),    # cp6_r at x=0.75L - CHANGED: can explore lower values
+        (0.4, 1.0),    # cp7_r at x=1.0L (end) - CHANGED: minimum raised to maintain shape
     ]
     bounds.extend(cp_r_bounds)
     
@@ -995,8 +983,9 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     print("="*70)
     print(f"  Trajectory Solver: SIMPLE (shooting method)")
     print(f"  Control points: {len(FIXED_CP_X)} body points at {FIXED_CP_X}")
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         print(f"  Nose cap: ENABLED (range: {NOSE_RADIUS_BOUNDS[0]*1000:.1f}-{NOSE_RADIUS_BOUNDS[1]*1000:.1f} mm)")
+        print(f"  Nose type: {'HEMISPHERE' if use_hemisphere else 'TANGENT SPHERE'}")
     print(f"  Maximum Radius Constraint: {MAX_RADIUS_CONSTRAINT} m")
     print(f"  Heat Flux Limits:")
     print(f"    - Optimizer cost:   {Q_DOT_LIMIT/1e6:.2f} MW/m²")
@@ -1080,7 +1069,7 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     
     # Extract best parameters and write initial solution
     idx = 0
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         nose_radius = gbest_pos[idx]
         idx += 1
     else:
@@ -1099,7 +1088,7 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
         'max_radius': min(gbest_pos[idx+8], MAX_RADIUS_CONSTRAINT),
     }
     
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         best_params['nose_radius'] = nose_radius
     
     idx = idx + 9
@@ -1154,7 +1143,7 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
                 
                 # Update best solution immediately
                 idx = 0
-                if USE_NOSE_CAP:
+                if USE_NOSE_CAP or use_hemisphere:
                     nose_radius = gbest_pos[idx]
                     idx += 1
                 else:
@@ -1173,7 +1162,7 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
                     'max_radius': min(gbest_pos[idx+8], MAX_RADIUS_CONSTRAINT),
                 }
                 
-                if USE_NOSE_CAP:
+                if USE_NOSE_CAP or use_hemisphere:
                     best_params['nose_radius'] = nose_radius
                 
                 idx_param = idx + 9
@@ -1199,7 +1188,7 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     
     # Format final best solution
     idx = 0
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         nose_radius = gbest_pos[idx]
         idx += 1
     else:
@@ -1217,7 +1206,7 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
         'cp7_r': cp_r_mono[6],
     }
     
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         best['nose_radius'] = nose_radius
     
     best['length'] = gbest_pos[idx+7]
@@ -1237,7 +1226,6 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
         best['z_cut'] = DEFAULT_Z_CUT
     
     return best, -gbest_cost, history
-
 
 if __name__ == "__main__":
     print("="*70)
@@ -1259,7 +1247,7 @@ if __name__ == "__main__":
     print(f"  Length:     {best['length']:.6f} m")
     print(f"  Max Radius: {best['max_radius']:.6f} m")
     
-    if USE_NOSE_CAP:
+    if USE_NOSE_CAP or use_hemisphere:
         print(f"  Nose Radius: {best.get('nose_radius', DEFAULT_NOSE_RADIUS)*1000:.3f} mm")
     
     if USE_Z_SQUASH:
