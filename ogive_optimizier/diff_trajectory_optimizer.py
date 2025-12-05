@@ -472,7 +472,7 @@ def write_trajectory_file(trajectory, path, strategy_name, vehicle):
     print(f"     - Final downrange: {x[-1]/1000:.2f} km")
 
 def run_dymos_optimization(path, plotting=True, surrogate_type='linear', 
-                          workers=16, q_dot_limit=1.2e6, bounds_mach=(6.5, 8.0)):
+                          workers=16, q_dot_limit=1.2e6, bounds_mach=(7.5, 8.0)):
     """Compatibility wrapper with plotting integration and multithreading.
     Args:
         path: Output directory for plots
@@ -505,8 +505,8 @@ def run_dymos_optimization(path, plotting=True, surrogate_type='linear',
     print(f'  Initial Mach bounds: [{bounds_mach[0]:.1f}, {bounds_mach[1]:.1f}]')
     
     best = optimize_with_shooting(integrator, vehicle, 
-                                  n_alpha_cp=5, 
-                                  maxiter=20, 
+                                  n_alpha_cp=25, 
+                                  maxiter=5, 
                                   popsize=5,
                                   workers=workers,
                                   q_dot_limit=q_dot_limit,

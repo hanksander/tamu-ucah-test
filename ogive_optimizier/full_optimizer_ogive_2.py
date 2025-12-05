@@ -21,7 +21,7 @@ from parameter_solver import compute_reference_parameters
 # ============ CONFIGURATION ============
 # Toggle features on/off
 USE_Z_SQUASH = True  # Set True to enable elliptical cross-section
-USE_Z_CUT = True     # Set True to enable flat bottom cut
+USE_Z_CUT = False     # Set True to enable flat bottom cut
 # Default values when features are disabled
 DEFAULT_Z_SQUASH = 1.0  # Circular cross-section
 DEFAULT_Z_CUT = None    # No cut
@@ -29,7 +29,7 @@ DEFAULT_Z_CUT = None    # No cut
 use_hemisphere = True  # Set True to enable hemisphere nose cap
 USE_NOSE_CAP = False  # Set True to enable old spherical nose cap
 DEFAULT_NOSE_RADIUS = 0.01  # 5mm default nose radius
-NOSE_RADIUS_BOUNDS = (0.001, 0.040)  # 1mm to 4cm
+NOSE_RADIUS_BOUNDS = (0.005, 0.040)  # 1mm to 4cm
 # Fixed control point x-positions (as fractions of length)
 # Now includes 7 body control points
 FIXED_CP_X = [0.05, 0.15, 0.25, 0.40, 0.55, 0.75, 1.0]  # 7 control points
@@ -38,11 +38,11 @@ MAX_RADIUS_CONSTRAINT = 0.1  # Never exceed this radius
 # Z-CUT PERCENTAGE BOUNDS
 Z_CUT_PERCENT_BOUNDS = (0.3, 1.1)  # 30% to 110% of (max_radius * z_squash)
 # HEAT FLUX LIMITS (W/m²)
-Q_DOT_LIMIT = 1e6  # Optimizer cost function limit: 1.2 MW/m²
-Q_DOT_LIMIT_TRAJECTORY = 0.95e6  # Trajectory solver limit (can be different)
+Q_DOT_LIMIT = 1.2e6  # Optimizer cost function limit: 1.2 MW/m²
+Q_DOT_LIMIT_TRAJECTORY = 1.2e6  # Trajectory solver limit (can be different)
 # RESTART CAPABILITY
-ENABLE_RESTART = True  # Set True to initialize from previous run
-RESTART_LOG_FILE = "/root/401/optimizer/results/ogive_optimization_1/control_points.log"
+ENABLE_RESTART = False  # Set True to initialize from previous run
+RESTART_LOG_FILE = "./control_points.log"
 # ========================================
 def set_up_ogive(params):
     """
@@ -149,6 +149,35 @@ def set_up_ogive(params):
     mesh.export(stl_filename)
     
     return body, stl_filename, tri_filename
+
+def compute_volume(vertices, triangles):
+    """
+    Compute volume of a closed mesh using the divergence theorem.
+    
+    Args:
+        vertices: numpy array of shape (N, 3) containing vertex coordinates
+        triangles: numpy array of shape (M, 3) containing triangle vertex indices
+    
+    Returns:
+        volume: float, volume in cubic meters
+    """
+    volume = 0.0
+    
+    for tri in triangles:
+        # Get the three vertices of the triangle
+        v0 = vertices[tri[0]]
+        v1 = vertices[tri[1]]
+        v2 = vertices[tri[2]]
+        
+        # Compute signed volume of tetrahedron formed by triangle and origin
+        # V = (1/6) * |v0 · (v1 × v2)|
+        cross = np.cross(v1, v2)
+        volume += np.dot(v0, cross)
+    
+    # Divide by 6 to get actual volume
+    volume = abs(volume) / 6.0
+    
+    return volume
 
 def compute_aerodatabase(ogive_trimesh_path):
     """Run CBAERO simulation on ogive geometry."""
@@ -562,6 +591,39 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
                                     log_file=os.path.join(original_dir, "control_points.log"))
             return 1e9
         
+        # [1.5/4] Check volume constraint
+        if verbose:
+            print(f"[1.5/4] Checking volume constraint...")
+        try:
+            vertices, triangles = read_tri_file(tri_filename)
+            volume_m3 = compute_volume(vertices, triangles)
+            volume_liters = volume_m3 * 1000.0  # Convert m³ to liters
+            
+            MIN_VOLUME_LITERS = 10.0
+            
+            if verbose:
+                print(f"      Computed volume: {volume_liters:.2f} liters")
+            
+            if volume_liters < MIN_VOLUME_LITERS:
+                if verbose:
+                    print(f"✗ Volume constraint violated: {volume_liters:.2f}L < {MIN_VOLUME_LITERS}L")
+                volume_deficit = MIN_VOLUME_LITERS - volume_liters
+                penalty = 1e7 + volume_deficit * 1e6
+                os.chdir(original_dir)
+                write_control_points_log(params, particle_id, iteration, penalty,
+                                        log_file=os.path.join(original_dir, "control_points.log"))
+                return penalty
+            elif verbose:
+                print(f"✓ Volume constraint satisfied ({volume_liters:.2f}L >= {MIN_VOLUME_LITERS}L)")
+                
+        except Exception as e:
+            if verbose:
+                print(f"✗ Volume computation failed: {e}")
+            os.chdir(original_dir)
+            write_control_points_log(params, particle_id, iteration, 1e9,
+                                    log_file=os.path.join(original_dir, "control_points.log"))
+            return 1e9
+        
         # [2/4] Check fitting
         if verbose:
             print(f"[2/4] Checking payload fit...")
@@ -624,7 +686,8 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
         write_control_points_log(params, particle_id, iteration, cost)
         
         if verbose:
-            print(f"✓ Evaluation complete: range={rng/1000:.1f} km, q_dot={max_q_dot/1000:.0f} kW/m², cost={cost:.4f}")
+            print(f"✓ Evaluation complete: range={rng/1000:.1f} km, q_dot={max_q_dot/1000:.0f} kW/m², "
+                  f"volume={volume_liters:.1f}L, cost={cost:.4f}")
         
         return cost
         
@@ -1397,7 +1460,7 @@ def diagnose_restart_issue(log_file):
     bounds.extend(cp_r_bounds)
     bounds.extend([(0.5, 1.0), (0.04, MAX_RADIUS_CONSTRAINT)])
     if USE_Z_SQUASH:
-        bounds.append((0.3, 1.0))
+        bounds.append((0.3, 0.7))
     if USE_Z_CUT:
         bounds.append(Z_CUT_PERCENT_BOUNDS)
     
@@ -1422,8 +1485,8 @@ if __name__ == "__main__":
         input("\nPress Enter to continue with optimization...")
     
     best, best_range, hist = pso_optimize(
-        num_particles=8, 
-        iterations=4, 
+        num_particles=3, 
+        iterations=5, 
         seed=42, 
         verbose=True
     )

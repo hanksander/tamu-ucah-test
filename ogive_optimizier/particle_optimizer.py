@@ -15,7 +15,10 @@ import matplotlib.pyplot as plt
 from waverider_generator.cad_export import to_CAD
 
 from fit_optimizer_3 import *
-from integrated_traj_test import run_dymos_optimization
+
+#from integrated_traj_test import run_dymos_optimization
+from diff_trajectory_optimizer import run_dymos_optimization
+
 from manual_mesh_main import output_waverider_mesh
 
 from parameter_solver import compute_reference_parameters
@@ -25,19 +28,19 @@ OPTIMIZATION_ROOT = os.getcwd()  # Root optimization directory
 CBAERO_SCRIPT = os.path.join(OPTIMIZATION_ROOT, "run_cbaero.sh")  # Path to shell script
 PATH_TO_BINS = "/root/401/CBaero/bin"  # Update if needed
 
-# Setup virtual display for GUI applications if DISPLAY not set
-USE_XVFB = os.environ.get('DISPLAY') is None
-if USE_XVFB:
-    try:
-        import subprocess
-        # Start Xvfb virtual display
-        subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1024x768x24'],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.environ['DISPLAY'] = ':99'
-        print("Started virtual display (Xvfb) on :99")
-    except Exception as e:
-        print(f"Warning: Could not start Xvfb: {e}")
-        print("GUI applications may not work properly")
+# # Setup virtual display for GUI applications if DISPLAY not set
+# USE_XVFB = os.environ.get('DISPLAY') is None
+# if USE_XVFB:
+#     try:
+#         import subprocess
+#         # Start Xvfb virtual display
+#         subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1024x768x24'],
+#                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+#         os.environ['DISPLAY'] = ':99'
+#         print("Started virtual display (Xvfb) on :99")
+#     except Exception as e:
+#         print(f"Warning: Could not start Xvfb: {e}")
+#         print("GUI applications may not work properly")
 
 # --- Helper functions ---
 def set_up_waverider(params, case_dir):
@@ -534,8 +537,8 @@ if __name__ == "__main__":
     # perturbation=0.05 means particles vary by ±5% of parameter bounds
     # Set perturbation=0.0 to test ONLY the exact design (no variation)
     best, best_range, hist = pso_optimize(
-        num_particles=4,      # Fewer particles for testing
-        iterations=15,          # Fewer iterations for testing
+        num_particles=2,      # Fewer particles for testing
+        iterations=5,          # Fewer iterations for testing
         seed=42, 
         verbose=True,
         initial_design=initial_design,

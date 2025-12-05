@@ -727,6 +727,8 @@ def final_geometry(new_nose_radius=None):
         merge_tolerance=1e-9,
         improve_quality=False,
         validate_monotonic=True)
+
+    print(f"Volume: {compute_volume(v, t):.6f} m^3")
     
     if new_nose_radius is not None:
         print(f"Final optimized body mesh with new nose radius {new_nose_radius} m written to: final_optimized_body_new_nose.tri")
@@ -736,7 +738,34 @@ def final_geometry(new_nose_radius=None):
 
     print(f"Final optimized body mesh written to: final_optimized_body.tri")
 
+def compute_volume(vertices, triangles):
+    """
+    Compute volume of a closed mesh using the divergence theorem.
     
+    Args:
+        vertices: numpy array of shape (N, 3) containing vertex coordinates
+        triangles: numpy array of shape (M, 3) containing triangle vertex indices
+    
+    Returns:
+        volume: float, volume in cubic meters
+    """
+    volume = 0.0
+    
+    for tri in triangles:
+        # Get the three vertices of the triangle
+        v0 = vertices[tri[0]]
+        v1 = vertices[tri[1]]
+        v2 = vertices[tri[2]]
+        
+        # Compute signed volume of tetrahedron formed by triangle and origin
+        # V = (1/6) * |v0 · (v1 × v2)|
+        cross = np.cross(v1, v2)
+        volume += np.dot(v0, cross)
+    
+    # Divide by 6 to get actual volume
+    volume = abs(volume) / 6.0
+    
+    return volume
 
 
 
