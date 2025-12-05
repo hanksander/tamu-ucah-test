@@ -11,6 +11,7 @@ import trimesh as tm
 from fit_optimizer_3 import WaveriderCase
 import multiprocessing
 
+
 #from simple_trajectory import run_dymos_optimization
 from diff_trajectory_optimizer import run_dymos_optimization
 
@@ -44,8 +45,8 @@ FIXED_CP_X = [0.05, 0.15, 0.25, 0.40, 0.55, 0.75, 1.0]  # 7 control points
 MAX_RADIUS_CONSTRAINT = 0.1  # Never exceed this radius
 
 # HEAT FLUX LIMITS (W/m²)
-Q_DOT_LIMIT = 1.0e6  # Optimizer cost function limit: 1.2 MW/m²
-Q_DOT_LIMIT_TRAJECTORY = 1.0e6  # Trajectory solver limit (can be different)
+Q_DOT_LIMIT = 0.8e6  # Optimizer cost function limit: 1.2 MW/m²
+Q_DOT_LIMIT_TRAJECTORY = 0.8e6  # Trajectory solver limit (can be different)
 
 # RESTART CAPABILITY
 ENABLE_RESTART = False  # Set True to initialize from previous run

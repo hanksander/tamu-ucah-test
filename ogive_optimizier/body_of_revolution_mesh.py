@@ -407,6 +407,9 @@ def write_tri_file(filename, vertices, triangles, scale=1.0, swap_yz=True):
     
     if swap_yz:
         verts = verts[:, [0, 2, 1]]
+    else:
+        # Keep axes as-is, reverse triangle winding to maintain outward normals
+        triangles = triangles[:, [0, 2, 1]]
     
     n_verts = len(verts)
     n_tris = len(triangles)
