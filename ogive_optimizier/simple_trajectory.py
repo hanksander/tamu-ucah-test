@@ -323,6 +323,9 @@ class TrajectoryIntegrator:
         # Track maximum heat flux
         self.max_q_dot = 0
         self.q_dot_history = []
+        self.alphas_history = []
+        self.L_history = []
+        self.D_history = []
         self.time_history = []
         
         def ode(t, y):
@@ -347,7 +350,7 @@ class TrajectoryIntegrator:
             # ADDITIONAL FIX: Ensure coefficients are reasonable
             # Sometimes models can return negative or extreme values
             CL = np.clip(CL, -2.0, 5.0)  # Reasonable CL bounds
-            CD = np.clip(CD, 0.01, 5.0)  # CD should always be positive
+            CD = np.clip(CD, 0.001, 5.0)  # CD should always be positive
             
             L = CL * q_pa * self.vehicle.S_ref
             D = CD * q_pa * self.vehicle.S_ref
@@ -416,16 +419,34 @@ class TrajectoryIntegrator:
         if not sol.success:
             return None
             
-        # Calculate heat flux history
+        # Calculate histories - now including L and D
         for i in range(len(sol.t)):
             h = sol.y[1, i]
             v = sol.y[2, i]
             rho, a, T = Atmosphere.atmo_model(h)
             Mach = v / max(a, 1.0)
             q_pa = 0.5 * rho * v**2
+            
+            # Get alpha
             alpha_deg = alpha_profile_func(sol.t[i], sol.y[:, i])
+            
+            # Get aerodynamic coefficients
+            CL, CD = self.aero_db.get_coefficients(Mach, q_pa, alpha_deg)
+            CL = np.clip(CL, -2.0, 5.0)
+            CD = np.clip(CD, 0.001, 5.0)
+            
+            # Calculate forces
+            L = CL * q_pa * self.vehicle.S_ref
+            D = CD * q_pa * self.vehicle.S_ref
+            
+            # Get heat flux
             q_dot = self.aero_db.get_heat_flux(Mach, q_pa, alpha_deg)
+            
+            # Store all histories
             self.q_dot_history.append(q_dot)
+            self.alphas_history.append(alpha_deg)
+            self.L_history.append(L)
+            self.D_history.append(D)
             self.time_history.append(sol.t[i])
         
         # Results
@@ -441,8 +462,12 @@ class TrajectoryIntegrator:
             'states': sol.y,
             'final_range': x_final,
             'max_q_dot': self.max_q_dot,
+            'q_dot': np.array(self.q_dot_history),
             'q_dot_history': self.q_dot_history,
-            'time_history': self.time_history
+            'time_history': self.time_history,
+            'alphas': np.array(self.alphas_history),
+            'L': np.array(self.L_history),
+            'D': np.array(self.D_history),
         }
 
 def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):

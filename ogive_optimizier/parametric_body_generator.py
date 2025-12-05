@@ -691,45 +691,99 @@ def run_winding_order_tests():
 
     return geometries
 
+def final_geometry(new_nose_radius=None):
+    '''final geometry from optimizer'''
+    control_points = [
+        (0.050, 0.010791),
+        (0.150, 0.024675),
+        (0.250, 0.024675),
+        (0.400, 0.038786),
+        (0.550, 0.045318),
+        (0.750, 0.045318),
+        (1.000, 0.050354)]
+    length = 1.0
+    z_squash = 0.656898
+    z_cut = -0.035043
+    
+    if new_nose_radius is not None:
+        hemisphere_radius = new_nose_radius
+    else:
+        hemisphere_radius = 0.001 #original nose is 1mm
+
+    v, t, s = generate_parametric_body_mesh(
+        ParametricBody(
+            length=length,
+            control_points=control_points,
+            z_cut=z_cut,
+            z_squash=z_squash,
+            hemisphere_nose=True,
+            hemisphere_radius=hemisphere_radius,
+            name="Final Optimized Body"
+        ),
+        n_axial=150,
+        n_circumferential=80,
+        add_nose_cap=True,
+        add_tail_cap=True,
+        merge_tolerance=1e-9,
+        improve_quality=False,
+        validate_monotonic=True)
+    
+    if new_nose_radius is not None:
+        print(f"Final optimized body mesh with new nose radius {new_nose_radius} m written to: final_optimized_body_new_nose.tri")
+        write_tri_file(f"final_optimized_body_nr{new_nose_radius}.tri", v, t, swap_yz=False)
+    else:
+        write_tri_file("final_optimized_body.tri", v, t, swap_yz=False)
+
+    print(f"Final optimized body mesh written to: final_optimized_body.tri")
+
+    
+
+
 
 if __name__ == "__main__":
     print("Parametric Body Generator - FIXED VERSION (No Pinching)")
     print("="*70)
 
-    print("Parametric Body Generator with Hemisphere Support")
-    print("="*70)
+    final_geometry()
+    final_geometry(new_nose_radius=0.005)  # Example with 5mm nose radius
+    final_geometry(new_nose_radius=0.01)
+    final_geometry(new_nose_radius=0.02)
+    final_geometry(new_nose_radius=0.04)
+
+    # print("Parametric Body Generator with Hemisphere Support")
+    # print("="*70)
     
-    # Test hemisphere nose
-    print("\n" + "="*70)
-    print("TEST: Hemisphere Nose")
-    print("="*70)
+    # # Test hemisphere nose
+    # print("\n" + "="*70)
+    # print("TEST: Hemisphere Nose")
+    # print("="*70)
     
-    control_points = [
-        (0.0, 0.0),
-        (0.05, 0.02),
-        (0.2, 0.05),
-        (0.5, 0.08),
-        (1.0, 0.1)
-    ]
+    # control_points = [
+    #     (0.0, 0.0),
+    #     (0.05, 0.02),
+    #     (0.2, 0.05),
+    #     (0.5, 0.08),
+    #     (1.0, 0.1)
+    # ]
     
-    body_hemisphere = ParametricBody(
-        length=1.0,
-        control_points=control_points,
-        z_cut=-0.05,
-        z_squash=0.9,
-        hemisphere_nose=True,
-        hemisphere_radius=0.02,
-        name="Hemisphere Test"
-    )
+    # body_hemisphere = ParametricBody(
+    #     length=1.0,
+    #     control_points=control_points,
+    #     z_cut=-0.05,
+    #     z_squash=0.9,
+    #     hemisphere_nose=True,
+    #     hemisphere_radius=0.02,
+    #     name="Hemisphere Test"
+    # )
     
-    v, t, s = generate_parametric_body_mesh(
-        body_hemisphere,
-        n_axial=100,
-        n_circumferential=50,
-    )
+    # v, t, s = generate_parametric_body_mesh(
+    #     body_hemisphere,
+    #     n_axial=100,
+    #     n_circumferential=50,
+    # )
     
-    write_tri_file("hemisphere_test.tri", v, t, swap_yz=False)
-    print(f"  Written to: hemisphere_test.tri")
+    # write_tri_file("hemisphere_test.tri", v, t, swap_yz=False)
+    # print(f"  Written to: hemisphere_test.tri")
 
     # run_winding_order_tests()
 

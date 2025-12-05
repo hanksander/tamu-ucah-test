@@ -28,19 +28,21 @@ DEFAULT_Z_CUT = None    # No cut
 # NOSE CAP CONFIGURATION
 use_hemisphere = True  # Set True to enable hemisphere nose cap
 USE_NOSE_CAP = False  # Set True to enable old spherical nose cap
-DEFAULT_NOSE_RADIUS = 0.005  # 5mm default nose radius
+DEFAULT_NOSE_RADIUS = 0.01  # 5mm default nose radius
 NOSE_RADIUS_BOUNDS = (0.001, 0.040)  # 1mm to 4cm
 # Fixed control point x-positions (as fractions of length)
 # Now includes 7 body control points
 FIXED_CP_X = [0.05, 0.15, 0.25, 0.40, 0.55, 0.75, 1.0]  # 7 control points
 # GLOBAL MAXIMUM RADIUS CONSTRAINT (meters)
 MAX_RADIUS_CONSTRAINT = 0.1  # Never exceed this radius
+# Z-CUT PERCENTAGE BOUNDS
+Z_CUT_PERCENT_BOUNDS = (0.3, 1.1)  # 30% to 110% of (max_radius * z_squash)
 # HEAT FLUX LIMITS (W/m²)
-Q_DOT_LIMIT = 0.8e6  # Optimizer cost function limit: 1.2 MW/m²
-Q_DOT_LIMIT_TRAJECTORY = 0.8e6  # Trajectory solver limit (can be different)
+Q_DOT_LIMIT = 1e6  # Optimizer cost function limit: 1.2 MW/m²
+Q_DOT_LIMIT_TRAJECTORY = 0.95e6  # Trajectory solver limit (can be different)
 # RESTART CAPABILITY
-ENABLE_RESTART = False  # Set True to initialize from previous run
-RESTART_LOG_FILE = "control_points.log"
+ENABLE_RESTART = True  # Set True to initialize from previous run
+RESTART_LOG_FILE = "/root/401/optimizer/results/ogive_optimization_1/control_points.log"
 # ========================================
 def set_up_ogive(params):
     """
@@ -359,8 +361,23 @@ def write_control_points_log(params, particle_id, iteration, cost, log_file="con
         
         if USE_Z_SQUASH:
             f.write(f"Z-Squash: {params['z_squash']:.6f}\n")
-        if USE_Z_CUT and params['z_cut'] is not None:
-            f.write(f"Z-Cut: {params['z_cut']:.6f} m\n")
+        
+        # After Z-Squash logging, replace the Z-Cut section:
+        
+        # Write both z_cut (actual value) and z_cut_percent (optimized parameter)
+        if USE_Z_CUT:
+            z_cut = params.get('z_cut')
+            z_cut_percent = params.get('z_cut_percent')
+            if z_cut is not None:
+                f.write(f"Z-Cut: {z_cut:.6f} m")
+                if z_cut_percent is not None:
+                    f.write(f" ({z_cut_percent*100:.1f}%)")
+                f.write(f"\n")
+            elif z_cut_percent is not None:
+                if z_cut_percent >= 1.0:
+                    f.write(f"Z-Cut: None ({z_cut_percent*100:.1f}% >= 100%)\n")
+                else:
+                    f.write(f"Z-Cut: None\n")
         
         f.write(f"\nControl Points (x-position, radius):\n")
         f.write(f"{'X/L':>8} {'X (m)':>10} {'r/R_max':>10} {'r (m)':>10}\n")
@@ -439,10 +456,9 @@ def write_best_solution(params, iteration, cost, range_km, q_dot_kw, log_file="b
 
 def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, iteration=0):
     """Evaluate particle for ogive optimization with 7 control points and optional nose cap."""
-    # Unpack position vector based on active features
     idx = 0
     
-    # Nose radius (if enabled - for EITHER hemisphere or tangent sphere)
+     # Nose radius
     if USE_NOSE_CAP or use_hemisphere:
         nose_radius = pos[idx]
         nose_radius = min(nose_radius, MAX_RADIUS_CONSTRAINT)
@@ -450,7 +466,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
     else:
         nose_radius = None
     
-    # 7 radius values (will be enforced monotonic)
+    # 7 radius values
     cp_r = pos[idx:idx+7]
     idx += 7
     
@@ -458,28 +474,37 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
     idx += 1
     max_radius = pos[idx]
     idx += 1
-    
-    # ENFORCE GLOBAL RADIUS CONSTRAINT
     max_radius = min(max_radius, MAX_RADIUS_CONSTRAINT)
     
-    # Optional parameters
+    # Z-squash
     if USE_Z_SQUASH:
         z_squash = pos[idx]
         idx += 1
     else:
         z_squash = DEFAULT_Z_SQUASH
     
+    # Z-cut as PERCENTAGE
     if USE_Z_CUT:
-        z_cut_raw = pos[idx]
-        z_cut = z_cut_raw if z_cut_raw > -max_radius else None
+        z_cut_percent = pos[idx]
         idx += 1
+        
+        # Compute actual z_cut from percentage
+        effective_radius = max_radius * z_squash
+        z_cut_raw = -effective_radius * z_cut_percent
+        
+        # If percent > 1.0, no cut (cuts beyond body)
+        if z_cut_percent >= 1.0:
+            z_cut = None
+        else:
+            z_cut = z_cut_raw
     else:
         z_cut = DEFAULT_Z_CUT
+        z_cut_percent = None
     
     # Enforce monotonic radii
     cp_r_mono = enforce_monotonic_radii(cp_r, nose_radius)
     
-    # Create parameter dictionary
+    # Create params
     params = {
         'cp1_r': cp_r_mono[0],
         'cp2_r': cp_r_mono[1],
@@ -491,13 +516,15 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
         'length': length,
         'max_radius': max_radius,
         'z_squash': z_squash,
-        'z_cut': z_cut
+        'z_cut': z_cut,
+        'z_cut_percent': z_cut_percent  # Store for logging
     }
+    
     
     if USE_NOSE_CAP or use_hemisphere:
         params['nose_radius'] = nose_radius
     
-    # Create working directory
+    # Working directory
     os.makedirs('temp_ogive_cases', exist_ok=True)
     case_name = f"ogive-L{length:.3f}-R{max_radius:.3f}"
     if USE_NOSE_CAP or use_hemisphere:
@@ -505,7 +532,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
     if USE_Z_SQUASH:
         case_name += f"-zs{z_squash:.3f}"
     if USE_Z_CUT and z_cut is not None:
-        case_name += f"-zc{z_cut:.3f}"
+        case_name += f"-zc{abs(z_cut):.3f}"
     
     case_dir = os.path.join('temp_ogive_cases', case_name)
     os.makedirs(case_dir, exist_ok=True)
@@ -514,11 +541,17 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
     os.chdir(case_dir)
     
     try:
-        # [1/4] Set up ogive geometry
+        # [1/4] Set up geometry
         if verbose:
             print(f"[1/4] Setting up ogive geometry...")
             if USE_NOSE_CAP or use_hemisphere:
                 print(f"      Nose radius: {nose_radius*1000:.2f} mm")
+            if USE_Z_CUT and z_cut_percent is not None:
+                if z_cut is None:
+                    print(f"      Z-cut: {z_cut_percent*100:.1f}% (no cut)")
+                else:
+                    print(f"      Z-cut: {z_cut_percent*100:.1f}% = {abs(z_cut)*1000:.1f} mm")
+        
         try:
             body, stl_filename, tri_filename = set_up_ogive(params)
         except Exception as e:
@@ -535,7 +568,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
         try:
             inst = WaveriderCase(stl_filename)
             fits = inst.try_fit_payload(verbose=False)
-            if not fits[0]:  # fits is a tuple (success, residual)
+            if not fits[0]:
                 if verbose:
                     print(f"✗ Geometry does not fit payload, residual: {fits[1]}")
                 penalty = 1e8 + abs(fits[1]) * 1e6
@@ -551,7 +584,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
                                     log_file=os.path.join(original_dir, "control_points.log"))
             return 1e9
         
-        # [3/4] Compute aerodynamic database
+        # [3/4] Compute aerodatabase
         try:
             if verbose:
                 print("[3/4] Computing aerodynamic database (running CBAERO)...")
@@ -564,7 +597,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
                                     log_file=os.path.join(original_dir, "control_points.log"))
             return 1e9
         
-        # [4/4] Calculate range using simple trajectory solver
+        # [4/4] Calculate range
         try:
             if verbose:
                 print("[4/4] Computing trajectory and range (simple solver)...")
@@ -584,13 +617,10 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
                                     log_file=os.path.join(original_dir, "control_points.log"))
             return 1e9
         
-        # Compute cost using global Q_DOT_LIMIT
+        # Compute cost
         cost = cost_function(rng, max_q_dot, q_dot_limit=Q_DOT_LIMIT)
         
-        # Return to original directory before logging
         os.chdir(original_dir)
-        
-        # Log control points
         write_control_points_log(params, particle_id, iteration, cost)
         
         if verbose:
@@ -676,6 +706,7 @@ def initialize_particle_near_profile(bounds, profile_blend=0.5, perturbation=0.1
 def parse_control_points_log(log_file):
     """Parse control_points.log to extract particle configurations."""
     if not os.path.exists(log_file):
+        print(f"  Log file not found: {log_file}")
         return []
     
     particles = []
@@ -684,114 +715,164 @@ def parse_control_points_log(log_file):
         with open(log_file, 'r') as f:
             lines = f.readlines()
         
+        print(f"  Reading {len(lines)} lines from log file...")
+        
         i = 0
         while i < len(lines):
             line = lines[i].strip()
             
-            if line.startswith('=') and i + 1 < len(lines):
-                header = lines[i + 1].strip()
-                if header.startswith('Particle'):
-                    parts = header.split('|')
-                    if len(parts) >= 3:
-                        cost_str = parts[2].split(':')[1].strip()
-                        try:
-                            cost = float(cost_str)
-                        except:
-                            cost = float('inf')
-                        
-                        i += 2
-                        params = {}
-                        
-                        # Look for geometry parameters
-                        while i < len(lines):
-                            line = lines[i].strip()
-                            
-                            if line.startswith('Length:'):
-                                parts = line.split('|')
-                                length_str = parts[0].split(':')[1].strip().replace('m', '').strip()
-                                radius_str = parts[1].split(':')[1].strip().replace('m', '').strip()
-                                
-                                try:
-                                    params['length'] = float(length_str)
-                                    params['max_radius'] = float(radius_str)
-                                except:
-                                    pass
-                                
+            # Look for particle header (line with ====)
+            if line.startswith('=') and '=' * 10 in line:
+                # Next line should be "Particle N | Iteration M | Cost: ..."
+                if i + 1 < len(lines):
+                    header = lines[i + 1].strip()
+                    if header.startswith('Particle'):
+                        parts = header.split('|')
+                        if len(parts) >= 3:
+                            try:
+                                cost_str = parts[2].split(':')[1].strip()
+                                cost = float(cost_str)
+                            except:
+                                print(f"    Warning: Could not parse cost from: {header}")
                                 i += 1
-                                break
+                                continue
                             
-                            i += 1
-                        
-                        # Look for optional parameters
-                        while i < len(lines):
-                            line = lines[i].strip()
+                            # Skip to next line after header separator
+                            i += 2
+                            if i < len(lines) and '=' in lines[i]:
+                                i += 1  # Skip second separator line
                             
-                            if line.startswith('Nose Radius:'):
-                                try:
-                                    nose_str = line.split(':')[1].strip().replace('mm', '').strip()
-                                    params['nose_radius'] = float(nose_str) / 1000.0  # Convert mm to m
-                                except:
-                                    pass
+                            params = {}
                             
-                            elif line.startswith('Z-Squash:'):
-                                try:
-                                    params['z_squash'] = float(line.split(':')[1].strip())
-                                except:
-                                    pass
-                            
-                            elif line.startswith('Z-Cut:'):
-                                try:
-                                    z_cut_str = line.split(':')[1].strip().replace('m', '').strip()
-                                    params['z_cut'] = float(z_cut_str)
-                                except:
-                                    pass
-                            
-                            elif line.startswith('Control Points'):
-                                i += 2  # Skip header and separator
+                            # Parse geometry lines
+                            while i < len(lines):
+                                line = lines[i].strip()
                                 
-                                # Skip nose point
-                                i += 1
+                                # Check for Length and Max Radius line
+                                if line.startswith('Length:'):
+                                    parts = line.split('|')
+                                    if len(parts) >= 2:
+                                        try:
+                                            length_str = parts[0].split(':')[1].strip().replace('m', '').strip()
+                                            radius_str = parts[1].split(':')[1].strip().replace('m', '').strip()
+                                            params['length'] = float(length_str)
+                                            params['max_radius'] = float(radius_str)
+                                        except Exception as e:
+                                            print(f"    Warning: Could not parse length/radius: {e}")
+                                    i += 1
+                                    continue
                                 
-                                # Parse 7 control points
-                                cp_names = ['cp1_r', 'cp2_r', 'cp3_r', 'cp4_r', 'cp5_r', 'cp6_r', 'cp7_r']
-                                for cp_name in cp_names:
+                                # Check for Nose Radius
+                                elif line.startswith('Nose Radius:'):
+                                    try:
+                                        nose_str = line.split(':')[1].strip().replace('mm', '').strip()
+                                        params['nose_radius'] = float(nose_str) / 1000.0
+                                    except Exception as e:
+                                        print(f"    Warning: Could not parse nose radius: {e}")
+                                    i += 1
+                                    continue
+                                
+                                # Check for Z-Squash
+                                elif line.startswith('Z-Squash:'):
+                                    try:
+                                        params['z_squash'] = float(line.split(':')[1].strip())
+                                    except Exception as e:
+                                        print(f"    Warning: Could not parse z-squash: {e}")
+                                    i += 1
+                                    continue
+                                
+                                # Check for Z-Cut (now handles both formats)
+                                elif line.startswith('Z-Cut:'):
+                                    try:
+                                        rest = line.split(':', 1)[1].strip()
+                                        # Check if it contains percentage
+                                        if '(' in rest and '%' in rest:
+                                            # Extract both value and percentage
+                                            z_cut_str = rest.split('(')[0].replace('m', '').strip()
+                                            percent_str = rest.split('(')[1].split('%')[0].strip()
+                                            if z_cut_str.lower() != 'none':
+                                                params['z_cut'] = float(z_cut_str)
+                                            params['z_cut_percent'] = float(percent_str) / 100.0
+                                        else:
+                                            # Old format: just the value
+                                            z_cut_str = rest.replace('m', '').strip()
+                                            if z_cut_str.lower() != 'none':
+                                                params['z_cut'] = float(z_cut_str)
+                                    except Exception as e:
+                                        print(f"    Warning: Could not parse z-cut: {e}")
+                                    i += 1
+                                    continue
+                                
+                                # Check for Control Points section
+                                elif 'Control Points' in line:
+                                    i += 1  # Skip "Control Points" line
                                     if i < len(lines):
-                                        line = lines[i].strip()
-                                        parts = line.split()
-                                        if len(parts) >= 3:
-                                            try:
-                                                params[cp_name] = float(parts[2])
-                                            except:
-                                                pass
+                                        i += 1  # Skip header line (X/L, X (m), ...)
+                                    if i < len(lines):
+                                        i += 1  # Skip separator line (----)
+                                    
+                                    # Skip NOSE line
+                                    if i < len(lines):
                                         i += 1
+                                    
+                                    # Parse 7 control points
+                                    cp_names = ['cp1_r', 'cp2_r', 'cp3_r', 'cp4_r', 
+                                               'cp5_r', 'cp6_r', 'cp7_r']
+                                    for cp_name in cp_names:
+                                        if i < len(lines):
+                                            cp_line = lines[i].strip()
+                                            parts = cp_line.split()
+                                            if len(parts) >= 4:
+                                                try:
+                                                    # Third column is r/R_max (normalized radius)
+                                                    params[cp_name] = float(parts[2])
+                                                except:
+                                                    print(f"    Warning: Could not parse {cp_name} from: {cp_line}")
+                                            i += 1
+                                    
+                                    # Done parsing this particle
+                                    break
                                 
-                                break
+                                else:
+                                    i += 1
                             
+                            # Check if we got valid parameters
+                            required_keys = ['cp1_r', 'cp2_r', 'cp3_r', 'cp4_r', 
+                                           'cp5_r', 'cp6_r', 'cp7_r', 
+                                           'length', 'max_radius']
+                            if all(k in params for k in required_keys):
+                                particles.append({'params': params, 'cost': cost})
+                            else:
+                                missing = [k for k in required_keys if k not in params]
+                                print(f"    Warning: Incomplete particle, missing: {missing}")
+                        else:
                             i += 1
-                        
-                        # Check if we got valid parameters (now 7 control points)
-                        required_keys = ['cp1_r', 'cp2_r', 'cp3_r', 'cp4_r', 'cp5_r', 'cp6_r', 'cp7_r',
-                                       'length', 'max_radius']
-                        if all(k in params for k in required_keys):
-                            particles.append({'params': params, 'cost': cost})
-                        
-                        continue
-            
-            i += 1
+                    else:
+                        i += 1
+                else:
+                    i += 1
+            else:
+                i += 1
         
-        print(f"  Parsed {len(particles)} particle configurations from log")
+        print(f"  ✓ Parsed {len(particles)} valid particle configurations from log")
         return particles
     
     except Exception as e:
-        print(f"  Warning: Error parsing log file: {e}")
+        print(f"  ❌ Error parsing log file: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
+
 def params_dict_to_position(params, bounds):
-    """Convert parameter dictionary to position vector matching bounds order."""
+    """Convert parameter dictionary to position vector matching bounds order.
+    
+    FIXED: Properly handles z_cut_percent reconstruction from both new and old logs.
+    """
     position = []
     idx = 0
     
-    # Nose radius (if enabled - for EITHER hemisphere or tangent sphere)
+    # Nose radius
     if USE_NOSE_CAP or use_hemisphere:
         value = params.get('nose_radius', DEFAULT_NOSE_RADIUS)
         lo, hi = bounds[idx]
@@ -822,7 +903,7 @@ def params_dict_to_position(params, bounds):
     position.append(value)
     idx += 1
     
-    # Optional parameters
+    # Z-squash
     if USE_Z_SQUASH:
         value = params.get('z_squash', 1.0)
         lo, hi = bounds[idx]
@@ -830,8 +911,29 @@ def params_dict_to_position(params, bounds):
         position.append(value)
         idx += 1
     
+    # Z-cut as percentage (FIXED!)
     if USE_Z_CUT:
-        value = params.get('z_cut', -0.025)
+        z_cut = params.get('z_cut')
+        z_cut_percent = params.get('z_cut_percent')
+        
+        # Priority 1: Use z_cut_percent if available (from new logs)
+        if z_cut_percent is not None:
+            value = z_cut_percent
+        # Priority 2: Reconstruct from z_cut (from old logs)
+        elif z_cut is not None:
+            max_radius = params.get('max_radius', 0.05)
+            z_squash = params.get('z_squash', 1.0)
+            effective_radius = max_radius * z_squash
+            # z_cut is negative: z_cut = -effective_radius * z_cut_percent
+            # So: z_cut_percent = -z_cut / effective_radius
+            if effective_radius > 0:
+                value = -z_cut / effective_radius
+            else:
+                value = 0.5  # Fallback
+        else:
+            # No cut (z_cut was None in log)
+            value = 1.05  # Default to no cut
+        
         lo, hi = bounds[idx]
         value = max(lo + 1e-12, min(hi - 1e-12, value))
         position.append(value)
@@ -972,7 +1074,8 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
         bounds.append((0.3, 1.0))  # z_squash: 1.0 = circular, <1 = flattened
     
     if USE_Z_CUT:
-        bounds.append((-0.1, 0))  # z_cut: negative z for bottom cut
+        #bounds.append((-0.1, 0))  # z_cut: negative z for bottom cut
+        bounds.append(Z_CUT_PERCENT_BOUNDS)  # (0.3, 1.1)
     
     dim = len(bounds)
     vel_bounds = [(-(hi - lo) * 0.5, (hi - lo) * 0.5) for lo, hi in bounds]
@@ -1099,10 +1202,17 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
         best_params['z_squash'] = DEFAULT_Z_SQUASH
     
     if USE_Z_CUT:
-        z_cut_raw = gbest_pos[idx]
-        best_params['z_cut'] = z_cut_raw if z_cut_raw > -best_params['max_radius'] else None
+        z_cut_percent = gbest_pos[idx]
+        effective_radius = best_params['max_radius'] * best_params['z_squash']
+        if z_cut_percent >= 1.0:
+            best_params['z_cut'] = None
+        else:
+            best_params['z_cut'] = -effective_radius * z_cut_percent
+        best_params['z_cut_percent'] = z_cut_percent
+        idx += 1
     else:
         best_params['z_cut'] = DEFAULT_Z_CUT
+        best_params['z_cut_percent'] = None
     
     est_range = -gbest_cost if gbest_cost < 0 else 0
     write_best_solution(best_params, 0, gbest_cost, est_range/1000, 0, "best_solution.log")
@@ -1173,10 +1283,17 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
                     best_params['z_squash'] = DEFAULT_Z_SQUASH
                 
                 if USE_Z_CUT:
-                    z_cut_raw = gbest_pos[idx_param]
-                    best_params['z_cut'] = z_cut_raw if z_cut_raw > -best_params['max_radius'] else None
+                    z_cut_percent = gbest_pos[idx_param]  # MUST BE FIRST
+                    effective_radius = best_params['max_radius'] * best_params['z_squash']
+                    if z_cut_percent >= 1.0:
+                        best_params['z_cut'] = None
+                    else:
+                        best_params['z_cut'] = -effective_radius * z_cut_percent
+                    best_params['z_cut_percent'] = z_cut_percent
+                    idx_param += 1
                 else:
                     best_params['z_cut'] = DEFAULT_Z_CUT
+                    best_params['z_cut_percent'] = None
                 
                 est_range = -gbest_cost if gbest_cost < 0 else 0
                 write_best_solution(best_params, it+1, gbest_cost, est_range/1000, 0, "best_solution.log")
@@ -1220,21 +1337,93 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
         best['z_squash'] = DEFAULT_Z_SQUASH
     
     if USE_Z_CUT:
-        z_cut_raw = gbest_pos[idx]
-        best['z_cut'] = z_cut_raw if z_cut_raw > -best['max_radius'] else None
+        z_cut_percent = gbest_pos[idx]  # MUST BE FIRST
+        effective_radius = best['max_radius'] * best['z_squash']
+        if z_cut_percent >= 1.0:
+            best['z_cut'] = None
+        else:
+            best['z_cut'] = -effective_radius * z_cut_percent
+        best['z_cut_percent'] = z_cut_percent
     else:
         best['z_cut'] = DEFAULT_Z_CUT
+        best['z_cut_percent'] = None
     
     return best, -gbest_cost, history
+
+
+def diagnose_restart_issue(log_file):
+    """Debug function to see what's being parsed from restart log."""
+    print(f"\n{'='*70}")
+    print(f"DIAGNOSING RESTART FROM: {log_file}")
+    print(f"{'='*70}\n")
+    
+    if not os.path.exists(log_file):
+        print(f"❌ Log file not found: {log_file}")
+        return
+    
+    particles = parse_control_points_log(log_file)
+    
+    if not particles:
+        print("❌ No particles parsed from log!")
+        return
+    
+    print(f"✓ Successfully parsed {len(particles)} particles\n")
+    
+    # Show first 3 particles
+    for i, p in enumerate(particles[:min(3, len(particles))]):
+        print(f"Particle {i+1}:")
+        print(f"  Cost: {p['cost']:.6g}")
+        print(f"  Keys: {list(p['params'].keys())}")
+        for key in ['length', 'max_radius', 'nose_radius', 'z_cut', 'z_cut_percent']:
+            val = p['params'].get(key, 'MISSING')
+            print(f"  {key}: {val}")
+        print(f"  CPs: ", end="")
+        for j in range(1, 8):
+            cp = p['params'].get(f'cp{j}_r', 'X')
+            print(f"{cp:.3f} " if cp != 'X' else "X ", end="")
+        print("\n")
+    
+    # Test conversion
+    print("Testing conversion to position vector...")
+    print(f"Feature flags: nose={USE_NOSE_CAP or use_hemisphere}, "
+          f"z_squash={USE_Z_SQUASH}, z_cut={USE_Z_CUT}")
+    
+    # Build bounds
+    bounds = []
+    if USE_NOSE_CAP or use_hemisphere:
+        bounds.append(NOSE_RADIUS_BOUNDS)
+    cp_r_bounds = [(0.05, 0.3), (0.1, 0.5), (0.15, 0.6), (0.2, 0.8), 
+                   (0.25, 0.9), (0.3, 1.0), (0.4, 1.0)]
+    bounds.extend(cp_r_bounds)
+    bounds.extend([(0.5, 1.0), (0.04, MAX_RADIUS_CONSTRAINT)])
+    if USE_Z_SQUASH:
+        bounds.append((0.3, 1.0))
+    if USE_Z_CUT:
+        bounds.append(Z_CUT_PERCENT_BOUNDS)
+    
+    print(f"Expected position vector length: {len(bounds)}")
+    
+    try:
+        pos = params_dict_to_position(particles[0]['params'], bounds)
+        print(f"✓ Conversion successful! Position length: {len(pos)}")
+        print(f"  Values: {[f'{p:.4f}' for p in pos]}")
+    except Exception as e:
+        print(f"❌ Conversion FAILED: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     print("="*70)
     print("OGIVE GEOMETRY OPTIMIZER (7 Control Points + Nose Cap)")
     print("="*70)
+
+    if ENABLE_RESTART and os.path.exists(RESTART_LOG_FILE):
+        diagnose_restart_issue(RESTART_LOG_FILE)
+        input("\nPress Enter to continue with optimization...")
     
     best, best_range, hist = pso_optimize(
         num_particles=8, 
-        iterations=10, 
+        iterations=4, 
         seed=42, 
         verbose=True
     )
