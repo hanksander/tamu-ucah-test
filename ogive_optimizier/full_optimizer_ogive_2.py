@@ -10,8 +10,9 @@ import scipy as sp
 import trimesh as tm
 from fit_optimizer_3 import WaveriderCase
 import multiprocessing
-#from simple_trajectory import run_dymos_optimization
-from diff_trajectory_optimizer import run_dymos_optimization
+from simple_trajectory import run_dymos_optimization
+#from diff_trajectory_optimizer import run_dymos_optimization
+
 from parametric_body_generator import (
     ParametricBody, 
     generate_parametric_body_mesh,
