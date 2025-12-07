@@ -216,7 +216,7 @@ def build_global_database(model_prefix, surrogate_type="linear"):
 # ====================== REALISTIC VEHICLE ======================
 class Vehicle:
     def __init__(self):
-        self.mass_ogive_kg = 45.0  # kg (glide vehicle)
+        self.mass_ogive_kg = 35.0  # kg (glide vehicle)
         self.S_ref = 0.0124  # m²
         self.target_altitude = 8000  # m (start altitude for glide)
         
@@ -327,6 +327,8 @@ class TrajectoryIntegrator:
         self.L_history = []
         self.D_history = []
         self.time_history = []
+        self.CL_history = []
+        self.CD_history = []
         
         def ode(t, y):
             x, h, v, gamma, m = y
@@ -447,6 +449,8 @@ class TrajectoryIntegrator:
             self.alphas_history.append(alpha_deg)
             self.L_history.append(L)
             self.D_history.append(D)
+            self.CL_history.append(CL)
+            self.CD_history.append(CD)
             self.time_history.append(sol.t[i])
         
         # Results
@@ -822,16 +826,26 @@ class TrajectoryIntegrator:
     
 #     return max_range, max_q_dot
 
-def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
+def run_dymos_optimization(path, plotting=True, surrogate_type="linear", q_dot_limit=1.2e6, mach_range=None, model_prefix="ogive"):
     """
     Drop-in replacement for Dymos optimization using vehicle-characteristic trajectory solver.
     Generates realistic glide-dive profiles: cruise at/below max L/D, then terminal dive.
     Scores based on range and terminal energy state (no hard Mach constraint).
     
+    Args:
+        path: Output path for plots
+        plotting: Whether to generate plots
+        surrogate_type: Type of surrogate model ("linear", "rbf", etc.)
+        q_dot_limit: Heat flux limit (W/m²)
+        mach_range: List of initial Mach numbers to test (default: [8.0])
+    
     Returns:
         max_range: Maximum range achieved (m)
         max_q_dot: Maximum heat flux (W/m²)
     """
+    if mach_range is None:
+        mach_range = [8.0]
+    
     print("\n" + "="*70)
     print("VEHICLE-CHARACTERISTIC TRAJECTORY OPTIMIZATION")
     print("="*70)
@@ -839,7 +853,7 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
     # Build global database and train models
     print("\n[1/5] Building aerodynamic database...")
     try:
-        merged, models, scalers, feature_cols = build_global_database("ogive", surrogate_type=surrogate_type)
+        merged, models, scalers, feature_cols = build_global_database(model_prefix, surrogate_type=surrogate_type)
     except Exception as e:
         print(f"ERROR: Failed to build global database: {e}")
         return 0, 1e9
@@ -909,12 +923,13 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
     
     # Define parameter ranges - tuned for hypersonic gliders
     altitude_range = [7500, 8000, 8500, 9000]  # meters
-    gamma_range = [-12, -10, -8, -6, -4, -2, -1, 0]  # degrees
-    mach_fixed = 8.0
+    gamma_range = [-8, -6, -4, -2, -1, 0, 1, 2, 4]  # degrees
     
     deployment_results = []
     
-    print(f"Testing {len(altitude_range)} × {len(gamma_range)} = {len(altitude_range)*len(gamma_range)} deployment conditions")
+    print(f"Testing {len(mach_range)} Mach × {len(altitude_range)} altitudes × {len(gamma_range)} gammas")
+    print(f"  = {len(mach_range) * len(altitude_range) * len(gamma_range)} deployment conditions")
+    print(f"Initial Mach numbers: {mach_range}")
     print(f"Scoring: Range + Terminal Energy State\n")
     
     # Preferred terminal velocity range (for scoring, not constraint)
@@ -925,204 +940,215 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
     ceiling_margin = 50   # meters (safety margin)
     
     # Test all combinations with vehicle-characteristic control
-    for h0 in altitude_range:
-        for gamma0_deg in gamma_range:
-            print(f"h={h0/1000:.1f}km, γ={gamma0_deg:+.1f}° ... ", end="")
-            
-            rho0, a0, T0 = Atmosphere.atmo_model(h0)
-            v0 = mach_fixed * a0
-            gamma0 = np.deg2rad(gamma0_deg)
-            initial_state = np.array([0.0, h0, v0, gamma0, vehicle.mass_ogive_kg])
-            
-            # Vehicle-characteristic alpha profile for glide-dive
-            def alpha_profile_glide_dive(t, state):
-                """
-                Glide-dive profile with strict ceiling management:
-                - Initial phase: manage deployment conditions carefully
-                - Cruise phase: fly at or below max L/D to maximize range
-                - Strict ceiling enforcement
-                - Terminal dive: gradual transition to efficient landing
-                """
-                h = state[1]
-                v = state[2]
-                gamma = state[3]
+    for mach_initial in mach_range:
+        print(f"\n--- Testing Mach {mach_initial:.1f} ---")
+        
+        for h0 in altitude_range:
+            for gamma0_deg in gamma_range:
+                print(f"M={mach_initial:.1f}, h={h0/1000:.1f}km, γ={gamma0_deg:+.1f}° ... ", end="")
                 
-                rho, a, T = Atmosphere.atmo_model(h)
-                M = v / max(a, 1.0)
+                rho0, a0, T0 = Atmosphere.atmo_model(h0)
+                v0 = mach_initial * a0
+                gamma0 = np.deg2rad(gamma0_deg)
+                initial_state = np.array([0.0, h0, v0, gamma0, vehicle.mass_ogive_kg])
                 
-                # Get vehicle's max L/D alpha for this Mach
-                alpha_maxLD = float(alpha_maxLD_interp(M))
-                
-                # === TERMINAL DIVE PHASE ===
-                if h < 2000:
-                    # Low altitude - transition to landing dive
-                    # Use speed to modulate alpha for reasonable terminal velocity
-                    if v > 1200:  # Very fast
-                        return max(-1.0, alpha_maxLD * 0.2)
-                    elif v > 800:  # Fast
-                        return alpha_maxLD * 0.4
-                    elif v > 500:  # Moderate
-                        return alpha_maxLD * 0.6
-                    else:  # Slow
-                        return alpha_maxLD * 0.3
-                
-                # === INITIAL PHASE (first few seconds after deployment) ===
-                if t < 10:  # First 10 seconds
-                    # Handle initial flight path angle carefully
-                    if gamma0_deg < -8:
-                        # Very steep initial descent - use minimal alpha
-                        alpha = alpha_maxLD * 0.3
-                    elif gamma0_deg < -4:
-                        # Moderate descent - use reduced alpha
-                        alpha = alpha_maxLD * 0.6
-                    elif gamma0_deg < 0:
-                        # Slight descent - can use more alpha
-                        alpha = alpha_maxLD * 0.8
-                    else:
-                        # Level or climbing - use conservative alpha
-                        alpha = alpha_maxLD * 0.7
+                # Vehicle-characteristic alpha profile for glide-dive
+                def alpha_profile_glide_dive(t, state):
+                    """
+                    Glide-dive profile with strict ceiling management:
+                    - Initial phase: manage deployment conditions carefully
+                    - Cruise phase: fly at or below max L/D to maximize range
+                    - Strict ceiling enforcement
+                    - Terminal dive: gradual transition to efficient landing
+                    """
+                    h = state[1]
+                    v = state[2]
+                    gamma = state[3]
                     
-                    # Override if too close to ceiling at start
-                    if h > ceiling_limit - 200:
+                    rho, a, T = Atmosphere.atmo_model(h)
+                    M = v / max(a, 1.0)
+                    
+                    # Get vehicle's max L/D alpha for this Mach
+                    alpha_maxLD = float(alpha_maxLD_interp(M))
+                    
+                    # === TERMINAL DIVE PHASE ===
+                    if h < 2000:
+                        # Low altitude - transition to landing dive
+                        # Use speed to modulate alpha for reasonable terminal velocity
+                        if v > 1200:  # Very fast
+                            return max(-1.0, alpha_maxLD * 0.2)
+                        elif v > 800:  # Fast
+                            return alpha_maxLD * 0.4
+                        elif v > 500:  # Moderate
+                            return alpha_maxLD * 0.6
+                        else:  # Slow
+                            return alpha_maxLD * 0.3
+                    
+                    # === INITIAL PHASE (first few seconds after deployment) ===
+                    if t < 10:  # First 10 seconds
+                        # Handle initial flight path angle carefully
+                        # More conservative for higher initial Mach
+                        mach_factor = 1.0 if mach_initial <= 6 else (1.0 - 0.1 * (mach_initial - 6))
+                        
+                        if gamma0_deg < -8:
+                            # Very steep initial descent - use minimal alpha
+                            alpha = alpha_maxLD * 0.3 * mach_factor
+                        elif gamma0_deg < -4:
+                            # Moderate descent - use reduced alpha
+                            alpha = alpha_maxLD * 0.6 * mach_factor
+                        elif gamma0_deg < 0:
+                            # Slight descent - can use more alpha
+                            alpha = alpha_maxLD * 0.8 * mach_factor
+                        else:
+                            # Level or climbing - use conservative alpha
+                            alpha = alpha_maxLD * 0.7 * mach_factor
+                        
+                        # Override if too close to ceiling at start
+                        if h > ceiling_limit - 200:
+                            alpha = min(alpha, 0.0)
+                        
+                        return np.clip(alpha, -2.0, 4.0)
+                    
+                    # === CRUISE PHASE ===
+                    # Base strategy: fly at max L/D or below (never above)
+                    alpha = alpha_maxLD
+                    
+                    # STRICT ceiling management with multiple layers
+                    altitude_margin = ceiling_limit - h
+                    
+                    if altitude_margin < ceiling_margin:
+                        # Emergency: at ceiling limit
+                        alpha = -1.5  # Strong negative alpha to force descent
+                    elif altitude_margin < 100:
+                        # Critical: very close to ceiling
+                        alpha = -0.5  # Negative alpha
+                    elif altitude_margin < 200:
+                        # Warning: approaching ceiling fast
+                        alpha = min(alpha, 0.0)  # Zero alpha (ballistic)
+                    elif altitude_margin < 300:
+                        # Caution: getting close
+                        alpha = min(alpha, alpha_maxLD * 0.2)
+                    elif altitude_margin < 500:
+                        # Moderate: reduce lift
+                        alpha = min(alpha, alpha_maxLD * 0.5)
+                    elif altitude_margin < 700:
+                        # Watch: slight reduction
+                        alpha = min(alpha, alpha_maxLD * 0.7)
+                    
+                    # Additional check: if climbing near ceiling, force descent
+                    if h > ceiling_limit - 400 and gamma > np.deg2rad(0.5):
+                        alpha = -0.5  # Negative lift to stop climb
+                    elif h > ceiling_limit - 500 and gamma > np.deg2rad(1.5):
+                        alpha = 0.0
+                    
+                    # Prevent excessive climb anywhere
+                    gamma_deg = np.rad2deg(gamma)
+                    if gamma_deg > 5:
+                        alpha = min(alpha, -0.5)
+                    elif gamma_deg > 3:
                         alpha = min(alpha, 0.0)
+                    elif gamma_deg > 2:
+                        alpha = min(alpha, alpha_maxLD * 0.4)
+                    elif gamma_deg > 1:
+                        alpha = min(alpha, alpha_maxLD * 0.7)
+                    
+                    # If in steep descent away from ceiling, allow full max L/D
+                    if gamma_deg < -3 and altitude_margin > 500:
+                        alpha = alpha_maxLD
+                    
+                    # Smooth transition to dive as altitude decreases
+                    if h < 4000 and h > 2000:
+                        # Transition zone
+                        transition_factor = (h - 2000) / 2000  # 1.0 at 4km, 0.0 at 2km
+                        dive_alpha = alpha_maxLD * 0.5
+                        alpha = alpha * transition_factor + dive_alpha * (1 - transition_factor)
                     
                     return np.clip(alpha, -2.0, 4.0)
                 
-                # === CRUISE PHASE ===
-                # Base strategy: fly at max L/D or below (never above)
-                alpha = alpha_maxLD
-                
-                # STRICT ceiling management with multiple layers
-                altitude_margin = ceiling_limit - h
-                
-                if altitude_margin < ceiling_margin:
-                    # Emergency: at ceiling limit
-                    alpha = -1.5  # Strong negative alpha to force descent
-                elif altitude_margin < 100:
-                    # Critical: very close to ceiling
-                    alpha = -0.5  # Negative alpha
-                elif altitude_margin < 200:
-                    # Warning: approaching ceiling fast
-                    alpha = min(alpha, 0.0)  # Zero alpha (ballistic)
-                elif altitude_margin < 300:
-                    # Caution: getting close
-                    alpha = min(alpha, alpha_maxLD * 0.2)
-                elif altitude_margin < 500:
-                    # Moderate: reduce lift
-                    alpha = min(alpha, alpha_maxLD * 0.5)
-                elif altitude_margin < 700:
-                    # Watch: slight reduction
-                    alpha = min(alpha, alpha_maxLD * 0.7)
-                
-                # Additional check: if climbing near ceiling, force descent
-                if h > ceiling_limit - 400 and gamma > np.deg2rad(0.5):
-                    alpha = -0.5  # Negative lift to stop climb
-                elif h > ceiling_limit - 500 and gamma > np.deg2rad(1.5):
-                    alpha = 0.0
-                
-                # Prevent excessive climb anywhere
-                gamma_deg = np.rad2deg(gamma)
-                if gamma_deg > 5:
-                    alpha = min(alpha, -0.5)
-                elif gamma_deg > 3:
-                    alpha = min(alpha, 0.0)
-                elif gamma_deg > 2:
-                    alpha = min(alpha, alpha_maxLD * 0.4)
-                elif gamma_deg > 1:
-                    alpha = min(alpha, alpha_maxLD * 0.7)
-                
-                # If in steep descent away from ceiling, allow full max L/D
-                if gamma_deg < -3 and altitude_margin > 500:
-                    alpha = alpha_maxLD
-                
-                # Smooth transition to dive as altitude decreases
-                if h < 4000 and h > 2000:
-                    # Transition zone
-                    transition_factor = (h - 2000) / 2000  # 1.0 at 4km, 0.0 at 2km
-                    dive_alpha = alpha_maxLD * 0.5
-                    alpha = alpha * transition_factor + dive_alpha * (1 - transition_factor)
-                
-                return np.clip(alpha, -2.0, 4.0)
-            
-            try:
-                result = integrator.glide_phase_with_alpha_profile(
-                    initial_state, alpha_profile_glide_dive, max_time=3600
-                )
-                
-                if result:
-                    range_km = result['final_range'] / 1000
-                    max_q = result['max_q_dot']
-                    max_alt = np.max(result['states'][1, :])
+                try:
+                    result = integrator.glide_phase_with_alpha_profile(
+                        initial_state, alpha_profile_glide_dive, max_time=3600
+                    )
                     
-                    # Check terminal state
-                    v_final = result['states'][2, -1]
-                    h_final = result['states'][1, -1]
-                    rho_f, a_f, _ = Atmosphere.atmo_model(max(h_final, 100))
-                    mach_final = v_final / a_f
-                    
-                    # Only hard constraints are ceiling and heat flux
-                    ceiling_ok = max_alt <= (ceiling_limit + ceiling_margin)
-                    q_dot_ok = max_q <= 1.5e6
-                    
-                    # Compute score based on range and terminal energy state
-                    score = range_km
-                    
-                    # Penalty for bad terminal Mach (prefer around 2.0, but not a constraint)
-                    mach_deviation = abs(mach_final - preferred_mach_terminal)
-                    if mach_deviation > 2.0:
-                        # Large penalty for very bad terminal speed
-                        score -= 5.0 * mach_deviation
-                    elif mach_deviation > 1.0:
-                        # Moderate penalty for somewhat off target
-                        score -= 2.0 * mach_deviation
+                    if result:
+                        range_km = result['final_range'] / 1000
+                        max_q = result['max_q_dot']
+                        max_alt = np.max(result['states'][1, :])
+                        
+                        # Check terminal state
+                        v_final = result['states'][2, -1]
+                        h_final = result['states'][1, -1]
+                        rho_f, a_f, _ = Atmosphere.atmo_model(max(h_final, 100))
+                        mach_final = v_final / a_f
+                        
+                        # Only hard constraints are ceiling and heat flux
+                        ceiling_ok = max_alt <= (ceiling_limit + ceiling_margin)
+                        q_dot_ok = max_q <= q_dot_limit
+                        
+                        # Compute score based on range and terminal energy state
+                        score = range_km
+                        
+                        # Penalty for bad terminal Mach (prefer around 2.0, but not a constraint)
+                        mach_deviation = abs(mach_final - preferred_mach_terminal)
+                        if mach_deviation > 2.0:
+                            # Large penalty for very bad terminal speed
+                            score -= 5.0 * mach_deviation
+                        elif mach_deviation > 1.0:
+                            # Moderate penalty for somewhat off target
+                            score -= 2.0 * mach_deviation
+                        else:
+                            # Small penalty for minor deviations
+                            score -= 0.5 * mach_deviation
+                        
+                        # Penalty for ceiling violation
+                        if not ceiling_ok:
+                            ceiling_violation = (max_alt - ceiling_limit - ceiling_margin) / 1000
+                            score -= 50.0 * ceiling_violation  # Severe penalty
+                        
+                        # Penalty for heat flux violation
+                        if not q_dot_ok:
+                            q_violation = (max_q - q_dot_limit) / 1e6
+                            score -= 20.0 * q_violation  # Severe penalty
+                        
+                        if ceiling_ok and q_dot_ok:
+                            print(f"✓ {range_km:.1f}km, M_f={mach_final:.1f}, q̇={max_q/1e6:.2f}MW/m², score={score:.1f}")
+                            deployment_results.append({
+                                'mach_initial': mach_initial,
+                                'h0': h0, 'gamma0_deg': gamma0_deg,
+                                'range_km': range_km, 'max_q_dot': max_q,
+                                'max_altitude': max_alt, 'result': result,
+                                'mach_final': mach_final,
+                                'score': score,
+                                'success': True
+                            })
+                        else:
+                            reasons = []
+                            if not ceiling_ok: reasons.append("ceiling")
+                            if not q_dot_ok: reasons.append("heat")
+                            print(f"✗ {','.join(reasons)}, M_f={mach_final:.1f}")
+                            deployment_results.append({
+                                'success': False,
+                                'score': score,
+                                'mach_initial': mach_initial,
+                                'h0': h0,
+                                'gamma0_deg': gamma0_deg
+                            })
                     else:
-                        # Small penalty for minor deviations
-                        score -= 0.5 * mach_deviation
-                    
-                    # Penalty for ceiling violation
-                    if not ceiling_ok:
-                        ceiling_violation = (max_alt - ceiling_limit - ceiling_margin) / 1000
-                        score -= 50.0 * ceiling_violation  # Severe penalty
-                    
-                    # Penalty for heat flux violation
-                    if not q_dot_ok:
-                        q_violation = (max_q - 1.5e6) / 1e6
-                        score -= 20.0 * q_violation  # Severe penalty
-                    
-                    if ceiling_ok and q_dot_ok:
-                        print(f"✓ {range_km:.1f}km, M={mach_final:.1f}, q̇={max_q/1e6:.2f}MW/m², score={score:.1f}")
-                        deployment_results.append({
-                            'h0': h0, 'gamma0_deg': gamma0_deg,
-                            'range_km': range_km, 'max_q_dot': max_q,
-                            'max_altitude': max_alt, 'result': result,
-                            'mach_final': mach_final,
-                            'score': score,
-                            'success': True
-                        })
-                    else:
-                        reasons = []
-                        if not ceiling_ok: reasons.append("ceiling")
-                        if not q_dot_ok: reasons.append("heat")
-                        print(f"✗ {','.join(reasons)}, M={mach_final:.1f}")
-                        deployment_results.append({
-                            'success': False,
-                            'score': score,
-                            'h0': h0,
-                            'gamma0_deg': gamma0_deg
-                        })
-                else:
-                    print("✗ failed")
+                        print("✗ failed")
+                        deployment_results.append({'success': False, 'score': -1e9})
+                except Exception as e:
+                    print(f"✗ error")
                     deployment_results.append({'success': False, 'score': -1e9})
-            except Exception as e:
-                print(f"✗ error")
-                deployment_results.append({'success': False, 'score': -1e9})
     
     # Select best deployment (by score, including failures)
     if deployment_results:
         best = max(deployment_results, key=lambda x: x.get('score', -1e9))
         
         if best.get('success', False):
-            print(f"\n★ OPTIMAL DEPLOYMENT: h={best['h0']/1000:.1f}km, γ={best['gamma0_deg']:.1f}°")
+            print(f"\n★ OPTIMAL DEPLOYMENT:")
+            print(f"  Mach: {best['mach_initial']:.1f}")
+            print(f"  Altitude: {best['h0']/1000:.1f} km")
+            print(f"  Flight Path Angle: {best['gamma0_deg']:.1f}°")
             print(f"  Range: {best['range_km']:.1f} km")
             print(f"  Terminal Mach: {best['mach_final']:.1f}")
             print(f"  Max Altitude: {best['max_altitude']/1000:.3f} km")
@@ -1138,7 +1164,7 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
                 return 0, 1e9
             
             best = max(completed, key=lambda x: x.get('score', -1e9))
-            print(f"  Using: h={best.get('h0', 0)/1000:.1f}km, γ={best.get('gamma0_deg', 0):.1f}°")
+            print(f"  Using: M={best.get('mach_initial', 0):.1f}, h={best.get('h0', 0)/1000:.1f}km, γ={best.get('gamma0_deg', 0):.1f}°")
             print(f"  Score: {best.get('score', -1e9):.1f}")
     else:
         print("\n✗✗ FATAL: No results at all!")
@@ -1148,9 +1174,12 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
     print("\n[4/5] REFINING VEHICLE-SPECIFIC GLIDE-DIVE STRATEGY")
     print("-"*50)
     
+    mach_best = best['mach_initial']
+    gamma0_deg_best = best['gamma0_deg']
+    
     rho0, a0, T0 = Atmosphere.atmo_model(best['h0'])
-    v0 = mach_fixed * a0
-    gamma0 = np.deg2rad(best['gamma0_deg'])
+    v0 = mach_best * a0
+    gamma0 = np.deg2rad(gamma0_deg_best)
     initial_state = np.array([0.0, best['h0'], v0, gamma0, vehicle.mass_ogive_kg])
     
     # Define multiple control strategies
@@ -1174,12 +1203,13 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
         
         # Initial phase
         if t < 10:
-            if gamma0_deg < -8:
-                return alpha_maxLD * 0.2
-            elif gamma0_deg < -4:
-                return alpha_maxLD * 0.5
+            mach_factor = 1.0 if mach_best <= 6 else (1.0 - 0.1 * (mach_best - 6))
+            if gamma0_deg_best < -8:
+                return alpha_maxLD * 0.2 * mach_factor
+            elif gamma0_deg_best < -4:
+                return alpha_maxLD * 0.5 * mach_factor
             else:
-                return alpha_maxLD * 0.6
+                return alpha_maxLD * 0.6 * mach_factor
         
         # Cruise - conservative (70% of max L/D)
         alpha = alpha_maxLD * 0.7
@@ -1218,10 +1248,11 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
         
         # Initial
         if t < 10:
-            if gamma0_deg < -8:
-                return alpha_maxLD * 0.4
+            mach_factor = 1.0 if mach_best <= 6 else (1.0 - 0.1 * (mach_best - 6))
+            if gamma0_deg_best < -8:
+                return alpha_maxLD * 0.4 * mach_factor
             else:
-                return alpha_maxLD * 0.8
+                return alpha_maxLD * 0.8 * mach_factor
         
         # Cruise - aggressive (95% of max L/D)
         alpha = alpha_maxLD * 0.95
@@ -1278,8 +1309,8 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
                 
                 if max_alt > ceiling_limit + ceiling_margin:
                     score -= 50.0 * (max_alt - ceiling_limit - ceiling_margin) / 1000
-                if max_q > 1.5e6:
-                    score -= 20.0 * (max_q - 1.5e6) / 1e6
+                if max_q > q_dot_limit:
+                    score -= 20.0 * (max_q - q_dot_limit) / 1e6
                 
                 result_data = {
                     'range_km': range_km,
@@ -1294,9 +1325,9 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
                 continue
         
         ceiling_ok = "✓" if result_data['max_altitude'] <= ceiling_limit + ceiling_margin else "✗"
-        q_ok = "✓" if result_data['max_q_dot'] <= 1.5e6 else "✗"
+        q_ok = "✓" if result_data['max_q_dot'] <= q_dot_limit else "✗"
         
-        print(f"{name:25s}: {result_data['range_km']:6.1f}km, M={result_data['mach_final']:.1f}, "
+        print(f"{name:25s}: {result_data['range_km']:6.1f}km, M_f={result_data['mach_final']:.1f}, "
               f"alt{ceiling_ok}, q̇{q_ok}, score={result_data['score']:6.1f}")
         
         results.append({
@@ -1306,7 +1337,8 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
             'range_km': result_data['range_km'],
             'max_q_dot': result_data['max_q_dot'],
             'max_altitude': result_data['max_altitude'],
-            'mach_final': result_data['mach_final']
+            'mach_final': result_data['mach_final'],
+            
         })
     
     if not results:
@@ -1326,9 +1358,9 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
     print(f"  - Average L/D: {avg_LD:.2f}")
     print(f"  - Optimal α Range: {np.min(optimal_alpha_vs_mach):.1f}° to {np.max(optimal_alpha_vs_mach):.1f}°")
     print(f"\nOptimal Deployment:")
+    print(f"  - Mach: {mach_best:.1f}")
     print(f"  - Altitude: {best['h0']/1000:.1f} km")
-    print(f"  - Flight Path Angle: {best['gamma0_deg']:.1f}°")
-    print(f"  - Mach: {mach_fixed:.1f}")
+    print(f"  - Flight Path Angle: {gamma0_deg_best:.1f}°")
     print(f"\nControl Strategy: {best_result['name']}")
     print(f"  (Glide at/below max L/D with strict ceiling)")
     print(f"\nPerformance:")
@@ -1343,41 +1375,93 @@ def run_dymos_optimization(path, plotting=True, surrogate_type="linear"):
     
     if plotting:
         plot_trajectory_results(best_result['result'], path, 
-                               f"{best_result['name']}")
+                               f"{best_result['name']}",
+                               q_dot_limit=q_dot_limit)
     
     print("="*70)
     
     return max_range, max_q_dot
 
-def plot_trajectory_results(result, path, strategy_name):
-    """Plot and save trajectory results"""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+def plot_trajectory_results(result, path, strategy_name, q_dot_limit=1.2e6):
+    """Plot and save trajectory results with 12 diagnostic plots"""
+    fig, axes = plt.subplots(4, 3, figsize=(15, 13))
     fig.suptitle(f'Glide Trajectory Results ({strategy_name})', fontsize=14)
     
+    # Extract data from result dictionary
     time = result['time']
     states = result['states']
-    x = states[0, :] / 1000  # km
-    h = states[1, :] / 1000  # km
-    v = states[2, :]  # m/s
-    gamma = np.rad2deg(states[3, :])  # deg
+    x = states[0, :] / 1000  # km (downrange)
+    h = states[1, :] / 1000  # km (altitude)
+    v = states[2, :]  # m/s (velocity)
+    gamma = np.rad2deg(states[3, :])  # deg (flight path angle)
     
-    # Calculate Mach history
+    # Extract stored histories
+    q_dot = np.array(result.get('q_dot', []))  # Heat flux
+    alpha = np.array(result.get('alphas', []))  # Angle of attack
+    L = np.array(result.get('L', []))  # Lift force
+    D = np.array(result.get('D', []))  # Drag force
+    
+    # Calculate additional quantities
     mach = []
+    q_dynamic = []  # Dynamic pressure
+    LD_ratio = []  # L/D ratio
+    CL_history = []
+    CD_history = []
+    
     for i in range(len(time)):
         rho, a, T = Atmosphere.atmo_model(states[1, i])
-        mach.append(states[2, i] / max(a, 1.0))
+        M = v[i] / max(a, 1.0)
+        mach.append(M)
+        
+        q_dyn = 0.5 * rho * v[i]**2
+        q_dynamic.append(q_dyn)
     
-    # 1. Trajectory
+    mach = np.array(mach)
+    q_dynamic = np.array(q_dynamic)
+    
+    # Calculate L/D ratio and CL/CD from forces
+    if len(L) > 0 and len(D) > 0:
+        LD_ratio = np.where(D > 1e-6, L / D, 0)
+        
+        # Calculate CL and CD from forces: CL = L/(q*S), CD = D/(q*S)
+        S_ref = 0.0124  # m² (from Vehicle class)
+        for i in range(min(len(L), len(q_dynamic))):
+            if q_dynamic[i] > 1e-6:
+                CL = L[i] / (q_dynamic[i] * S_ref)
+                CD = D[i] / (q_dynamic[i] * S_ref)
+                CL_history.append(CL)
+                CD_history.append(CD)
+            else:
+                CL_history.append(0)
+                CD_history.append(0)
+        
+        CL_history = np.array(CL_history)
+        CD_history = np.array(CD_history)
+    
+    # Ensure all histories have consistent length with time
+    n_time = len(time)
+    if len(q_dot) > n_time:
+        q_dot = q_dot[:n_time]
+    if len(alpha) > n_time:
+        alpha = alpha[:n_time]
+    if len(L) > n_time:
+        L = L[:n_time]
+    if len(D) > n_time:
+        D = D[:n_time]
+    if len(LD_ratio) > n_time:
+        LD_ratio = LD_ratio[:n_time]
+    
+    # === PLOT 1: Altitude vs Downrange ===
     ax = axes[0, 0]
     ax.plot(x, h, 'b-', linewidth=2)
     ax.axhline(y=9, color='r', linestyle='--', alpha=0.5, label='9 km ceiling')
-    ax.set_xlabel('Range (km)')
+    ax.set_xlabel('Downrange (km)')
     ax.set_ylabel('Altitude (km)')
-    ax.set_title('Trajectory Profile')
+    ax.set_title('Altitude vs Downrange')
     ax.grid(True)
     ax.legend()
     
-    # 2. Altitude vs Time
+    # === PLOT 2: Altitude vs Time ===
     ax = axes[0, 1]
     ax.plot(time, h, 'g-', linewidth=2)
     ax.axhline(y=9, color='r', linestyle='--', alpha=0.5)
@@ -1386,7 +1470,7 @@ def plot_trajectory_results(result, path, strategy_name):
     ax.set_title('Altitude vs Time')
     ax.grid(True)
     
-    # 3. Velocity vs Time
+    # === PLOT 3: Velocity vs Time ===
     ax = axes[0, 2]
     ax.plot(time, v, 'r-', linewidth=2)
     ax.set_xlabel('Time (s)')
@@ -1394,38 +1478,151 @@ def plot_trajectory_results(result, path, strategy_name):
     ax.set_title('Velocity vs Time')
     ax.grid(True)
     
-    # 4. Mach vs Time
+    # === PLOT 4: Alpha vs Time ===
     ax = axes[1, 0]
+    if len(alpha) > 0:
+        time_alpha = time[:len(alpha)]
+        ax.plot(time_alpha, alpha, 'orange', linewidth=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Angle of Attack (deg)')
+        ax.set_title('Alpha vs Time')
+        ax.grid(True)
+    else:
+        ax.text(0.5, 0.5, 'Alpha data not available', 
+                transform=ax.transAxes, fontsize=10, 
+                ha='center', va='center', color='gray')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Angle of Attack (deg)')
+        ax.set_title('Alpha vs Time')
+        ax.grid(True)
+    
+    # === PLOT 5: Gamma vs Time ===
+    ax = axes[1, 1]
+    ax.plot(time, gamma, 'k-', linewidth=2)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Flight Path Angle (deg)')
+    ax.set_title('Gamma vs Time')
+    ax.grid(True)
+    
+    # === PLOT 6: Heat Flux vs Time ===
+    ax = axes[1, 2]
+    if len(q_dot) > 0:
+        time_q = time[:len(q_dot)]
+        ax.plot(time_q, q_dot / 1e6, 'm-', linewidth=2)
+        ax.axhline(y=q_dot_limit / 1e6, color='r', linestyle='--', 
+                   alpha=0.5, label=f'{q_dot_limit/1e6:.1f} MW/m² limit')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Heat Flux (MW/m²)')
+        ax.set_title('Heat Flux vs Time')
+        ax.grid(True)
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, 'Heat flux data not available', 
+                transform=ax.transAxes, fontsize=10, 
+                ha='center', va='center', color='gray')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Heat Flux (MW/m²)')
+        ax.set_title('Heat Flux vs Time')
+        ax.grid(True)
+    
+    # === PLOT 7: L/D vs Time ===
+    ax = axes[2, 0]
+    if len(LD_ratio) > 0:
+        time_LD = time[:len(LD_ratio)]
+        # Clip extreme values for plotting
+        LD_plot = np.clip(LD_ratio, -5, 10)
+        ax.plot(time_LD, LD_plot, 'purple', linewidth=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('L/D Ratio')
+        ax.set_title('L/D vs Time')
+        ax.grid(True)
+    else:
+        ax.text(0.5, 0.5, 'L/D data not available', 
+                transform=ax.transAxes, fontsize=10, 
+                ha='center', va='center', color='gray')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('L/D Ratio')
+        ax.set_title('L/D vs Time')
+        ax.grid(True)
+    
+    # === PLOT 8: Mach vs Time ===
+    ax = axes[2, 1]
     ax.plot(time, mach, 'c-', linewidth=2)
     ax.axhline(y=2, color='orange', linestyle='--', alpha=0.5, label='Mach 2')
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Mach Number')
-    ax.set_title('Mach Number vs Time')
+    ax.set_title('Mach vs Time')
     ax.grid(True)
     ax.legend()
     
-    # 5. Heat Flux vs Time
-    ax = axes[1, 1]
-    if 'q_dot_history' in result:
-        ax.plot(result['time_history'][:len(result['q_dot_history'])], 
-                np.array(result['q_dot_history'])/1000,
-                'm-', linewidth=2)
-        ax.axhline(y=1200, color='r', linestyle='--', alpha=0.5, label='1.2 MW/m² limit')
+    # === PLOT 9: Lift and Drag vs Time ===
+    ax = axes[2, 2]
+    if len(L) > 0 and len(D) > 0:
+        time_forces = time[:min(len(L), len(D))]
+        L_plot = L[:len(time_forces)]
+        D_plot = D[:len(time_forces)]
+        
+        ax.plot(time_forces, L_plot, 'b-', linewidth=2, label='Lift')
+        ax.plot(time_forces, D_plot, 'r-', linewidth=2, label='Drag')
         ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Heat Flux (kW/m²)')
-        ax.set_title('Heat Flux vs Time')
+        ax.set_ylabel('Force (N)')
+        ax.set_title('Lift and Drag vs Time')
         ax.grid(True)
         ax.legend()
+    else:
+        ax.text(0.5, 0.5, 'Force data not available', 
+                transform=ax.transAxes, fontsize=10, 
+                ha='center', va='center', color='gray')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Force (N)')
+        ax.set_title('Lift and Drag vs Time')
+        ax.grid(True)
     
-    # 6. Flight Path Angle vs Time
-    ax = axes[1, 2]
-    ax.plot(time, gamma, 'k-', linewidth=2)
+    # === PLOT 10: Dynamic Pressure vs Time ===
+    ax = axes[3, 0]
+    ax.plot(time, q_dynamic / 1000, 'teal', linewidth=2)  # Convert to kPa
     ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Flight Path Angle (deg)')
-    ax.set_title('Flight Path Angle vs Time')
+    ax.set_ylabel('Dynamic Pressure (kPa)')
+    ax.set_title('Dynamic Pressure vs Time')
     ax.grid(True)
     
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # === PLOT 11: CL vs CD ===
+    ax = axes[3, 1]
+    if len(CL_history) > 0 and len(CD_history) > 0:
+        # Clip for reasonable plotting range
+        CL_plot = np.clip(CL_history, -2, 5)
+        CD_plot = np.clip(CD_history, 0, 3)
+        
+        # Color by time
+        scatter = ax.scatter(CD_plot, CL_plot, c=time[:len(CL_plot)], 
+                           cmap='viridis', s=10, alpha=0.6)
+        ax.plot(CD_plot, CL_plot, 'k-', linewidth=0.5, alpha=0.3)
+        
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label('Time (s)', fontsize=9)
+        
+        ax.set_xlabel('CD')
+        ax.set_ylabel('CL')
+        ax.set_title('CL vs CD')
+        ax.grid(True)
+    else:
+        ax.text(0.5, 0.5, 'CL/CD data not available', 
+                transform=ax.transAxes, fontsize=10, 
+                ha='center', va='center', color='gray')
+        ax.set_xlabel('CD')
+        ax.set_ylabel('CL')
+        ax.set_title('CL vs CD')
+        ax.grid(True)
+    
+    # === PLOT 12: Downrange vs Time ===
+    ax = axes[3, 2]
+    ax.plot(time, x, 'brown', linewidth=2)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Downrange (km)')
+    ax.set_title('Downrange vs Time')
+    ax.grid(True)
+    
+    plt.tight_layout(rect=[0, 0.02, 1, 0.98])
     
     # Save figure
     output_path = os.path.join(path, 'glide_flight_trajectory_results.png')
@@ -1433,8 +1630,8 @@ def plot_trajectory_results(result, path, strategy_name):
     print(f"\nPlot saved to: {output_path}")
     plt.close()
 
-
+    
 if __name__ == '__main__':
     # Test run
-    max_range, max_q_dot = run_dymos_optimization('.', plotting=True)
+    max_range, max_q_dot = run_dymos_optimization('.', plotting=True, surrogate_type="linear", q_dot_limit=1.3e6, mach_range=[8.0])
     print(f"\nFinal: Range = {max_range/1000:.1f} km, Q_dot = {max_q_dot:.0f} W/m²")

@@ -140,6 +140,67 @@ def collect_data_across_dirs(param, model_prefix="ogive"):
 
     return pd.concat(all_data, ignore_index=True)
 
+def verify_aero_data(merged_df):
+    """
+    Verify the loaded aerodynamic data for reasonableness.
+    Checks for:
+    - Expected L/D ratios
+    - Reasonable CL and CD values
+    - Data coverage
+    """
+    print("\n" + "="*60)
+    print("AERODYNAMIC DATA VERIFICATION")
+    print("="*60)
+    
+    if "CLw" in merged_df.columns and "CDw" in merged_df.columns:
+        # Calculate L/D where CD is not zero
+        valid_mask = (merged_df["CDw"] > 0.001) & (merged_df["CLw"].notna()) & (merged_df["CDw"].notna())
+        if valid_mask.sum() > 0:
+            ld_ratio = merged_df.loc[valid_mask, "CLw"] / merged_df.loc[valid_mask, "CDw"]
+            print(f"\nL/D Ratio Statistics:")
+            print(f"  Min:    {ld_ratio.min():.3f}")
+            print(f"  Max:    {ld_ratio.max():.3f}")
+            print(f"  Mean:   {ld_ratio.mean():.3f}")
+            print(f"  Median: {ld_ratio.median():.3f}")
+            
+            # Check for suspiciously high L/D
+            high_ld = ld_ratio > 4.5
+            if high_ld.sum() > 0:
+                print(f"\n  WARNING: {high_ld.sum()} points have L/D > 4.5")
+                print(f"  Maximum L/D found: {ld_ratio.max():.3f}")
+                # Show some examples
+                high_ld_df = merged_df.loc[valid_mask].loc[ld_ratio > 4.5].head(10)
+                print("\n  Sample high L/D points:")
+                print(high_ld_df[["Mach", "alpha", "CLw", "CDw"]].to_string())
+    
+    # CL statistics
+    if "CLw" in merged_df.columns:
+        cl_valid = merged_df["CLw"].notna()
+        print(f"\nCL Statistics ({cl_valid.sum()} valid points):")
+        print(f"  Min:  {merged_df.loc[cl_valid, 'CLw'].min():.4f}")
+        print(f"  Max:  {merged_df.loc[cl_valid, 'CLw'].max():.4f}")
+        print(f"  Mean: {merged_df.loc[cl_valid, 'CLw'].mean():.4f}")
+    
+    # CD statistics
+    if "CDw" in merged_df.columns:
+        cd_valid = merged_df["CDw"].notna()
+        print(f"\nCD Statistics ({cd_valid.sum()} valid points):")
+        print(f"  Min:  {merged_df.loc[cd_valid, 'CDw'].min():.4f}")
+        print(f"  Max:  {merged_df.loc[cd_valid, 'CDw'].max():.4f}")
+        print(f"  Mean: {merged_df.loc[cd_valid, 'CDw'].mean():.4f}")
+    
+    # Data coverage
+    print(f"\nData Coverage:")
+    print(f"  Total points: {len(merged_df)}")
+    if "Mach" in merged_df.columns:
+        print(f"  Mach range: [{merged_df['Mach'].min():.2f}, {merged_df['Mach'].max():.2f}]")
+    if "alpha" in merged_df.columns:
+        print(f"  Alpha range: [{merged_df['alpha'].min():.2f}, {merged_df['alpha'].max():.2f}] deg")
+    if "q" in merged_df.columns:
+        print(f"  Dynamic pressure range: [{merged_df['q'].min():.2e}, {merged_df['q'].max():.2e}] bar")
+    
+    print("="*60 + "\n")
+
 def build_global_database(model_prefix, surrogate_type="linear"):
     """
     Build a global merged DataFrame containing CLw, CDw, CMn, MaxQdotTotalQdotConvection
@@ -209,6 +270,9 @@ def build_global_database(model_prefix, surrogate_type="linear"):
         if merged[g].isna().any():
             median = merged[g].median(skipna=True)
             merged[g] = merged[g].fillna(median)
+
+    # VERIFY THE AERO DATA
+    verify_aero_data(merged)
 
     # Save global database to CSV
     outcsv = f"global_database_{model_prefix}.csv"
@@ -417,7 +481,11 @@ class RocketBoostEOM(om.ExplicitComponent):
         self.add_output('Lift', val=np.zeros(nn), units='N', desc='Total Lift Force')
         self.add_output('Mach', val=np.zeros(nn), desc='Mach Number')
         self.add_output('g_load', val=np.zeros(nn), units=None, desc='Load factor (L / (m*g0))')
-        self.add_output('q_dot', val=np.zeros(nn), units='W/m**2', desc='Stagnation Heat flux rate')  # Heat flux rate
+        self.add_output('q_dot', val=np.zeros(nn), units='W/m**2', desc='Stagnation Heat flux rate')
+        self.add_output('q_dyn', val=np.zeros(nn), units='Pa', desc='Dynamic pressure')
+        self.add_output('rho_atm', val=np.zeros(nn), units='kg/m**3', desc='Atmospheric density')
+        self.add_output('CL', val=np.zeros(nn), desc='Lift coefficient')
+        self.add_output('CD', val=np.zeros(nn), desc='Drag coefficient')
 
         # Partials setup (fd for simplicity)
         self.declare_partials(of='*', wrt='*', method='fd')
@@ -458,9 +526,11 @@ class RocketBoostEOM(om.ExplicitComponent):
         # Protect against division by zero or very small speed of sound
         a = np.maximum(a, 200.0)  # Minimum speed of sound ~200 m/s
         outputs['Mach'] = V / a
+        outputs['rho_atm'] = rho
 
         # 3. Aerodynamics (Shape-dependent forces) -- using your surrogate models
         q = 0.5 * rho * V**2 # Dynamic Pressure
+        outputs['q_dyn'] = q
         
         # Convert alpha to degrees for the model
         alpha_deg = np.rad2deg(alpha)
@@ -514,6 +584,8 @@ class RocketBoostEOM(om.ExplicitComponent):
         Lift = q * S * CL
         outputs['Drag'] = Drag
         outputs['Lift'] = Lift
+        outputs['CL'] = CL
+        outputs['CD'] = CD
         outputs['q_dot'] = q_dot
 
         # Rest of the method remains the same...
@@ -531,9 +603,68 @@ class RocketBoostEOM(om.ExplicitComponent):
         outputs['gamma_dot'] = (T * np.sin(alpha) + Lift) / (m * V_safe) + (V_safe / r - g / V_safe) * np.cos(gamma)
         outputs['x_dot'] = V * np.cos(gamma)
 
+def write_traj_file(sim_out, path):
+    """
+    Write trajectory data to a .traj file
+    """
+    time = sim_out.get_val('time')
+    V = sim_out.get_val('V')
+    Mach = sim_out.get_val('Mach')
+    x = sim_out.get_val('x')
+    h = sim_out.get_val('h')
+    rho_atm = sim_out.get_val('rho_atm')
+    lift = sim_out.get_val('Lift')
+    drag = sim_out.get_val('Drag')
+    q_dot = sim_out.get_val('q_dot')
+    alpha = sim_out.get_val('alpha')
+    gamma = sim_out.get_val('gamma')
+    q_dyn = sim_out.get_val('q_dyn')
+    m = sim_out.get_val('m')
+    
+    # Calculate L/D
+    ld = np.where(np.abs(drag) > 1e-6, lift / drag, 0.0)
+    
+    traj_file = os.path.join(path, 'trajectory.traj')
+    with open(traj_file, 'w') as f:
+        # Header
+        f.write(f"{'time':>12s} {'velocity':>12s} {'Mach':>12s} {'downrange':>12s} "
+                f"{'altitude':>12s} {'rho_atm':>12s} {'L':>12s} {'D':>12s} "
+                f"{'q_dot':>12s} {'alpha':>12s} {'gamma':>12s} {'L/D':>12s} "
+                f"{'q_dyn':>12s} {'mass':>12s}\n")
+        
+        f.write(f"{'(s)':>12s} {'(m/s)':>12s} {'':>12s} {'(m)':>12s} "
+                f"{'(m)':>12s} {'(kg/m³)':>12s} {'(N)':>12s} {'(N)':>12s} "
+                f"{'(W/m²)':>12s} {'(deg)':>12s} {'(deg)':>12s} {'':>12s} "
+                f"{'(Pa)':>12s} {'(kg)':>12s}\n")
+        
+        # Data rows
+        for i in range(len(time)):
+            # Handle both 1D and 2D array indexing
+            t_val = time[i] if time.ndim == 1 else time[i][0]
+            v_val = V[i] if V.ndim == 1 else V[i][0]
+            m_val = Mach[i] if Mach.ndim == 1 else Mach[i][0]
+            x_val = x[i] if x.ndim == 1 else x[i][0]
+            h_val = h[i] if h.ndim == 1 else h[i][0]
+            rho_val = rho_atm[i] if rho_atm.ndim == 1 else rho_atm[i][0]
+            l_val = lift[i] if lift.ndim == 1 else lift[i][0]
+            d_val = drag[i] if drag.ndim == 1 else drag[i][0]
+            q_val = q_dot[i] if q_dot.ndim == 1 else q_dot[i][0]
+            a_val = alpha[i] if alpha.ndim == 1 else alpha[i][0]
+            g_val = gamma[i] if gamma.ndim == 1 else gamma[i][0]
+            ld_val = ld[i] if ld.ndim == 1 else ld[i][0]
+            qd_val = q_dyn[i] if q_dyn.ndim == 1 else q_dyn[i][0]
+            mass_val = m[i] if m.ndim == 1 else m[i][0]
+            
+            f.write(f"{t_val:12.4f} {v_val:12.4f} {m_val:12.4f} {x_val:12.4f} "
+                    f"{h_val:12.4f} {rho_val:12.6f} {l_val:12.4f} {d_val:12.4f} "
+                    f"{q_val:12.4f} {np.rad2deg(a_val):12.4f} {np.rad2deg(g_val):12.4f} "
+                    f"{ld_val:12.4f} {qd_val:12.4f} {mass_val:12.4f}\n")
+    
+    print(f"Trajectory file written to: {traj_file}")
+
 def plot_results(sim_out, path):
     """
-    Generates plots from the Dymos simulation timeseries output.
+    Generates 12 plots from the Dymos simulation timeseries output.
     """
     time = sim_out.get_val('time')
     h = sim_out.get_val('h')
@@ -542,82 +673,124 @@ def plot_results(sim_out, path):
     Mach = sim_out.get_val('Mach')
     g_load = sim_out.get_val('g_load')
     q_dot = sim_out.get_val('q_dot')
-    l = sim_out.get_val('Lift')
-    d = sim_out.get_val('Drag')
-    loverd = l/d
-    alpha_deg = np.rad2deg(sim_out.get_val('alpha'))
+    lift = sim_out.get_val('Lift')
+    drag = sim_out.get_val('Drag')
+    gamma = sim_out.get_val('gamma')
+    alpha = sim_out.get_val('alpha')
+    q_dyn = sim_out.get_val('q_dyn')
+    CL = sim_out.get_val('CL')
+    CD = sim_out.get_val('CD')
+    
+    # Calculate L/D safely
+    ld = np.where(drag > 1e-6, lift / drag, 0.0)
+    
+    fig, axes = plt.subplots(nrows=4, ncols=3, figsize=(18, 16))
+    fig.suptitle('Glide/Flight Optimization Results (Start: h=8km, M=8, gamma=0)', fontsize=16)
 
-    fig, axes = plt.subplots(nrows=4, ncols=2, figsize=(12, 13))
-    fig.suptitle('Glide/Flight Optimization Results (Start: h=8km, M=8, gamma=0)', fontsize=14)
-
-    # 1. Altitude vs. Time
+    # 1. Altitude vs. Downrange
     ax = axes[0, 0]
-    ax.plot(time, h / 1000.0)
-    ax.set_title('Altitude vs. Time')
-    ax.set_xlabel('Time (s)')
+    ax.plot(x / 1000.0, h / 1000.0, 'b-', linewidth=2)
+    ax.set_title('Altitude vs. Downrange', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Downrange (km)')
     ax.set_ylabel('Altitude (km)')
-    ax.grid(True)
+    ax.grid(True, alpha=0.3)
 
-    # 2. Altitude vs. Range
+    # 2. Altitude vs. Time
     ax = axes[0, 1]
-    ax.plot(x / 1000.0, h / 1000.0)
-    ax.set_title('Trajectory (Altitude vs. Range)')
-    ax.set_xlabel('Range (km)')
+    ax.plot(time, h / 1000.0, 'b-', linewidth=2)
+    ax.set_title('Altitude vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
     ax.set_ylabel('Altitude (km)')
-    ax.grid(True)
+    ax.grid(True, alpha=0.3)
 
-    # 3. Mach vs. Time
-    ax = axes[1, 0]
-    ax.plot(time, Mach)
-    ax.set_title('Mach Number vs. Time')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Mach')
-    ax.grid(True)
-
-    # 4. G-Load vs. Time
-    ax = axes[1, 1]
-    ax.plot(time, g_load)
-    ax.set_title('G-Load vs. Time')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('G-Load (L/W)')
-    ax.grid(True)
-
-    # 5. Alpha vs. Time
-    ax = axes[2, 0]
-    ax.plot(time, alpha_deg)
-    ax.set_title('Angle of Attack vs. Time')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Alpha (deg)')
-    ax.grid(True)
-
-    # 6. Velocity vs. Time
-    ax = axes[2, 1]
-    ax.plot(time, V)
-    ax.set_title('Velocity vs. Time')
+    # 3. Velocity vs. Time
+    ax = axes[0, 2]
+    ax.plot(time, V, 'r-', linewidth=2)
+    ax.set_title('Velocity vs. Time', fontsize=12, fontweight='bold')
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Velocity (m/s)')
-    ax.grid(True)
+    ax.grid(True, alpha=0.3)
 
-    # 7. q_dot vs. Time
-    ax = axes[3, 0]
-    ax.plot(time, q_dot)
-    ax.set_title('Heat Flux vs. Time')
+    # 4. Alpha vs. Time
+    ax = axes[1, 0]
+    ax.plot(time, np.rad2deg(alpha), 'g-', linewidth=2)
+    ax.set_title('Angle of Attack vs. Time', fontsize=12, fontweight='bold')
     ax.set_xlabel('Time (s)')
-    ax.set_ylabel('q̇ (W/m2)')
-    ax.grid(True)
+    ax.set_ylabel('Alpha (deg)')
+    ax.grid(True, alpha=0.3)
 
-    # 8. L/D vs. Time 
-    ax = axes[3, 1]
-    ax.plot(time, loverd)
-    ax.set_title('L/D vs. Time')
+    # 5. Gamma vs. Time
+    ax = axes[1, 1]
+    ax.plot(time, np.rad2deg(gamma), 'purple', linewidth=2)
+    ax.set_title('Flight Path Angle vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Gamma (deg)')
+    ax.grid(True, alpha=0.3)
+
+    # 6. q_dot vs. Time
+    ax = axes[1, 2]
+    ax.plot(time, q_dot / 1e6, 'orange', linewidth=2)
+    ax.set_title('Heat Flux vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('q̇ (MW/m²)')
+    ax.grid(True, alpha=0.3)
+
+    # 7. L/D vs. Time
+    ax = axes[2, 0]
+    ax.plot(time, ld, 'cyan', linewidth=2)
+    ax.set_title('L/D vs. Time', fontsize=12, fontweight='bold')
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('L/D')
-    ax.grid(True)
+    ax.grid(True, alpha=0.3)
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # 8. Mach vs. Time
+    ax = axes[2, 1]
+    ax.plot(time, Mach, 'brown', linewidth=2)
+    ax.set_title('Mach Number vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Mach')
+    ax.grid(True, alpha=0.3)
+
+    # 9. Lift and Drag vs. Time
+    ax = axes[2, 2]
+    ax.plot(time, lift, 'b-', linewidth=2, label='Lift')
+    ax.plot(time, drag, 'r-', linewidth=2, label='Drag')
+    ax.set_title('Lift and Drag vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Force (N)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 10. Dynamic Pressure vs. Time
+    ax = axes[3, 0]
+    ax.plot(time, q_dyn / 1000.0, 'magenta', linewidth=2)
+    ax.set_title('Dynamic Pressure vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('q (kPa)')
+    ax.grid(True, alpha=0.3)
+
+    # 11. CL and CD vs. Time
+    ax = axes[3, 1]
+    ax.plot(time, CL, 'b-', linewidth=2, label='CL')
+    ax.plot(time, CD, 'r-', linewidth=2, label='CD')
+    ax.set_title('Lift and Drag Coefficients vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Coefficient')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 12. Lift over Weight vs. Time
+    ax = axes[3, 2]
+    ax.plot(time, lift / (sim_out.get_val('m') * 9.80665), 'teal', linewidth=2)
+    ax.set_title('Lift over Weight vs. Time', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('L / (m*g0)')
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.savefig(os.path.join(path, 'glide_flight_trajectory_results.png'), dpi=150, bbox_inches='tight')
     plt.show()
-    plt.savefig(path+'/glide_flight_trajectory_results.png')
-    plt.show()
+    print(f"Plots saved to: {os.path.join(path, 'glide_flight_trajectory_results.png')}")
 
 
 # --- 3. Setup the Dymos Optimization Problem (modified for flight starting at h=8km, M=8, gamma=0) ---
@@ -641,20 +814,25 @@ def run_dymos_optimization(path, plotting, surrogate_type="linear"):
     # num_segments increased to give more fidelity for descent/glide
     phase = dm.Phase(
         ode_class=lambda **kwargs: RocketBoostEOM(model_list, scalers, feature_cols, **kwargs),
-        transcription=dm.GaussLobatto(num_segments=15, order=7)
+        transcription=dm.GaussLobatto(num_segments=30, order=3)
     )
 
     # 3. Add the Phase to the Problem
     p.model.add_subsystem('phase0', phase)
 
-    # Timeseries outputs we want to inspect
+    # Timeseries outputs we want to inspect from the ODE
     phase.add_timeseries_output('Mach')
     phase.add_timeseries_output('Lift')
     phase.add_timeseries_output('Drag')
-    phase.add_timeseries_output('x')      
     phase.add_timeseries_output('g_load') 
-    phase.add_timeseries_output('alpha')
     phase.add_timeseries_output('q_dot')
+    phase.add_timeseries_output('q_dyn')
+    phase.add_timeseries_output('rho_atm')
+    phase.add_timeseries_output('CL')
+    phase.add_timeseries_output('CD')
+    
+    # States are automatically in timeseries
+    # x, h, V, gamma, alpha, m are already available
 
     # 4. Set Time (now for the full flight; allow long duration)
     phase.set_time_options(fix_initial=True, duration_bounds=(0.0, 10000.0), duration_ref=200.0)
@@ -673,7 +851,7 @@ def run_dymos_optimization(path, plotting, surrogate_type="linear"):
                     fix_initial=True, fix_final=False) 
 
     phase.add_state('m', units='kg', rate_source='m_dot',
-                    lower=10.0, ref=45.0,
+                    lower=10, ref=45,
                     fix_initial=True, # initial mass fixed
                     fix_final=False) 
 
@@ -685,7 +863,7 @@ def run_dymos_optimization(path, plotting, surrogate_type="linear"):
                       opt=True, continuity=True)
     
     # Path constraints
-    # phase.add_path_constraint('h', upper=9000.0, ref=9000.0)
+    phase.add_path_constraint('h', upper=9000.0, ref=9000.0)
     # phase.add_path_constraint('alpha', lower=np.deg2rad(-2), upper=np.deg2rad(6), ref=0.1)
     # phase.add_path_constraint('g_load', upper=25.0, ref=10.0)
     # phase.add_path_constraint('q_dot', upper=12000000.0, ref=100000.0)
@@ -708,7 +886,7 @@ def run_dymos_optimization(path, plotting, surrogate_type="linear"):
     p.setup(check=True)
 
     # Compute initial speed from Mach = 8 at h = 8000 m using same Temp formula as in the ODE
-    h0 = 8000.0
+    h0 = 9000.0
     Temp0 = (15.04 - 0.00649 * h0) + 273.1
     a0 = np.sqrt(1.4 * 287.05 * Temp0)
     mach0 = 8.0
@@ -770,10 +948,13 @@ def run_dymos_optimization(path, plotting, surrogate_type="linear"):
     # 12. Plot the results
     if plotting:
         plot_results(sim_out, path)
-        print(f"plotting at {path}")
+        print(f"Plots saved to {path}")
+    
+    # 13. Write trajectory file
+    write_traj_file(sim_out, path)
 
     return max_range, max_q_dot
 
 
 if __name__ == '__main__':
-    run_dymos_optimization()
+    run_dymos_optimization(r"./", plotting = True, surrogate_type="linear")

@@ -22,15 +22,15 @@ from parameter_solver import compute_reference_parameters
 # ============ CONFIGURATION ============
 # Toggle features on/off
 USE_Z_SQUASH = True  # Set True to enable elliptical cross-section
-USE_Z_CUT = False     # Set True to enable flat bottom cut
+USE_Z_CUT = True     # Set True to enable flat bottom cut
 # Default values when features are disabled
 DEFAULT_Z_SQUASH = 1.0  # Circular cross-section
 DEFAULT_Z_CUT = None    # No cut
 # NOSE CAP CONFIGURATION
 use_hemisphere = True  # Set True to enable hemisphere nose cap
 USE_NOSE_CAP = False  # Set True to enable old spherical nose cap
-DEFAULT_NOSE_RADIUS = 0.01  # 5mm default nose radius
-NOSE_RADIUS_BOUNDS = (0.005, 0.040)  # 1mm to 4cm
+DEFAULT_NOSE_RADIUS = 0.005  # 5mm default nose radius
+NOSE_RADIUS_BOUNDS = (0.007, 0.040)  # 1mm to 4cm
 # Fixed control point x-positions (as fractions of length)
 # Now includes 7 body control points
 FIXED_CP_X = [0.05, 0.15, 0.25, 0.40, 0.55, 0.75, 1.0]  # 7 control points
@@ -39,11 +39,13 @@ MAX_RADIUS_CONSTRAINT = 0.1  # Never exceed this radius
 # Z-CUT PERCENTAGE BOUNDS
 Z_CUT_PERCENT_BOUNDS = (0.3, 1.1)  # 30% to 110% of (max_radius * z_squash)
 # HEAT FLUX LIMITS (W/m²)
-Q_DOT_LIMIT = 1.2e6  # Optimizer cost function limit: 1.2 MW/m²
-Q_DOT_LIMIT_TRAJECTORY = 1.2e6  # Trajectory solver limit (can be different)
+Q_DOT_LIMIT = 0.9e6  # Optimizer cost function limit: 1.2 MW/m²
+Q_DOT_LIMIT_TRAJECTORY = 0.9e6  # Trajectory solver limit (can be different)
+#MINIMUM VOLUME CONSTRAINT
+MIN_VOLUME_LITERS = 4.0  # Minimum internal volume constraint (liters)
 # RESTART CAPABILITY
 ENABLE_RESTART = False  # Set True to initialize from previous run
-RESTART_LOG_FILE = "./control_points.log"
+RESTART_LOG_FILE = "/root/401/optimizer/results/ogive_optimization_1/control_points.log"
 # ========================================
 def set_up_ogive(params):
     """
@@ -333,8 +335,8 @@ def calculate_ogive_range(body):
         path, 
         plotting=True, 
         surrogate_type="linear", 
-        workers=16,
-        q_dot_limit=Q_DOT_LIMIT_TRAJECTORY
+        q_dot_limit=Q_DOT_LIMIT_TRAJECTORY,
+        mach_range = [6.5, 6.75, 7.0, 7.25, 7.5]
     )
     return max_range, max_q_dot
 
@@ -600,8 +602,6 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=True, particle_id=0, itera
             volume_m3 = compute_volume(vertices, triangles)
             volume_liters = volume_m3 * 1000.0  # Convert m³ to liters
             
-            MIN_VOLUME_LITERS = 10.0
-            
             if verbose:
                 print(f"      Computed volume: {volume_liters:.2f} liters")
             
@@ -753,9 +753,9 @@ def initialize_particle_near_profile(bounds, profile_blend=0.5, perturbation=0.1
         lo, hi = bounds[i]
         
         if i == idx:  # length
-            base_value = 0.95
+            base_value = 1
         elif i == idx + 1:  # max_radius
-            base_value = 0.08
+            base_value = 0.1
         else:  # z_squash or z_cut
             base_value = (lo + hi) / 2
         
@@ -1483,11 +1483,11 @@ if __name__ == "__main__":
 
     if ENABLE_RESTART and os.path.exists(RESTART_LOG_FILE):
         diagnose_restart_issue(RESTART_LOG_FILE)
-        input("\nPress Enter to continue with optimization...")
+        #input("\nPress Enter to continue with optimization...")
     
     best, best_range, hist = pso_optimize(
-        num_particles=3, 
-        iterations=5, 
+        num_particles=8, 
+        iterations=10, 
         seed=42, 
         verbose=True
     )

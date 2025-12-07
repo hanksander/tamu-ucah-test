@@ -472,7 +472,8 @@ def write_trajectory_file(trajectory, path, strategy_name, vehicle):
     print(f"     - Final downrange: {x[-1]/1000:.2f} km")
 
 def run_dymos_optimization(path, plotting=True, surrogate_type='linear', 
-                          workers=16, q_dot_limit=1.2e6, bounds_mach=(7.5, 8.0)):
+                          workers=16, q_dot_limit=1.2e6, bounds_mach=(7.5, 8.0),
+                          model_prefix='ogive'):
     """Compatibility wrapper with plotting integration and multithreading.
     Args:
         path: Output directory for plots
@@ -489,7 +490,7 @@ def run_dymos_optimization(path, plotting=True, surrogate_type='linear',
         raise RuntimeError("simple_trajectory.build_global_database not found") from e
     
     print('\n[trajectory_optimizer] Building aerodynamic database...')
-    merged, models, scalers, feature_cols = build_global_database('ogive', surrogate_type=surrogate_type)
+    merged, models, scalers, feature_cols = build_global_database(model_prefix, surrogate_type=surrogate_type)
     vehicle = Vehicle()
     aero_db = None
     try:
@@ -506,7 +507,7 @@ def run_dymos_optimization(path, plotting=True, surrogate_type='linear',
     
     best = optimize_with_shooting(integrator, vehicle, 
                                   n_alpha_cp=25, 
-                                  maxiter=5, 
+                                  maxiter=20, 
                                   popsize=5,
                                   workers=workers,
                                   q_dot_limit=q_dot_limit,
@@ -572,8 +573,8 @@ if __name__ == '__main__':
     
     # Test run with custom q_dot limit and Mach bounds
     n_workers = 16
-    custom_q_dot_limit = 0.95e6  # 0.95 MW/m²
-    custom_mach_bounds = (6.5, 8.0)  # Allow optimizer to find best Mach between 6.5 and 8
+    custom_q_dot_limit = 1.3e6  # 0.95 MW/m²
+    custom_mach_bounds = (7.9, 8.0)  # Allow optimizer to find best Mach between 6.5 and 8
     
     print(f"\nRunning optimization with {n_workers} workers...")
     print(f"Using custom q_dot limit: {custom_q_dot_limit/1e6:.2f} MW/m²")

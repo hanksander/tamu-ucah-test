@@ -29,7 +29,7 @@ DEFAULT_Z_CUT = None    # No cut
 # NOSE CAP CONFIGURATION
 use_hemisphere = True  # Set True to enable hemisphere nose cap
 USE_NOSE_CAP = False  # Set True to enable old spherical nose cap
-DEFAULT_NOSE_RADIUS = 0.01  # 5mm default nose radius
+DEFAULT_NOSE_RADIUS = 0.005  # 5mm default nose radius
 NOSE_RADIUS_BOUNDS = (0.007, 0.040)  # 1mm to 4cm
 # Fixed control point x-positions (as fractions of length)
 # Now includes 7 body control points
@@ -42,12 +42,10 @@ Z_CUT_PERCENT_BOUNDS = (0.3, 1.1)  # 30% to 110% of (max_radius * z_squash)
 Q_DOT_LIMIT = 1.3e6  # Optimizer cost function limit: 1.2 MW/m²
 Q_DOT_LIMIT_TRAJECTORY = 1.3e6  # Trajectory solver limit (can be different)
 #MINIMUM VOLUME CONSTRAINT
-MIN_VOLUME_LITERS = 10.0  # Minimum internal volume constraint (liters)
-#MACH EVALUATION RANGE
-MACH_RANGE = [7.5, 7.75, 8.0]
+MIN_VOLUME_LITERS = 6.0  # Minimum internal volume constraint (liters)
 # RESTART CAPABILITY
 ENABLE_RESTART = True  # Set True to initialize from previous run
-RESTART_LOG_FILE = "/root/401/optimizer/large_V/control_points_large_volume.log"
+RESTART_LOG_FILE = "control_points.log"
 # ========================================
 def set_up_ogive(params):
     """
@@ -338,7 +336,7 @@ def calculate_ogive_range(body):
         plotting=True, 
         surrogate_type="linear", 
         q_dot_limit=Q_DOT_LIMIT_TRAJECTORY,
-        mach_range = MACH_RANGE
+        mach_range = [7.75, 8.0]
     )
     return max_range, max_q_dot
 
@@ -1119,11 +1117,11 @@ def pso_optimize(num_particles=40, iterations=200, seed=None, verbose=True):
     # 7 radius control points (normalized 0-1, will be scaled by max_radius)
     # FIXED: More reasonable bounds for cp6 and cp7
     cp_r_bounds = [
-        (0.05, 0.3),   # cp1_r at x=0.05L
-        (0.1, 0.5),    # cp2_r at x=0.15L
-        (0.15, 0.6),   # cp3_r at x=0.25L
-        (0.2, 0.8),    # cp4_r at x=0.40L
-        (0.25, 0.9),   # cp5_r at x=0.55L
+        (0.05, 0.8),   # cp1_r at x=0.05L
+        (0.1, 0.8),    # cp2_r at x=0.15L
+        (0.15, 0.8),   # cp3_r at x=0.25L
+        (0.2, 1.0),    # cp4_r at x=0.40L
+        (0.25, 1.0),   # cp5_r at x=0.55L
         (0.3, 1.0),    # cp6_r at x=0.75L - CHANGED: can explore lower values
         (0.4, 1.0),    # cp7_r at x=1.0L (end) - CHANGED: minimum raised to maintain shape
     ]
@@ -1488,8 +1486,8 @@ if __name__ == "__main__":
         #input("\nPress Enter to continue with optimization...")
     
     best, best_range, hist = pso_optimize(
-        num_particles=6, 
-        iterations=11, 
+        num_particles=2, 
+        iterations=5, 
         seed=42, 
         verbose=True
     )

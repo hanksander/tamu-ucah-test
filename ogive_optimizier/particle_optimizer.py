@@ -18,6 +18,7 @@ from fit_optimizer_3 import *
 
 #from integrated_traj_test import run_dymos_optimization
 from diff_trajectory_optimizer import run_dymos_optimization
+#from simple_trajectory import run_dymos_optimization
 
 from manual_mesh_main import output_waverider_mesh
 
@@ -27,6 +28,8 @@ from parameter_solver import compute_reference_parameters
 OPTIMIZATION_ROOT = os.getcwd()  # Root optimization directory
 CBAERO_SCRIPT = os.path.join(OPTIMIZATION_ROOT, "run_cbaero.sh")  # Path to shell script
 PATH_TO_BINS = "/root/401/CBaero/bin"  # Update if needed
+
+MIN_VOLUME_LITERS = 3.9
 
 # # Setup virtual display for GUI applications if DISPLAY not set
 # USE_XVFB = os.environ.get('DISPLAY') is None
@@ -85,12 +88,14 @@ def set_up_waverider(params, case_dir):
 
     waverider_cad = to_CAD(waverider=waverider, sides='both', export=True,
                           filename="waverider.stl", scale=1)
+
+    volume = waverider_cad.val().Volume()
     
 
     os.system(f"mv ./waverider.stl {stl_path}")
 
     print(f"Exported waverider STL to: {stl_path}")
-    return waverider
+    return waverider, volume
 
 def check_fitting(filename, case_dir):
     stl_path = os.path.join(case_dir, 'waverider.stl')
@@ -231,7 +236,10 @@ def calculate_waverider_range(waverider, case_dir):
     os.chdir(case_dir)
     
     try:
-        max_range, max_q_dot = run_dymos_optimization(case_dir, plotting=True)
+        max_range, max_q_dot = run_dymos_optimization(case_dir, plotting=True, 
+                                                      q_dot_limit = 1.4e6, 
+                                                      #mach_range = [7.0, 7.25, 7.5, 7.75, 8.0],
+                                                      model_prefix="waverider")
         return max_range, max_q_dot
     finally:
         os.chdir(original_dir)
@@ -301,6 +309,7 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=False):
     # Use shorter directory name to avoid filesystem limits
     case_name = f'waverider-{X1:.4f}-{X2:.4f}-{X3:.4f}-{X4:.4f}-{M:.2f}-{length:.4f}-{width:.4f}-{height:.4f}'
     case_dir = os.path.join(temp_dir, case_name)
+    original_dir = os.getcwd()
     
     # If case already exists (retry), clean it
     if os.path.exists(case_dir):
@@ -317,10 +326,37 @@ def evaluate_particle(pos, penalty_coeff=1e6, verbose=False):
     try:
         if verbose:
             print("[1/4] Setting up waverider geometry...")
-        w = set_up_waverider(params, case_dir)
+        w, volume = set_up_waverider(params, case_dir)
     except Exception as e:
         if verbose:
             print(f"❌ set_up_waverider failed: {e}")
+        return 1e9
+
+
+    if verbose:
+        print(f"[1.5/4] Checking volume constraint...")
+    try:
+        volume_liters = volume * 1000.0  # Convert m³ to liters
+        
+        if verbose:
+            print(f"      Computed volume: {volume_liters:.2f} liters")
+        
+        if volume_liters < MIN_VOLUME_LITERS:
+            if verbose:
+                print(f"✗ Volume constraint violated: {volume_liters:.2f}L < {MIN_VOLUME_LITERS}L")
+            volume_deficit = MIN_VOLUME_LITERS - volume_liters
+            penalty = 1e7 + volume_deficit * 1e6
+            os.chdir(original_dir)
+            return penalty
+        elif verbose:
+            print(f"✓ Volume constraint satisfied ({volume_liters:.2f}L >= {MIN_VOLUME_LITERS}L)")
+            
+    except Exception as e:
+        if verbose:
+            print(f"✗ Volume computation failed: {e}")
+        os.chdir(original_dir)
+        write_control_points_log(params, particle_id, iteration, 1e9,
+                                log_file=os.path.join(original_dir, "control_points.log"))
         return 1e9
 
     # ---- Check fitting ----
@@ -537,8 +573,8 @@ if __name__ == "__main__":
     # perturbation=0.05 means particles vary by ±5% of parameter bounds
     # Set perturbation=0.0 to test ONLY the exact design (no variation)
     best, best_range, hist = pso_optimize(
-        num_particles=2,      # Fewer particles for testing
-        iterations=5,          # Fewer iterations for testing
+        num_particles=10,      # Fewer particles for testing
+        iterations=8,          # Fewer iterations for testing
         seed=42, 
         verbose=True,
         initial_design=initial_design,
