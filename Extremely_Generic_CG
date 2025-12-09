@@ -1,0 +1,83 @@
+import numpy as np
+import vedo
+
+class MeshCG:
+    def __init__(self, stl_fname):
+        self.mesh = vedo.Mesh(stl_fname)
+        self.additional_masses = []    # optional external masses
+
+    def add_mass(self, fname, mass, x_pos, y_pos=0, z_pos=0):
+        """Add an external mass (payload, battery, etc)."""
+        self.additional_masses.append({
+            "fname": fname,
+            "mass": mass,
+            "pos": np.array([x_pos, y_pos, z_pos])
+        })
+
+    def graph_vehicle(self):
+        meshes = []
+
+        # Main mesh
+        meshes.append(self.mesh.alpha(0.5))
+
+        # Additional components
+        for comp in self.additional_masses:
+            m = vedo.Mesh(comp["fname"]).pos(comp["pos"])
+            meshes.append(m)
+
+        plt = vedo.Plotter(title="Vehicle + Components", axes=1)
+        plt.show(meshes, interactive=True)
+
+    def get_stl_shell_cg(self):
+        """Return (CG, mass) of the STL shell only."""
+
+        mesh = self.mesh
+        mesh.triangulate()
+        points = mesh.points
+        face_idx = mesh.cells
+        
+        # All triangle vertices
+        faces = points[face_idx]
+        v0 = faces[:,0]
+        v1 = faces[:,1]
+        v2 = faces[:,2]
+
+        centroids = (v0 + v1 + v2) / 3.0
+
+        # Triangle area using cross product
+        areas = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
+
+        # --- uniform shell density (replace if needed) ---
+        density_kg_per_m2 = 0.5   # placeholder; change to whatever you want
+        masses = areas * density_kg_per_m2
+
+        total_mass = np.sum(masses)
+        CG = np.sum(centroids * masses[:,None], axis=0) / total_mass
+
+        return CG, total_mass
+
+    def get_cg(self):
+        """Total vehicle CG including additional masses."""
+        shell_CG, shell_mass = self.get_stl_shell_cg()
+
+        if len(self.additional_masses) == 0:
+            return shell_CG
+
+        total_CG = shell_CG * shell_mass
+        total_mass = shell_mass
+
+        for m in self.additional_masses:
+            total_CG += m["mass"] * m["pos"]
+            total_mass += m["mass"]
+
+        total_CG /= total_mass
+        return total_CG
+
+
+vehicle = MeshCG(r"C:\Users\kaden\Downloads\cube.stl")
+#vehicle.add_mass("payload.stl", mass=10.0, x_pos=0.10)
+
+vehicle.graph_vehicle()
+
+cg = vehicle.get_cg()
+print("Vehicle CG:", cg)
