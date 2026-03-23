@@ -428,6 +428,8 @@ def build_global_database(model_prefix, surrogate_type="linear"):
             median = merged[g].median(skipna=True)
             merged[g] = merged[g].fillna(median)
     
+    merged['q'] = merged['q'] * 1e5 # database originally has dynamic pressure in bar but we need to convert it to Pa
+    
     # VERIFY THE AERO DATA
     verify_aero_data(merged)
     
