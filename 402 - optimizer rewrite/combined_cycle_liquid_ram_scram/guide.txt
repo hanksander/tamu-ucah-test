@@ -1,0 +1,24 @@
+#Function to be added to trajectory/database code for liquid ram/scramjet--------------->
+
+from combined_cycle_liquid_ram_scram.main import analyze
+
+def lfrj_thrust_and_isp(
+    M:           float,
+    h:           float,
+    phi:         float,
+    ramp_angles: list[float] | None = None,
+    verbose:     bool = False,
+) -> tuple[float, float, float, float]:
+    
+    result = analyze(M0=M, altitude=h, phi=phi,
+                     ramp_angles=ramp_angles, verbose=False)
+
+    T_net    = float(result['thrust'])
+    Isp      = float(result['Isp'])
+    mdot_f   = float(result['mdot_fuel'])
+
+    Pt3 = float(result['Pt_stations'][3])
+    M3  = float(result['M_stations'][3])
+    Pc  = Pt3 / (1.0 + (GAMMA - 1.0) / 2.0 * M3**2) ** (GAMMA / (GAMMA - 1.0))
+
+    return T_net, Isp, mdot_f, Pc
