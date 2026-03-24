@@ -50,9 +50,10 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-from combined_cycle_liquid_ram_scram.main import analyze
-from combined_cycle_liquid_ram_scram.inlet import compute_inlet
-from combined_cycle_liquid_ram_scram.atmosphere import freestream
+from combined_cycle_liquid_ram_scram import analyze
+from combined_cycle_liquid_ram_scram import compute_inlet
+from combined_cycle_liquid_ram_scram import freestream
+from combined_cycle_liquid_ram_scram import FlowState
 
 
 import os
