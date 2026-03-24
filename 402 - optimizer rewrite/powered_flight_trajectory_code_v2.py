@@ -2,6 +2,7 @@ import numpy as np
 import openmdao.api as om
 import dymos as dm
 import matplotlib
+from pathlib import Path
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -750,8 +751,9 @@ def do_plots(tb, tc, td, feats):
         color='#f0f6fc', fontsize=11, fontweight='bold', y=0.997
     )
 
-    out = r'C:\Users\romag\Documents\capstone shit\402 - Dymos Rewrite\plots.png'
-    plt.savefig(out, dpi=150, bbox_inches='tight', facecolor='#0d1117')
+    output_dir = Path(__file__).parent / "plots"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_dir, dpi=150, bbox_inches='tight', facecolor='#0d1117')
     plt.close()
     print(f"Plots saved → {out}")
     return out
