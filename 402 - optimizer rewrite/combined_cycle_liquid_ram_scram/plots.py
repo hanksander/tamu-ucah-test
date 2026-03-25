@@ -358,7 +358,7 @@ def fig01_flowpath() -> None:
 
     # Ramp lower-wall solid body
     ramp_body = ([(rx[0], ry[0])] + list(zip(rx, ry))
-                 + [(rx[-1], ry[-1] - 0.10), (rx[0], -0.10)])
+                 + [(rx[-1], ry[-1] - 0.15), (rx[0], -0.15)])
     ax.add_patch(Polygon(ramp_body, closed=True,
                          facecolor="#bdbdbd", edgecolor="k", lw=1.8))
     ax.plot(rx, ry, "k-", lw=2.8)
@@ -556,7 +556,7 @@ def fig02_efficiencies() -> None:
                                                                          "config.py"],
         ["Mode transition Mach",          f"M = {M_TRANSITION}",        "config.py"],
         ["Inlet ramp angles",
-         f"{INLET_RAMPS_DEG[0]}°/{INLET_RAMPS_DEG[1]}°/{INLET_RAMPS_DEG[2]}°  (Σ=24°)",
+         f"{INLET_RAMPS_DEG[0]}°/{INLET_RAMPS_DEG[1]}°/{INLET_RAMPS_DEG[2]}°",
                                                                          "config.py"],
         ["Capture area A_c",              f"{A_CAPTURE:.3f} m²",        "config.py"],
         ["Inlet Pt rec. (M=8, 0° AoA)",  f"{η_inlet_scram*100:.1f}%",  "computed"],
@@ -882,6 +882,7 @@ def fig06_inlet_pt_recovery() -> None:
                   fontweight="bold")
     ax1.legend(fontsize=8)
 
+    '''
     # Annotate the discontinuity for the 0° AoA curve specifically
     mt0 = m_trans_per_aoa[0.0]
     ax1.axvspan(mt0 - 0.12, mt0 + 0.12,
@@ -894,7 +895,7 @@ def fig06_inlet_pt_recovery() -> None:
         arrowprops=dict(arrowstyle="->", color="#7f4f00", lw=0.9),
         bbox=dict(facecolor="#fffbe6", edgecolor="#c9a227", alpha=0.92, pad=3),
     )
-
+    '''
     mt_strs = ", ".join(
         f"AoA {a:+.0f}°→M={m_trans_per_aoa[a]:.2f}" for a in aoa_vals
     )
@@ -1453,6 +1454,140 @@ def fig11_isp() -> None:
     _save(fig, "fig11_isp.png")
 
 
+def fig12_ram_inlet_pt_recovery() -> None:
+    """
+    Inlet total-pressure recovery vs Mach for the ramjet (M = 3–5.5).
+
+    Forces RAM mode at every point so there are no mode-switching
+    discontinuities.  Pt recovery is altitude-independent for this model
+    (all shock relations depend only on Mach and γ); ALT_REF is arbitrary.
+
+    Three traces:
+      • RAM inlet model  (3 oblique shocks + terminal normal shock) — solid blue
+      • Oblique shocks only, no normal shock                        — dotted green
+      • MIL-E-5007D reference                                       — dashed black
+
+    Shaded band between the oblique-only and RAM curves shows the Pt
+    penalty paid by the terminal normal shock.  Shock wave angles β are
+    annotated at M = 3, 4, 5.
+    """
+    ALT_REF = 20_000.0  # arbitrary — result is altitude-independent
+
+    atm = Atmosphere(ALT_REF)
+    T0_ref = float(atm.temperature[0])
+    P0_ref = float(atm.pressure[0])
+
+    machs = np.linspace(3.0, M_TRANSITION, 120)
+
+    def _oblique_only(M0: float) -> float:
+        s0 = make_state(M0, T0_ref, P0_ref, gamma=AIR_GAMMA, R=AIR_R)
+        _, eta = compute_inlet(s0, INLET_RAMPS_DEG, mode='scram')
+        return eta
+
+    def _ram(M0: float) -> float:
+        s0 = make_state(M0, T0_ref, P0_ref, gamma=AIR_GAMMA, R=AIR_R)
+        _, eta = compute_inlet(s0, INLET_RAMPS_DEG, mode='ram')
+        return eta
+
+    eta_oblique = np.array([_oblique_only(M) for M in machs])
+    eta_ram = np.array([_ram(M) for M in machs])
+    eta_milspec = np.array([pi_milspec(M) for M in machs])
+
+    def _shock_angles(M0: float) -> list[float]:
+        """Oblique shock wave angles β [deg] at each ramp for freestream M0."""
+        angles, M_local = [], M0
+        for theta in INLET_RAMPS_DEG:
+            b = beta_from_theta(theta, M_local, AIR_GAMMA)
+            if b is None:
+                break
+            angles.append(np.degrees(b))
+            M2, *_ = oblique_shock(M_local, theta, AIR_GAMMA)
+            if M2 is None:
+                break
+            M_local = M2
+        return angles
+
+    fig, ax = plt.subplots(figsize=(10, 6.5))
+    fig.patch.set_facecolor("#fafafa")
+
+    # MIL-E-5007D reference
+    ax.plot(machs, eta_milspec, "k--", lw=1.8,
+            label="MIL-E-5007D reference")
+
+    # Oblique shocks only
+    ax.plot(machs, eta_oblique, color="#2ca25f", lw=2.0, ls=":",
+            label=f"Oblique shocks only  "
+                  f"({INLET_RAMPS_DEG[0]}°–{INLET_RAMPS_DEG[1]}°–{INLET_RAMPS_DEG[2]}°)")
+
+    # Normal-shock Pt penalty band
+    ax.fill_between(machs, eta_ram, eta_oblique,
+                    alpha=0.18, color="#d73027",
+                    label="Normal shock Pt penalty")
+
+    # RAM inlet model (main result)
+    ax.plot(machs, eta_ram, color="#2166ac", lw=2.8,
+            label="RAM inlet model  (3 oblique + normal shock)")
+
+    # Ramjet ceiling band
+    ax.axvspan(M_TRANSITION - 0.08, M_TRANSITION + 0.001,
+               color="#fd8d3c", alpha=0.35, zorder=0)
+    ax.axvline(M_TRANSITION, color="#d94801", lw=1.6, ls="--")
+    ax.text(M_TRANSITION - 0.06, 0.08,
+            f"Ramjet\nceiling\nM = {M_TRANSITION}",
+            ha="right", va="bottom", fontsize=9.5, color="#7f2704",
+            bbox=dict(facecolor="#fff3e0", edgecolor="#d94801",
+                      alpha=0.92, pad=3, boxstyle="round,pad=0.3"))
+
+    # Shock-angle annotations at M = 3, 4, 5
+    for Manno in [3.0, 4.0, 5.0]:
+        angles = _shock_angles(Manno)
+        idx = np.argmin(np.abs(machs - Manno))
+        yval = eta_ram[idx]
+        angle_str = " / ".join(f"{a:.1f}°" for a in angles)
+        ax.annotate(
+            f"M={Manno:.0f}\nβ = {angle_str}",
+            xy=(Manno, yval),
+            xytext=(Manno + 0.22, yval + 0.06 * (1 if Manno < 4 else -1)),
+            fontsize=8.0, color="#2166ac",
+            arrowprops=dict(arrowstyle="->", color="#2166ac", lw=0.9),
+            bbox=dict(facecolor="white", edgecolor="#aaaaaa", alpha=0.90,
+                      pad=2.5, boxstyle="round,pad=0.3"),
+        )
+
+    # Numeric labels on RAM curve at integer Mach + ceiling
+    for Mmark, dy in [(3.0, -0.055), (4.0, -0.055), (5.0, -0.055), (5.5, +0.03)]:
+        idx = np.argmin(np.abs(machs - Mmark))
+        ax.plot(machs[idx], eta_ram[idx], "o", color="#2166ac", ms=7, zorder=5)
+        ax.text(machs[idx], eta_ram[idx] + dy,
+                f"{eta_ram[idx]:.3f}",
+                ha="center", fontsize=9.5, color="#08306b", fontweight="bold")
+
+    ax.set_xlabel("Freestream Mach Number  M₀")
+    ax.set_ylabel("Inlet Total-Pressure Recovery  Pt₂ / Pt₀")
+    ax.set_xlim(3.0, M_TRANSITION + 0.15)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(
+        "Figure 12 — Ramjet Inlet Total-Pressure Recovery vs Mach Number\n"
+        f"Fixed-geometry inlet: {INLET_RAMPS_DEG[0]}°–{INLET_RAMPS_DEG[1]}°–"
+        f"{INLET_RAMPS_DEG[2]}° external ramps + terminal normal shock  (γ = {AIR_GAMMA})",
+        fontweight="bold",
+    )
+
+    info = (
+        "Model:\n"
+        f"  • 3 oblique shocks (ramp angles: "
+        f"{INLET_RAMPS_DEG[0]}° / {INLET_RAMPS_DEG[1]}° / {INLET_RAMPS_DEG[2]}°)\n"
+        "  • 1 terminal normal shock (RAM mode)\n"
+        "  • Rankine–Hugoniot relations, γ = 1.40\n"
+        "  • Pt recovery is altitude-independent\n"
+        f"  A_capture = {A_CAPTURE} m²"
+    )
+    ax.text(0.02, 0.03, info, transform=ax.transAxes, fontsize=8.5, va="bottom",
+            bbox=dict(facecolor="white", edgecolor="#aaaaaa", alpha=0.92, pad=5))
+
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    _save(fig, "fig12_ram_inlet_pt_recovery.png")
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1475,6 +1610,7 @@ def main() -> None:
         ("Fig  9 — Force accounting system",            fig09_force_accounting),
         ("Fig 10 — Thrust & FnWa vs Mach/alt/AoA",     fig10_thrust_fnwa),
         ("Fig 11 — Isp vs Mach/alt/AoA",               fig11_isp),
+        ("Fig 12 — RAM inlet Pt recovery (M=3–5.5)", fig12_ram_inlet_pt_recovery),
     ]
 
     t0 = time.time()

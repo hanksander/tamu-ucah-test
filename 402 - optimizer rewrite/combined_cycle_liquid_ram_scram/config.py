@@ -4,7 +4,7 @@ F_STOICH   = 0.0667     # stoichiometric fuel-air mass ratio
 MW_JP10    = 136.23     # molecular weight [g/mol]
 
 # ── Engine geometry (all areas normalised to A_capture = 1 m²) ──────────────
-A_CAPTURE  = 0.05        # capture area [m²] — scale thrust results linearly
+A_CAPTURE  = 0.1        # capture area [m²] — scale thrust results linearly
 
 # ── Inlet ramp angles ────────────────────────────────────────────────────────
 # Two-ramp external compression.  Tune these for your design Mach.
