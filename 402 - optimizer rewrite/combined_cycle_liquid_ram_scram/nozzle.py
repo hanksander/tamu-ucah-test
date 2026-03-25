@@ -16,6 +16,20 @@ The (P9−P0)·A9/ṁ term vanishes for perfect expansion.
 
 Isp is based on fuel mass flow (propulsion convention):
     Isp = F_sp / (f · g₀)         [s]
+
+CHANGES vs original
+-------------------
+- Added a γ-refinement pass: M9 and T9 are first estimated with the
+  combustor-exit γ (gam4), then Cantera gives gamma9/R9 at that T9,
+  and M9/T9 are recomputed with gamma9.  Without this pass the nozzle
+  used gam4 (lower, ~1.20) throughout, inflating M9 and hence V9.
+
+- Fixed speed-of-sound formula: V9 = M9·√(γ9·R9·T9).
+  The original used gam4 instead of gamma9 in the √() term, which
+  compounded the overestimate of V9 by mixing inconsistent γ values.
+
+- thermo.gamma() and thermo.R() now receive P0 as the exit pressure so
+  Cantera equilibrates at the correct nozzle-exit pressure.
 """
 
 import numpy as np
@@ -60,18 +74,32 @@ def compute_nozzle(
         # No thrust — engine is off or in drag
         return 0.0, 0.0, state4
 
-    M9  = isentropic_M_from_Pt_P(Pt4 / P0, gam4)
-    T9  = isentropic_T(Tt4, M9, gam4)
+    # ── First-pass estimate using combustor-exit γ ────────────────────────
+    M9 = isentropic_M_from_Pt_P(Pt4 / P0, gam4)
+    T9 = isentropic_T(Tt4, M9, gam4)
 
-    # Exit gas properties at T9 with product composition
-    gamma9 = thermo.gamma(T9, phi)
-    R9     = thermo.R(T9, phi)
+    # Exit gas properties at estimated T9 and actual exit pressure P0
+    gamma9 = thermo.gamma(T9, phi, P0)
+    R9     = thermo.R(T9, phi, P0)
 
-    # Ideal exit velocity, degraded by nozzle efficiency
-    V9_ideal = M9 * (gam4 * R9 * T9) ** 0.5
+    # ── Refinement pass — recompute M9 and T9 with correct exit γ ────────
+    # gam4 (combustor exit, ~1.20–1.22) differs from gamma9 (nozzle exit,
+    # ~1.24–1.27 at lower T).  Using gam4 throughout inflates M9 because
+    # γ/(γ-1) is larger for smaller γ, and also mixes inconsistent γ values
+    # inside and outside the √() in the speed-of-sound term.
+    M9     = isentropic_M_from_Pt_P(Pt4 / P0, gamma9)
+    T9     = isentropic_T(Tt4, M9, gamma9)
+    gamma9 = thermo.gamma(T9, phi, P0)   # update at refined T9
+    R9     = thermo.R(T9, phi, P0)
+
+    # ── Exit velocity ─────────────────────────────────────────────────────
+    # Use gamma9 and R9 consistently — both from Cantera at (T9, P0, phi).
+    # The original code used gam4 here, which was the second half of the
+    # mixed-γ bug (first half was in isentropic_M_from_Pt_P above).
+    V9_ideal = M9 * (gamma9 * R9 * T9) ** 0.5
     V9       = eta_n * V9_ideal
 
-    # Specific thrust (per kg air, momentum equation)
+    # ── Specific thrust and Isp ───────────────────────────────────────────
     f    = phi * F_STOICH     # fuel-air mass ratio
     V0   = state0.V
     F_sp = (1.0 + f) * V9 - V0   # [N·s/kg_air]

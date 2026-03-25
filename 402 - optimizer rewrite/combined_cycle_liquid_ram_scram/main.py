@@ -12,7 +12,6 @@ from config       import M_TRANSITION, A_CAPTURE, F_STOICH
 # Initialise Cantera once at import time
 _thermo = get_thermo()
 
-GAMMA = 1.4
 AIR_GAMMA = 1.40
 AIR_R     = 287.05   # J/(kg·K)
 G0        = 9.80665  # standard gravity [m/s²]
@@ -26,18 +25,47 @@ def analyze(
     verbose:     bool = False,
 ) -> dict:
 
-    # Freestream
+    # ── Freestream ─────────────────────────────────────────────────────────────
     atm = Atmosphere(altitude)
     T0  = float(atm.temperature[0])
     P0  = float(atm.pressure[0])
 
-    mode   = 'scram' if M0 >= M_TRANSITION else 'ram'
     state0 = make_state(M0, T0, P0, gamma=AIR_GAMMA, R=AIR_R)
 
-    # ── Cycle ──────────────────────────────────────────────────────────────────
-    state2, eta_pt = compute_inlet(state0, ramp_angles, mode)
-    state3         = compute_isolator(state2, mode)
-    state4, choked = compute_combustor(state3, phi, _thermo, mode=mode)
+    # ── Mode selection: M_TRANSITION ceiling ─────────────────────────────────
+    #
+    # The RAM->SCRAM transition is governed by terminal normal-shock total-
+    # pressure recovery, not by Rayleigh thermal choking.  As M0 increases,
+    # the normal shock Pt recovery collapses (e.g. ~0.44 at M=4, ~0.03 at
+    # M=6), making RAM mode thermodynamically untenable above M_TRANSITION.
+    #
+    # Rayleigh thermal choking (choked=True) must NOT be used to promote to
+    # SCRAM.  The reason is that the criterion is inverted:
+    #
+    #   Tt3 = Tt0  proportional to  M0^2   (adiabatic inlet)
+    #   Tt4/Tt3  =  (Tt3 + q_eff/cp) / Tt3  ->  1  as  M0 -> inf
+    #   Rayleigh choke threshold  Tt*/Tt3 ~ 2.33  (constant, M3=0.35)
+    #
+    #   => choke fires at LOW M0 (RAM is correct there)
+    #      choke clears at HIGH M0 (SCRAM is necessary there)
+    #
+    # Promoting to SCRAM on choke would produce SCRAM at M=4 and RAM at M=6,
+    # which is exactly backwards.  choked=True is a valid operating point
+    # (combustor at the Rayleigh limit, M4=1); it is not a mode-change signal.
+    # The flag is preserved in the output as a diagnostic for the user.
+
+    if M0 >= M_TRANSITION:
+        mode           = 'scram'
+        state2, eta_pt = compute_inlet(state0, ramp_angles, mode='scram')
+        state3         = compute_isolator(state2, mode='scram')
+        state4, choked = compute_combustor(state3, phi, _thermo, mode='scram')
+    else:
+        mode           = 'ram'
+        state2, eta_pt = compute_inlet(state0, ramp_angles, mode='ram')
+        state3         = compute_isolator(state2, mode='ram')
+        state4, choked = compute_combustor(state3, phi, _thermo, mode='ram')
+
+    # ── Nozzle ─────────────────────────────────────────────────────────────────
     F_sp, Isp, state9 = compute_nozzle(state4, state0, P0, phi, _thermo)
 
     # ── Mass flow rates ────────────────────────────────────────────────────────
@@ -108,4 +136,7 @@ def _print_cycle(r: dict):
 
 
 if __name__ == '__main__':
-    r = analyze(M0=8.0, altitude=25_000, phi=0.8, verbose=True)
+    '''
+    r = analyze(M0=6.0, altitude=25_000, phi=0.8, verbose=True)
+    '''
+

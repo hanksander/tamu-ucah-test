@@ -8,14 +8,14 @@ A_CAPTURE  = 0.05        # capture area [m²] — scale thrust results linearly
 
 # ── Inlet ramp angles ────────────────────────────────────────────────────────
 # Two-ramp external compression.  Tune these for your design Mach.
-INLET_RAMPS_DEG = [7.0, 7.0, 10.0]   # [deg] — weak shocks, low loss at Mach 6-10
+INLET_RAMPS_DEG = [7.0, 10.0, 13.0]   # [deg] — weak shocks, low loss at Mach 6-10
 
 # ── Mode transition ──────────────────────────────────────────────────────────
 M_TRANSITION = 5.5      # below → ramjet, above → scramjet
 
 # ── Component efficiencies ───────────────────────────────────────────────────
 ETA_COMBUSTOR = 0.90    # fraction of LHV that goes into the flow
-ETA_NOZZLE    = 0.98    # nozzle kinetic energy efficiency (velocity coefficient)
+ETA_NOZZLE    = 0.95    # nozzle kinetic energy efficiency (velocity coefficient)
 
 # ── Isolator loss model (scram mode) ────────────────────────────────────────
 ISOLATOR_PT_RECOVERY_SCRAM = 0.97   # Pt3/Pt2 for scramjet isolator shock train
