@@ -54,10 +54,11 @@ from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
 from sklearn.preprocessing import StandardScaler
 
 # ── LFRJ cycle solver ─────────────────────────────────────────────────────────
-from main import analyze
-from inlet import compute_inlet
-from atmosphere import freestream
-from gas_dynamics import FlowState  
+from combined_cycle_liquid_ram_scram.main import analyze
+from combined_cycle_liquid_ram_scram.inlet import compute_inlet
+from combined_cycle_liquid_ram_scram.atmosphere import freestream
+from combined_cycle_liquid_ram_scram.gas_dynamics import FlowState
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PHYSICAL CONSTANTS
@@ -112,7 +113,7 @@ LFRJ_MACH_MAX   = 6.0     # maximum Mach — physical limit of ram/scramjet cycl
 #   Range = M_FUEL_LFRJ / (phi * F_STOICH * rho(h) * A_INLET)
 # Solve for rho, then invert the ISA to find h.
 # Uses F_STOICH from config so it stays consistent with analyze().
-from config import F_STOICH as _F_STOICH_CFG
+from combined_cycle_liquid_ram_scram.config import F_STOICH as _F_STOICH_CFG
 _R_TARGET_M   = 500_000.0   # m  design range target for cruise phase
 _rho_cruise   = M_FUEL_LFRJ / (_R_TARGET_M * PHI_LFRJ * _F_STOICH_CFG * A_INLET)
 # Invert ISA stratosphere (11–25 km): rho = P/(R*T), P=22632*exp(-1.577e-4*(h-11000)), T=216.65
@@ -137,7 +138,7 @@ LFRJ_CRUISE_ALT = float(round(_h_strato / 500) * 500)  # round to nearest 500 m
 # The missile inlet is A_INLET = 0.012 m².  Every thrust and mdot_fuel value
 # returned by analyze() must be scaled by this ratio before use in the EOM.
 # Importing here keeps the scale factor derived from both sources — no hardcoding.
-from config import A_CAPTURE as _A_CAPTURE_CFG
+from combined_cycle_liquid_ram_scram.config import A_CAPTURE as _A_CAPTURE_CFG
 LFRJ_AREA_SCALE = A_INLET / _A_CAPTURE_CFG   # 0.012 / 0.05 = 0.24
 
 # ──────────────────────────────────────────────────────────────────────────────

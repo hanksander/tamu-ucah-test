@@ -35,19 +35,32 @@ sys.path.insert(0, os.path.dirname(__file__))
 import warnings
 warnings.filterwarnings('ignore')
 
+import importlib.util
 import numpy as np
 import openmdao.api as om
 from ambiance import Atmosphere
 
-from gas_dynamics import oblique_shock, normal_shock, pi_milspec
+from gas_dynamics import pi_milspec
 from pyc_config import (
-    A_CAPTURE, INLET_RAMPS_DEG,
     F_STOICH_JP7, ETA_COMBUSTOR,
     ETA_NOZZLE_CV, ISOLATOR_PT_RECOVERY,
     M_TRANSITION, RAM_COMBUSTOR_EXIT_MN,
+    INLET_DESIGN_M0, INLET_DESIGN_ALT_M,
+    INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
+    INLET_DESIGN_MDOT_KGS, INLET_DESIGN_WIDTH_M,
+    INLET_FOREBODY_SEP_MARGIN, INLET_RAMP_SEP_MARGIN,
+    INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
+    NOZZLE_TYPE,
 )
 from pyc_ram_cycle   import RamCycle
 from pyc_scram_cycle import ScramCycle
+import nozzle_design
+
+# 402inlet2.py — module name begins with a digit, import via importlib
+_inlet2_spec = importlib.util.spec_from_file_location(
+    'inlet2', os.path.join(os.path.dirname(__file__), '402inlet2.py'))
+_inlet2 = importlib.util.module_from_spec(_inlet2_spec)
+_inlet2_spec.loader.exec_module(_inlet2)
 
 G0      = 9.80665    # m/s^2
 AIR_GAM = 1.40
@@ -146,44 +159,70 @@ def _get_problem(mode):
 
 
 # ---------------------------------------------------------------------------
-# Inlet physics  (pre-computed outside pyCycle using gas_dynamics.py)
+# Inlet physics  (fixed 2-ramp shock-matched geometry from 402inlet2.py)
 # ---------------------------------------------------------------------------
+#
+# Geometry is designed once at first use from pyc_config defaults, then
+# evaluate_fixed_geometry_at_condition() is called per flight point.
+# If the frozen geometry cannot pass the flow at a given (M0, alpha),
+# the evaluator returns success=False and we fall back to MIL-E-5007D.
 
-def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None):
+_inlet_design = None
+
+
+def _get_inlet_design():
+    """Build and cache the frozen inlet geometry from pyc_config defaults."""
+    # Per-call override of design inputs is intentionally disabled for now;
+    # plumb arguments through here when that becomes useful.
+    # def _get_inlet_design(M0=None, alt=None, alpha=None, le_angle=None,
+    #                      mdot=None, width=None): ...
+    global _inlet_design
+    if _inlet_design is None:
+        _inlet_design = _inlet2.design_2ramp_shock_matched_inlet(
+            M0=INLET_DESIGN_M0,
+            altitude_m=INLET_DESIGN_ALT_M,
+            alpha_deg=INLET_DESIGN_ALPHA_DEG,
+            leading_edge_angle_deg=INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
+            mdot_required=INLET_DESIGN_MDOT_KGS,
+            width_m=INLET_DESIGN_WIDTH_M,
+            forebody_separation_margin=INLET_FOREBODY_SEP_MARGIN,
+            ramp_separation_margin=INLET_RAMP_SEP_MARGIN,
+            kantrowitz_margin=INLET_KANTROWITZ_MARGIN,
+            shock_focus_factor=INLET_SHOCK_FOCUS_FACTOR,
+        )
+    return _inlet_design
+
+
+def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
     """
-    Compute (ram_recovery, inlet_exit_MN) for pyCycle's Inlet element.
+    Compute (ram_recovery, inlet_exit_MN) for pyCycle's Inlet element using
+    the frozen 2-ramp geometry from 402inlet2.py.
 
-    RAM  : oblique shocks + terminal normal shock -> subsonic exit MN=0.35
-           Pt loss includes oblique + normal shock + isolator recovery.
-    SCRAM: oblique shocks only -> supersonic exit
-           Pt loss includes oblique shock train + isolator recovery.
-    Falls back to MIL-E-5007D if any shock detaches.
+    RAM  : Pt after cowl shock + immediate terminal normal shock, subsonic exit.
+    SCRAM: Pt after cowl shock, supersonic exit (post-cowl Mach).
+    ISOLATOR_PT_RECOVERY is applied on top of the shock train in both modes.
+    Falls back to MIL-E-5007D if the frozen geometry cannot ingest this point.
     """
-    if ramp_angles is None:
-        ramp_angles = INLET_RAMPS_DEG
+    # ramp_angles is kept in the signature for backwards compatibility but is
+    # unused — geometry is fixed at design time.
+    del ramp_angles
 
-    M, Pt_ratio = M0, 1.0
-    detached = False
+    design = _get_inlet_design()
+    case = _inlet2.evaluate_fixed_geometry_at_condition(
+        design, M0=M0, altitude_m=alt_m, alpha_deg=alpha_deg,
+    )
 
-    for theta in ramp_angles:
-        M2, _, _, Pt2Pt1, _ = oblique_shock(M, theta, AIR_GAM)
-        if M2 is None:
-            detached = True
-            break
-        Pt_ratio *= Pt2Pt1
-        M = M2
-
-    if detached:
-        Pt_ratio = pi_milspec(M0)
-        M = M0 * 0.75
+    if not case.get('success', False):
+        Pt_ratio = pi_milspec(M0) * ISOLATOR_PT_RECOVERY
+        exit_MN  = 0.35 if mode == 'ram' else max(M0 * 0.75, 1.05)
+        return float(Pt_ratio), float(exit_MN)
 
     if mode == 'ram':
-        M_ns, _, _, Pt_ns = normal_shock(M, AIR_GAM)
-        Pt_ratio *= Pt_ns * ISOLATOR_PT_RECOVERY
-        exit_MN   = min(float(M_ns), 0.35)
+        Pt_ratio = case['pt_frac_after_immediate_normal_shock'] * ISOLATOR_PT_RECOVERY
+        exit_MN  = min(float(case['M_after_immediate_normal_shock']), 0.35)
     else:
-        Pt_ratio *= ISOLATOR_PT_RECOVERY
-        exit_MN   = float(M) * 0.97
+        Pt_ratio = case['pt_frac_after_cowl_shock'] * ISOLATOR_PT_RECOVERY
+        exit_MN  = float(case['M_after_cowl_shock'])
 
     return float(Pt_ratio), float(exit_MN)
 
@@ -231,7 +270,11 @@ def analyze(
     rho0 = float(atm.density[0])       # kg/m^3
 
     V0      = M0 * np.sqrt(AIR_GAM * AIR_R * T0)
-    W_kgs   = rho0 * V0 * A_CAPTURE            # kg/s
+    # Capture area from the frozen 2-ramp inlet geometry (402inlet2.py).
+    # design['A_capture_required_m2'] is the geometric opening sized at the
+    # design point; mass flow at off-design scales as rho0*V0*A_capture.
+    A_capture_m2 = float(_get_inlet_design()['A_capture_required_m2'])
+    W_kgs   = rho0 * V0 * A_capture_m2         # kg/s
     W_lbms  = W_kgs * KG2LBM                   # lbm/s
 
     # Effective FAR (combustion efficiency applied here)
@@ -267,16 +310,42 @@ def analyze(
     # ── Solve ────────────────────────────────────────────────────────────────
     prob.run_model()
 
-    # ── Extract results in SI ────────────────────────────────────────────────
-    Fn_N    = float(prob.get_val('perf.Fn',    units='N')[0])
-    Wfuel   = float(prob.get_val('perf.Wfuel', units='kg/s')[0])
-
-    F_sp = Fn_N / max(W_kgs, 1e-12)
-    Isp  = Fn_N / max(Wfuel * G0, 1e-12)
-
     def _K(p):  return float(prob.get_val(p, units='degK')[0])
     def _Pa(p): return float(prob.get_val(p, units='Pa')[0])
     def _mn(p): return float(prob.get_val(p)[0])
+
+    # ── Nozzle: replace pyCycle's internal nozz with nozzle_design.py ───────
+    # Burner exit totals and mass flow feed a standalone FlowStart -> Nozzle
+    # problem built by nozzle_design.build_pycycle_problem (via
+    # run_pycycle_nozzle).  Thrust, Isp, throat area, exit area, and station
+    # 9 values below come from that run — pyCycle's perf element is ignored.
+    Pt4_Pa = _Pa('burner.Fl_O:tot:P')
+    Tt4_K  = _K('burner.Fl_O:tot:T')
+    MN4    = _mn('burner.Fl_O:stat:MN')
+    W4_kgs = float(prob.get_val('burner.Fl_O:stat:W', units='kg/s')[0])
+
+    noz = nozzle_design.run_pycycle_nozzle(
+        m_inlet=MN4,
+        pt_inlet=Pt4_Pa,
+        tt_inlet=Tt4_K,
+        ps_exhaust=P0,
+        cv=ETA_NOZZLE_CV,
+        nozzle_type=NOZZLE_TYPE,
+        mass_flow=W4_kgs,
+        ambient_pressure=P0,
+    )
+    nozzle_exit   = noz['exit']
+    nozzle_throat = noz['throat']
+    nozzle_perf   = noz['performance']
+
+    # F_cruise = momentum + pressure thrust at ambient (gross thrust).
+    # Net thrust for a ramjet subtracts ram drag on the captured air stream:
+    #     Fn = F_cruise - mdot_air * V0
+    Fn_N  = float(nozzle_perf['F_cruise']) - W_kgs * V0
+    Wfuel = float(W_kgs * FAR)
+
+    F_sp = Fn_N / max(W_kgs, 1e-12)
+    Isp  = Fn_N / max(Wfuel * G0, 1e-12)
 
     choked = False
     if mode == 'scram':
@@ -294,26 +363,30 @@ def analyze(
             0: _K('fc.Fl_O:stat:T'),
             3: _K('inlet.Fl_O:stat:T'),
             4: _K('burner.Fl_O:stat:T'),
-            9: _K('nozz.Fl_O:stat:T'),
+            9: float(nozzle_exit['T']),
         },
         Tt_stations={
             0: _K('fc.Fl_O:tot:T'),
             3: _K('inlet.Fl_O:tot:T'),
             4: _K('burner.Fl_O:tot:T'),
-            9: _K('nozz.Fl_O:tot:T'),
+            9: float(nozzle_exit['Tt']),
         },
         M_stations={
             0: M0,
             3: _mn('inlet.Fl_O:stat:MN'),
             4: _mn('burner.Fl_O:stat:MN'),
-            9: _mn('nozz.Fl_O:stat:MN'),
+            9: float(nozzle_exit['M']),
         },
         Pt_stations={
             0: _Pa('fc.Fl_O:tot:P'),
             3: _Pa('inlet.Fl_O:tot:P'),
             4: _Pa('burner.Fl_O:tot:P'),
-            9: _Pa('nozz.Fl_O:tot:P'),
+            9: float(nozzle_exit['Pt']),
         },
+        nozzle_throat_area=float(nozzle_throat['area']),
+        nozzle_exit_area=float(nozzle_exit['area']),
+        nozzle_area_ratio=float(nozzle_perf['area_ratio']),
+        nozzle_expansion=nozzle_perf['expansion_state'],
     )
 
     if verbose:
@@ -364,7 +437,7 @@ def _print_cycle(r):
     print()
     print(f"  Isp       = {r['Isp']:>8.1f} s")
     print(f"  F_sp      = {r['F_sp']:>8.1f} N*s/kg_air")
-    print(f"  Thrust    = {r['thrust']/1e3:>8.2f} kN   (A_cap={A_CAPTURE} m^2)")
+    print(f"  Thrust    = {r['thrust']/1e3:>8.2f} kN ")
     print(f"  mdot_air  = {r['mdot_air']:>7.3f} kg/s")
     print(f"  mdot_fuel = {r['mdot_fuel']*1e3:>7.3f} g/s")
     print(f"  eta_pt    = {r['eta_pt']:.4f}   choked={r['choked']}")
@@ -380,4 +453,4 @@ if __name__ == '__main__':
     print("=" * 60)
 
     print("\n--- Design point: RAM  M=4.5, alt=20km, phi=0.8 ---")
-    analyze(M0=4.5, altitude_m=20_000, phi=0.8, M_transition=5.0, verbose=True)
+    analyze(M0=4.0, altitude_m=12_000, phi=0.8, M_transition=5.2, verbose=True)
