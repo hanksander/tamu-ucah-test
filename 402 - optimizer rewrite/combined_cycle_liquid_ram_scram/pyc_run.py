@@ -193,37 +193,46 @@ def _get_inlet_design():
     return _inlet_design
 
 
+def compute_precowl_state(M0, alt_m, alpha_deg=0.0):
+    """
+    Explicit, non-iterative: run the frozen oblique-shock chain up to the
+    cowl-shock exit and return Pt_after_cowl, Tt0, M3, plus a success flag.
+    Separated so it can be called once per design point and its outputs
+    fed into the Newton-looped DiffuserTerminalShock component.
+    """
+    design = _get_inlet_design()
+    case = _inlet2.evaluate_fixed_geometry_at_condition(
+        design, M0=M0, altitude_m=alt_m, alpha_deg=alpha_deg,
+        p_back=1.0,
+    )
+    return design, case
+
+
 def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
     """
-    Compute (ram_recovery, inlet_exit_MN) for pyCycle's Inlet element using
-    the frozen 2-ramp geometry from 402inlet2.py.
+    RAM mode: returns (None, None). ram_recovery and MN_exit are driven by
+    DiffuserTerminalShock inside RamCycle's Newton loop; analyze() sets
+    diff.M0 / diff.alt_m instead.
 
-    RAM  : Pt after cowl shock + immediate terminal normal shock, subsonic exit.
-    SCRAM: Pt after cowl shock, supersonic exit (post-cowl Mach).
-    ISOLATOR_PT_RECOVERY is applied on top of the shock train in both modes.
-    Falls back to MIL-E-5007D if the frozen geometry cannot ingest this point.
+    SCRAM mode: explicit (shock is swallowed past the throat).
     """
-    # ramp_angles is kept in the signature for backwards compatibility but is
-    # unused — geometry is fixed at design time.
     del ramp_angles
+
+    if mode == 'ram':
+        return None, None
 
     design = _get_inlet_design()
     case = _inlet2.evaluate_fixed_geometry_at_condition(
         design, M0=M0, altitude_m=alt_m, alpha_deg=alpha_deg,
+        p_back=1.0,
     )
-
     if not case.get('success', False):
         Pt_ratio = pi_milspec(M0) * ISOLATOR_PT_RECOVERY
-        exit_MN  = 0.35 if mode == 'ram' else max(M0 * 0.75, 1.05)
+        exit_MN  = max(M0 * 0.75, 1.05)
         return float(Pt_ratio), float(exit_MN)
 
-    if mode == 'ram':
-        Pt_ratio = case['pt_frac_after_immediate_normal_shock'] * ISOLATOR_PT_RECOVERY
-        exit_MN  = min(float(case['M_after_immediate_normal_shock']), 0.35)
-    else:
-        Pt_ratio = case['pt_frac_after_cowl_shock'] * ISOLATOR_PT_RECOVERY
-        exit_MN  = float(case['M_after_cowl_shock'])
-
+    Pt_ratio = case['pt_frac_after_cowl_shock'] * ISOLATOR_PT_RECOVERY
+    exit_MN  = float(case['M_after_cowl_shock'])
     return float(Pt_ratio), float(exit_MN)
 
 
@@ -252,7 +261,10 @@ def compute_combustor_geometry(
     if height_m is None:
         if design is None:
             raise ValueError("height_m or design must be provided.")
-        if "throat_height_m" in design:
+        diff = design.get("diffuser") if isinstance(design, dict) else None
+        if diff is not None:
+            height_m = float(diff["h_exit"])
+        elif "throat_height_m" in design:
             height_m = float(design["throat_height_m"])
         else:
             t_up = np.asarray(design["throat_upper_xy"], dtype=float)
@@ -351,8 +363,15 @@ def analyze(
     prob.set_val('fc.W',   W_lbms, units='lbm/s')
 
     # ── Inlet ────────────────────────────────────────────────────────────────
-    prob.set_val('inlet.ram_recovery', ram_recovery)
-    prob.set_val('inlet.MN',           inlet_MN)
+    if mode == 'ram':
+        # ram_recovery and inlet.MN are driven by DiffuserTerminalShock via
+        # the Newton loop in RamCycle. Feed it M0 / altitude so it can rerun
+        # the frozen shock chain at the current flight condition.
+        prob.set_val('diff.M0',    M0)
+        prob.set_val('diff.alt_m', altitude_m, units='m')
+    else:
+        prob.set_val('inlet.ram_recovery', ram_recovery)
+        prob.set_val('inlet.MN',           inlet_MN)
 
     # ── Combustor ────────────────────────────────────────────────────────────
     prob.set_val('burner.Fl_I:FAR', FAR)
@@ -468,7 +487,9 @@ def analyze(
         mode=mode, M0=M0, altitude=altitude_m, phi=phi, M_trans=M_trans,
         Isp=Isp, F_sp=F_sp, thrust=Fn_N,
         mdot_air=W_kgs, mdot_fuel=Wfuel,
-        eta_pt=ram_recovery, choked=choked,
+        eta_pt=(float(prob.get_val('diff.ram_recovery')[0])
+                if mode == 'ram' else ram_recovery),
+        choked=choked,
         T_stations={
             0: _K('fc.Fl_O:stat:T'),
             3: _K('inlet.Fl_O:stat:T'),
