@@ -4,9 +4,10 @@ Nozzle design and performance analysis using pyCycle.
 The active nozzle analysis path is:
     OpenMDAO Problem -> pyCycle Cycle -> FlowStart -> Nozzle
 
-The remaining standalone equations are only used to estimate optional flight-mode
-inputs before the pyCycle nozzle run. No ASME/isentropic nozzle solver is used
-for the reported nozzle station properties or performance metrics.
+The remaining standalone equations are only used to estimate flight-mode inputs,
+rectangular vehicle packaging, and the bell contour geometry around the pyCycle
+station solution. No ASME/isentropic nozzle solver is used for the reported
+nozzle station properties or performance metrics.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import numpy as np
 import openmdao.api as om
 from pycycle.elements.flow_start import FlowStart
 from pycycle.elements.nozzle import Nozzle
+from pycycle.element_base import Element
 from pycycle.mp_cycle import Cycle
 from pycycle.thermo.cea.species_data import janaf
 
@@ -28,6 +30,40 @@ from pycycle.thermo.cea.species_data import janaf
 OUTPUT_DIR = Path(__file__).resolve().parent
 DEFAULT_PLOT_PATH = OUTPUT_DIR / "nozzle_analysis.png"
 DEFAULT_GEOMETRY_PATH = OUTPUT_DIR / "nozzle_geometry.csv"
+FT_PER_M = 3.280839895013123
+
+# Assumed liquid-ramjet baseline used by the no-argument run.
+# These constants intentionally hardcode the current reference case for now.
+# They are assigned as CLI defaults, then passed explicitly into the solver and
+# geometry functions so the functions do not depend on hidden global state.
+# missile_length_m = 4.0
+# nozzle_length_fraction = 0.20
+# cruise_altitude_m = 12000.0
+# cruise_mach = 5.0
+# vehicle_width_m = 0.40
+# vehicle_height_m = 0.57
+# inlet_width_m = 0.25
+# inlet_height_m = 0.05
+# nozzle_diameter_clearance = 1.0
+# fuel = "JP-7"
+# fuel_lhv_j_per_kg = 43.5e6
+# combustor_exit_total_temperature_k = 2500.0
+# inlet_total_pressure_recovery = 0.45
+# combustor_total_pressure_ratio = 0.95
+DEFAULT_MISSILE_LENGTH = 4.0
+DEFAULT_NOZZLE_LENGTH_FRACTION = 0.10
+DEFAULT_CRUISE_ALTITUDE_M = 12000.0
+DEFAULT_CRUISE_MACH = 5.0
+DEFAULT_VEHICLE_WIDTH = 0.40
+DEFAULT_VEHICLE_HEIGHT = 0.57
+DEFAULT_INLET_WIDTH = 0.25
+DEFAULT_INLET_HEIGHT = 0.05
+DEFAULT_NOZZLE_DIAMETER_CLEARANCE = 1.0
+DEFAULT_FUEL_NAME = "JP-7"
+DEFAULT_FUEL_LHV = 43.5e6
+DEFAULT_COMBUSTOR_EXIT_TT = 2500.0
+DEFAULT_INLET_PRESSURE_RECOVERY = 0.45
+DEFAULT_COMBUSTOR_PRESSURE_RATIO = 0.95
 G0 = 9.80665
 LBM_PER_KG = 2.2046226218
 LBF_PER_N = 0.2248089431
@@ -37,6 +73,181 @@ def scalar(value):
     """Return a scalar float from OpenMDAO's array-shaped values."""
 
     return float(np.asarray(value).ravel()[0])
+
+
+class FlowStationSource(Element):
+    """
+    Element that emits a fully specified flowstation.
+
+    This lets the standalone nozzle consume the exact solved burner-exit
+    flowstate, including reacted composition, through pyCycle's normal
+    flow-connection graph.
+    """
+
+    def initialize(self):
+        self.options.declare("flowstation", recordable=False)
+        self.options.declare("flow_port_data", recordable=False)
+        super().initialize()
+
+    def pyc_setup_output_ports(self):
+        flow_port_data = self.options["flow_port_data"]
+        if flow_port_data is None:
+            raise ValueError("FlowStationSource requires flow_port_data for pyCycle flow metadata.")
+        self.init_output_flow("Fl_O", flow_port_data)
+
+    def setup(self):
+        flowstation = self.options["flowstation"]
+        src = om.IndepVarComp()
+        units_map = {
+            "Fl_O:tot:h": "Btu/lbm",
+            "Fl_O:tot:T": "degR",
+            "Fl_O:tot:P": "lbf/inch**2",
+            "Fl_O:tot:S": "Btu/(lbm*degR)",
+            "Fl_O:tot:rho": "lbm/ft**3",
+            "Fl_O:tot:gamma": None,
+            "Fl_O:tot:Cp": "Btu/(lbm*degR)",
+            "Fl_O:tot:Cv": "Btu/(lbm*degR)",
+            "Fl_O:tot:R": "Btu/(lbm*degR)",
+            "Fl_O:tot:composition": None,
+            "Fl_O:stat:h": "Btu/lbm",
+            "Fl_O:stat:T": "degR",
+            "Fl_O:stat:P": "lbf/inch**2",
+            "Fl_O:stat:S": "Btu/(lbm*degR)",
+            "Fl_O:stat:rho": "lbm/ft**3",
+            "Fl_O:stat:gamma": None,
+            "Fl_O:stat:Cp": "Btu/(lbm*degR)",
+            "Fl_O:stat:Cv": "Btu/(lbm*degR)",
+            "Fl_O:stat:R": "Btu/(lbm*degR)",
+            "Fl_O:stat:V": "ft/s",
+            "Fl_O:stat:Vsonic": "ft/s",
+            "Fl_O:stat:MN": None,
+            "Fl_O:stat:area": "inch**2",
+            "Fl_O:stat:W": "lbm/s",
+        }
+        for name, value in flowstation.items():
+            arr = np.asarray(value)
+            if arr.ndim == 0 or arr.size == 1:
+                units = units_map.get(name)
+                if units is None:
+                    src.add_output(name, val=float(arr.ravel()[0]))
+                else:
+                    src.add_output(name, val=float(arr.ravel()[0]), units=units)
+            else:
+                src.add_output(name, val=arr)
+        self.add_subsystem("src", src, promotes=["*"])
+        super().setup()
+
+
+class CompositionFlowStart(Element):
+    """
+    Flow-start element for a fully specified composition vector.
+
+    pyCycle's stock FlowStart expects an elemental/reactant composition
+    description. For the standalone nozzle driven from burner exit, we already
+    have the reacted mixture vector and need to propagate it directly.
+    """
+
+    def initialize(self):
+        self.options.declare("composition", default=None, recordable=False)
+        super().initialize()
+
+    def pyc_setup_output_ports(self):
+        composition = self.options["composition"]
+        if composition is None:
+            raise ValueError("CompositionFlowStart requires a composition vector.")
+        self.init_output_flow("Fl_O", composition)
+
+    def setup(self):
+        thermo_method = self.options["thermo_method"]
+        thermo_data = self.options["thermo_data"]
+        composition = self.options["composition"]
+
+        totals = Thermo(
+            mode="total_TP",
+            fl_name="Fl_O:tot",
+            method=thermo_method,
+            thermo_kwargs={"composition": composition, "spec": thermo_data},
+        )
+        self.add_subsystem(
+            "totals",
+            totals,
+            promotes_inputs=("T", "P"),
+            promotes_outputs=("Fl_O:tot:*",),
+        )
+
+        exit_static = Thermo(
+            mode="static_MN",
+            fl_name="Fl_O:stat",
+            method=thermo_method,
+            thermo_kwargs={"composition": composition, "spec": thermo_data},
+        )
+        self.add_subsystem(
+            "exit_static",
+            exit_static,
+            promotes_inputs=("MN", "W"),
+            promotes_outputs=("Fl_O:stat:*",),
+        )
+
+        self.connect("totals.h", "exit_static.ht")
+        self.connect("totals.S", "exit_static.S")
+        self.connect("Fl_O:tot:P", "exit_static.guess:Pt")
+        self.connect("totals.gamma", "exit_static.guess:gamt")
+
+        super().setup()
+
+
+def rectangular_vehicle_packaging(width, height, nozzle_diameter_clearance, max_exit_area):
+    """
+    Compute packaging limits for an axisymmetric nozzle inside a rectangular body.
+
+    A revolved bell nozzle has a circular exit, so the limiting diameter is the
+    smaller body dimension multiplied by the selected clearance factor.
+    """
+
+    if width <= 0.0 or height <= 0.0:
+        raise ValueError("Vehicle width and height must be positive.")
+    if nozzle_diameter_clearance <= 0.0 or nozzle_diameter_clearance > 1.0:
+        raise ValueError("nozzle_diameter_clearance must be in the range (0, 1].")
+    if max_exit_area is not None and max_exit_area <= 0.0:
+        raise ValueError("max_exit_area must be positive.")
+
+    frontal_area = width * height
+    max_diameter = min(width, height) * nozzle_diameter_clearance
+    max_radius = 0.5 * max_diameter
+    rectangular_fit_area = np.pi * max_radius**2
+    selected_exit_area = rectangular_fit_area if max_exit_area is None else min(max_exit_area, rectangular_fit_area)
+
+    return {
+        "width": width,
+        "height": height,
+        "frontal_area": frontal_area,
+        "max_circular_diameter": max_diameter,
+        "max_circular_radius": max_radius,
+        "rectangular_fit_exit_area": rectangular_fit_area,
+        "max_exit_area": selected_exit_area,
+        "user_exit_area_limit": max_exit_area,
+        "nozzle_diameter_clearance": nozzle_diameter_clearance,
+    }
+
+
+def rectangular_inlet_capture(inlet_width, inlet_height, capture_area_ratio):
+    """
+    Compute captured inlet area from the actual rectangular inlet opening.
+    """
+
+    if inlet_width <= 0.0 or inlet_height <= 0.0:
+        raise ValueError("Inlet width and height must be positive.")
+    if capture_area_ratio <= 0.0 or capture_area_ratio > 1.0:
+        raise ValueError("capture_area_ratio must be in the range (0, 1].")
+
+    inlet_area = inlet_width * inlet_height
+    return {
+        "width": inlet_width,
+        "height": inlet_height,
+        "area": inlet_area,
+        "capture_area_ratio": capture_area_ratio,
+        "capture_area": inlet_area * capture_area_ratio,
+    }
 
 
 def standard_atmosphere(altitude_ft):
@@ -72,6 +283,12 @@ def standard_atmosphere(altitude_ft):
         "altitude_ft": altitude_ft,
         "altitude_m": h,
     }
+
+
+def standard_atmosphere_m(altitude_m):
+    """1976-standard-atmosphere estimate with altitude supplied in meters."""
+
+    return standard_atmosphere(altitude_m * FT_PER_M)
 
 
 def isentropic_total_ratios(mach, gamma):
@@ -146,10 +363,18 @@ def estimate_fuel_air_ratio(tt_before_combustor, tt_after_combustor, fuel_lhv, c
 
 def estimate_flight_inputs(
     mach_flight,
-    altitude_ft,
-    max_radius_inches,
+    altitude_m,
+    vehicle_width,
+    vehicle_height,
+    inlet_width,
+    inlet_height,
+    nozzle_diameter_clearance,
+    max_exit_area,
     capture_area_ratio,
-    combustor_temp_ratio,
+    combustor_exit_temperature,
+    inlet_pressure_recovery,
+    combustor_pressure_ratio,
+    fuel_name,
     fuel_lhv,
     combustor_efficiency,
     combustor_cp,
@@ -164,16 +389,35 @@ def estimate_flight_inputs(
     and performance analysis are still done by pyCycle.
     """
 
-    atm = standard_atmosphere(altitude_ft)
+    if combustor_exit_temperature <= 0.0:
+        raise ValueError("combustor_exit_temperature must be positive.")
+    if inlet_pressure_recovery <= 0.0 or inlet_pressure_recovery > 1.0:
+        raise ValueError("inlet_pressure_recovery must be in the range (0, 1].")
+    if combustor_pressure_ratio <= 0.0 or combustor_pressure_ratio > 1.0:
+        raise ValueError("combustor_pressure_ratio must be in the range (0, 1].")
+
+    atm = standard_atmosphere_m(altitude_m)
     p_total_ratio, t_total_ratio = isentropic_total_ratios(mach_flight, gamma)
     pt_freestream = atm["P"] * p_total_ratio
     tt_freestream = atm["T"] * t_total_ratio
     shock = normal_shock_relations(mach_flight, gamma)
 
-    pt_after_inlet = pt_freestream * shock["Pt2_Pt1"]
+    vehicle = rectangular_vehicle_packaging(
+        width=vehicle_width,
+        height=vehicle_height,
+        nozzle_diameter_clearance=nozzle_diameter_clearance,
+        max_exit_area=max_exit_area,
+    )
+    inlet = rectangular_inlet_capture(
+        inlet_width=inlet_width,
+        inlet_height=inlet_height,
+        capture_area_ratio=capture_area_ratio,
+    )
+
+    pt_after_inlet = pt_freestream * inlet_pressure_recovery
     tt_after_inlet = tt_freestream
-    pt_nozzle_inlet = pt_after_inlet * 0.95
-    tt_nozzle_inlet = tt_after_inlet * combustor_temp_ratio
+    pt_nozzle_inlet = pt_after_inlet * combustor_pressure_ratio
+    tt_nozzle_inlet = combustor_exit_temperature
 
     if fuel_air_ratio is None:
         fuel_air_ratio = estimate_fuel_air_ratio(
@@ -184,9 +428,7 @@ def estimate_flight_inputs(
             cp_gas=combustor_cp,
         )
 
-    max_radius_m = max_radius_inches * 0.0254
-    vehicle_area = np.pi * max_radius_m**2
-    capture_area = vehicle_area * capture_area_ratio
+    capture_area = inlet["capture_area"]
     flight_velocity = mach_flight * atm["a"]
     mdot_air = atm["rho"] * flight_velocity * capture_area
     mdot_fuel = mdot_air * fuel_air_ratio
@@ -205,15 +447,21 @@ def estimate_flight_inputs(
         "Tt_before_combustor": tt_after_inlet,
         "P_ambient": atm["P"],
         "capture_area": capture_area,
-        "vehicle_area": vehicle_area,
-        "max_radius_m": max_radius_m,
+        "inlet": inlet,
+        "vehicle_area": vehicle["frontal_area"],
+        "vehicle": vehicle,
+        "pt_freestream": pt_freestream,
+        "tt_freestream": tt_freestream,
+        "inlet_pressure_recovery": inlet_pressure_recovery,
+        "combustor_pressure_ratio": combustor_pressure_ratio,
         "flight_velocity": flight_velocity,
+        "fuel_name": fuel_name,
         "fuel_lhv": fuel_lhv,
         "combustor_efficiency": combustor_efficiency,
         "combustor_cp": combustor_cp,
         "r_air": r_air,
         "gamma": gamma,
-        "combustor_temp_ratio": combustor_temp_ratio,
+        "combustor_exit_temperature": combustor_exit_temperature,
     }
 
 
@@ -225,6 +473,8 @@ def build_pycycle_problem(
     ps_exhaust,
     cv,
     nozzle_type,
+    flowstation=None,
+    flow_port_data=None,
     target_exit_mach=None,
     gamma_for_guess=1.4,
 ):
@@ -237,17 +487,25 @@ def build_pycycle_problem(
     cycle.options["thermo_method"] = "CEA"
     cycle.options["thermo_data"] = janaf
 
-    cycle.add_subsystem("flow_start", FlowStart())
     cycle.add_subsystem(
         "nozzle",
         Nozzle(nozzType=nozzle_type, lossCoef="Cv", internal_solver=True),
     )
-    cycle.pyc_connect_flow("flow_start.Fl_O", "nozzle.Fl_I")
 
-    cycle.set_input_defaults("flow_start.MN", m_inlet)
-    cycle.set_input_defaults("flow_start.P", pt_inlet, units="Pa")
-    cycle.set_input_defaults("flow_start.T", tt_inlet, units="K")
-    cycle.set_input_defaults("flow_start.W", mass_flow, units="kg/s")
+    if flowstation is None:
+        flow_start = FlowStart()
+        cycle.add_subsystem("flow_start", flow_start)
+        cycle.pyc_connect_flow("flow_start.Fl_O", "nozzle.Fl_I")
+    else:
+        flow_source = FlowStationSource(flowstation=flowstation, flow_port_data=flow_port_data)
+        cycle.add_subsystem("flow_source", flow_source)
+        cycle.pyc_connect_flow("flow_source.Fl_O", "nozzle.Fl_I")
+
+    if flowstation is None:
+        cycle.set_input_defaults("flow_start.MN", m_inlet)
+        cycle.set_input_defaults("flow_start.P", pt_inlet, units="Pa")
+        cycle.set_input_defaults("flow_start.T", tt_inlet, units="K")
+        cycle.set_input_defaults("flow_start.W", mass_flow, units="kg/s")
     cycle.set_input_defaults("nozzle.Cv", cv)
 
     if target_exit_mach is None:
@@ -408,13 +666,18 @@ def collect_results(prob, target_exit_mach=None, requested_throat_area=None, amb
     """
     Collect pyCycle nozzle outputs and derived performance metrics.
     """
+    source_prefix = "flow_start.Fl_O"
+    try:
+        prob.get_val("flow_start.Fl_O:stat:MN")
+    except Exception:
+        source_prefix = "flow_source.Fl_O"
 
-    inlet = station_from_prob(prob, "flow_start.Fl_O")
+    inlet = station_from_prob(prob, source_prefix)
     throat = station_from_prob(prob, "nozzle.Throat")
     exit_station = station_from_prob(prob, "nozzle.Fl_O")
 
-    inlet["Pt"] = get_value(prob, "flow_start.Fl_O:tot:P", "Pa")
-    inlet["Tt"] = get_value(prob, "flow_start.Fl_O:tot:T", "K")
+    inlet["Pt"] = get_value(prob, f"{source_prefix}:tot:P", "Pa")
+    inlet["Tt"] = get_value(prob, f"{source_prefix}:tot:T", "K")
     exit_station["Pt"] = get_value(prob, "nozzle.Fl_O:tot:P", "Pa")
     exit_station["Tt"] = get_value(prob, "nozzle.Fl_O:tot:T", "K")
 
@@ -447,20 +710,18 @@ def collect_results(prob, target_exit_mach=None, requested_throat_area=None, amb
     }
 
 
-def scale_results_to_throat_area(results, throat_area):
+def scale_results_by_area_factor(results, scale, requested_throat_area=None):
     """
-    Scale pyCycle's mass-flow-dependent outputs to a requested throat area.
+    Scale pyCycle's mass-flow-dependent outputs by a geometric area factor.
 
     For a fixed thermodynamic state and pressure ratio, pyCycle station areas,
     mass flow, and thrust scale linearly together. This avoids rerunning the
     nonlinear model just to resize the nozzle.
     """
 
-    current_area = results["throat"]["area"]
-    if current_area <= 0.0:
-        raise ValueError("Cannot scale results because pyCycle returned a nonpositive throat area.")
+    if scale <= 0.0:
+        raise ValueError("Area scale factor must be positive.")
 
-    scale = throat_area / current_area
     for station_name in ("inlet", "throat", "exit"):
         results[station_name]["area"] *= scale
         results[station_name]["W"] *= scale
@@ -480,9 +741,235 @@ def scale_results_to_throat_area(results, throat_area):
         pr=perf["PR"],
         choked=perf["choked"],
         target_exit_mach=perf["target_exit_mach"],
-        requested_throat_area=throat_area,
+        requested_throat_area=requested_throat_area,
     )
     return results
+
+
+def scale_results_to_throat_area(results, throat_area):
+    """
+    Scale pyCycle's mass-flow-dependent outputs to a requested throat area.
+    """
+
+    current_area = results["throat"]["area"]
+    if current_area <= 0.0:
+        raise ValueError("Cannot scale results because pyCycle returned a nonpositive throat area.")
+
+    return scale_results_by_area_factor(
+        results,
+        scale=throat_area / current_area,
+        requested_throat_area=throat_area,
+    )
+
+
+def apply_exit_area_limit(results, case, max_exit_area, quiet=False):
+    """
+    Limit nozzle size by scaling mass flow/areas to a maximum exit area.
+
+    This keeps the same pyCycle thermodynamic state and area ratio. It is a
+    packaging rescale, not a new inlet/combustor solution.
+    """
+
+    if max_exit_area is None:
+        return results
+    if max_exit_area <= 0.0:
+        raise ValueError("max_exit_area must be positive.")
+
+    current_exit_area = results["exit"]["area"]
+    perf = results["performance"]
+    perf["exit_area_limit"] = max_exit_area
+    perf["exit_area_limited"] = False
+    perf["area_limit_scale"] = 1.0
+    perf["area_constraint_mode"] = "within exit-area limit"
+
+    if current_exit_area <= max_exit_area:
+        return results
+
+    scale = max_exit_area / current_exit_area
+    requested_throat_area = perf["requested_throat_area"]
+    if requested_throat_area is not None:
+        requested_throat_area *= scale
+
+    results = scale_results_by_area_factor(
+        results,
+        scale=scale,
+        requested_throat_area=requested_throat_area,
+    )
+
+    perf = results["performance"]
+    perf["exit_area_limit"] = max_exit_area
+    perf["exit_area_limited"] = True
+    perf["area_limit_scale"] = scale
+    perf["area_constraint_mode"] = "mass-flow/area scaled fallback"
+    perf["unlimited_exit_area"] = current_exit_area
+    perf["unlimited_mass_flow"] = case["W"]
+
+    for key in ("W", "air_mass_flow", "fuel_mass_flow"):
+        if case.get(key) is not None:
+            case[key] *= scale
+
+    if case.get("flight") is not None:
+        for key in ("W", "W_air", "W_fuel"):
+            if case["flight"].get(key) is not None:
+                case["flight"][key] *= scale
+
+    if not quiet:
+        print("\n" + "=" * 72)
+        print("NOZZLE PACKAGING RESCALE")
+        print("=" * 72)
+        print(f"Unlimited pyCycle exit area: {current_exit_area:.6f} m^2")
+        print(f"Maximum allowed exit area:   {max_exit_area:.6f} m^2")
+        print(f"Area/mass-flow scale factor: {scale:.6f}")
+        print(f"Scaled nozzle mass flow:     {results['exit']['W']:.4f} kg/s")
+        print("Note: thermodynamic state and Ae/At are unchanged; mass flow and thrust are scaled.")
+
+    return results
+
+
+def area_mach_ratio(mach, gamma):
+    """
+    Isentropic area ratio A/A* for a given Mach number.
+    """
+
+    if mach <= 0.0:
+        raise ValueError("Mach number must be positive.")
+    if gamma <= 1.0:
+        raise ValueError("gamma must be greater than 1.")
+
+    factor = (2.0 / (gamma + 1.0)) * (1.0 + 0.5 * (gamma - 1.0) * mach**2)
+    exponent = (gamma + 1.0) / (2.0 * (gamma - 1.0))
+    return factor**exponent / mach
+
+
+def supersonic_mach_from_area_ratio(area_ratio, gamma):
+    """
+    Estimate supersonic Mach number from area ratio using a constant-gamma relation.
+
+    This is used only to select the pyCycle target Mach for an exit-area-limited
+    nozzle. pyCycle still solves the final station properties.
+    """
+
+    if area_ratio < 1.0:
+        raise ValueError("Supersonic nozzle area ratio must be at least 1.")
+    if area_ratio <= 1.0001:
+        return 1.0001
+
+    lower = 1.0001
+    upper = 8.0
+    while area_mach_ratio(upper, gamma) < area_ratio:
+        upper *= 1.5
+        if upper > 25.0:
+            raise ValueError("Could not bracket supersonic Mach for the requested area ratio.")
+
+    for _ in range(80):
+        mid = 0.5 * (lower + upper)
+        if area_mach_ratio(mid, gamma) < area_ratio:
+            lower = mid
+        else:
+            upper = mid
+
+    return 0.5 * (lower + upper)
+
+
+def solve_exit_area_constrained_nozzle(
+    initial_results,
+    case,
+    max_exit_area,
+    cv,
+    nozzle_type,
+    show_solver_warnings=False,
+):
+    """
+    Re-run pyCycle with a target exit Mach so fixed mass flow fits max exit area.
+    """
+
+    if max_exit_area is None:
+        return initial_results
+
+    if max_exit_area <= 0.0:
+        raise ValueError("max_exit_area must be positive.")
+
+    initial_perf = initial_results["performance"]
+    initial_perf["exit_area_limit"] = max_exit_area
+    initial_perf["exit_area_limited"] = False
+    initial_perf["area_constraint_mode"] = "within exit-area limit"
+
+    if initial_results["exit"]["area"] <= max_exit_area:
+        return initial_results
+
+    throat_area = initial_results["throat"]["area"]
+    if throat_area <= 0.0:
+        raise ValueError("Cannot apply exit-area constraint because throat area is nonpositive.")
+
+    target_area_ratio = max_exit_area / throat_area
+    if target_area_ratio < 1.0:
+        print("\n" + "=" * 72)
+        print("NOZZLE GEOMETRY CONSTRAINT")
+        print("=" * 72)
+        print(f"Ideal-expanded exit area: {initial_results['exit']['area']:.6f} m^2")
+        print(f"Maximum allowed exit area:{max_exit_area:.6f} m^2")
+        print(f"Required throat area:     {throat_area:.6f} m^2")
+        print("Fixed mass flow cannot fit because the throat area exceeds the exit-area limit.")
+        print("Falling back to mass-flow/area scaling.")
+        return apply_exit_area_limit(initial_results, case, max_exit_area)
+
+    gamma_guess = initial_results["throat"].get("gamma", case.get("gamma", 1.4))
+    commanded_area_ratio = target_area_ratio
+    target_exit_mach = supersonic_mach_from_area_ratio(commanded_area_ratio, gamma_guess)
+    constrained = None
+
+    for _ in range(4):
+        used_target_exit_mach = target_exit_mach
+        used_commanded_area_ratio = commanded_area_ratio
+        constrained = run_pycycle_nozzle(
+            m_inlet=case["M_inlet"],
+            pt_inlet=case["Pt_inlet"],
+            tt_inlet=case["Tt_inlet"],
+            ps_exhaust=case["P_ambient"],
+            cv=cv,
+            nozzle_type=nozzle_type,
+            mass_flow=case["W"],
+            throat_area=case["A_throat"],
+            target_exit_mach=used_target_exit_mach,
+            ambient_pressure=case["P_ambient"],
+            gamma_for_guess=case["gamma"],
+            show_solver_warnings=show_solver_warnings,
+        )
+
+        exit_area_error = constrained["exit"]["area"] - max_exit_area
+        if abs(exit_area_error) <= max(5.0e-4, 0.005 * max_exit_area):
+            break
+
+        actual_area_ratio = constrained["exit"]["area"] / constrained["throat"]["area"]
+        commanded_area_ratio = max(1.0001, commanded_area_ratio + (target_area_ratio - actual_area_ratio))
+        target_exit_mach = supersonic_mach_from_area_ratio(
+            commanded_area_ratio,
+            constrained["throat"].get("gamma", gamma_guess),
+        )
+
+    perf = constrained["performance"]
+    perf["exit_area_limit"] = max_exit_area
+    perf["exit_area_limited"] = True
+    perf["area_constraint_mode"] = "fixed mass flow, exit-area-constrained solve"
+    perf["ideal_expanded_exit_area"] = initial_results["exit"]["area"]
+    perf["target_area_ratio_for_limit"] = target_area_ratio
+    perf["commanded_area_ratio_for_mach"] = used_commanded_area_ratio
+    perf["geometric_target_exit_mach"] = used_target_exit_mach
+    perf["area_limit_error"] = constrained["exit"]["area"] - max_exit_area
+
+    print("\n" + "=" * 72)
+    print("NOZZLE GEOMETRY CONSTRAINT SOLVE")
+    print("=" * 72)
+    print(f"Ideal-expanded exit area: {initial_results['exit']['area']:.6f} m^2")
+    print(f"Maximum allowed exit area:{max_exit_area:.6f} m^2")
+    print(f"Target Ae/At for limit:   {target_area_ratio:.4f}")
+    print(f"Solved target exit Mach:  {target_exit_mach:.4f}")
+    print(f"Constrained exit area:    {constrained['exit']['area']:.6f} m^2")
+    print(f"Exit area error:          {perf['area_limit_error']:.6e} m^2")
+    print(f"Exit pressure ratio:      {perf['Pe_over_Pamb']:.4f}")
+    print("Note: mass flow is preserved; smaller exit area usually means underexpanded flow.")
+
+    return constrained
 
 
 def run_pycycle_nozzle(
@@ -494,6 +981,8 @@ def run_pycycle_nozzle(
     nozzle_type,
     mass_flow=None,
     throat_area=None,
+    flowstation=None,
+    flow_port_data=None,
     target_exit_mach=None,
     ambient_pressure=None,
     gamma_for_guess=1.4,
@@ -516,6 +1005,8 @@ def run_pycycle_nozzle(
         ps_exhaust=ps_exhaust,
         cv=cv,
         nozzle_type=nozzle_type,
+        flowstation=flowstation,
+        flow_port_data=flow_port_data,
         target_exit_mach=target_exit_mach,
         gamma_for_guess=gamma_for_guess,
     )
@@ -539,17 +1030,33 @@ def run_pycycle_nozzle(
 def print_flight_estimate(flight):
     atm = flight["atm"]
     shock = flight["shock"]
+    vehicle = flight["vehicle"]
+    inlet = flight["inlet"]
 
     print("\n" + "=" * 72)
     print("FLIGHT-MODE INPUT ESTIMATE")
     print("=" * 72)
-    print(f"Altitude:                 {atm['altitude_ft']:.0f} ft")
+    print(f"Altitude:                 {atm['altitude_m']:.0f} m ({atm['altitude_ft']:.0f} ft)")
     print(f"Atmospheric pressure:     {atm['P']/1e3:.3f} kPa")
     print(f"Atmospheric temperature:  {atm['T']:.2f} K")
     print(f"Atmospheric density:      {atm['rho']:.6f} kg/m^3")
     print(f"Flight velocity:          {flight['flight_velocity']:.2f} m/s")
-    print(f"Normal-shock M2:          {shock['M2']:.3f}")
-    print(f"Total pressure recovery:  {shock['Pt2_Pt1']:.3f}")
+    print(f"Freestream total pressure:{flight['pt_freestream']/1e3:.2f} kPa")
+    print(f"Freestream total temp.:   {flight['tt_freestream']:.2f} K")
+    print(f"Inlet pressure recovery:  {flight['inlet_pressure_recovery']:.3f}")
+    print(f"Normal-shock recovery ref:{shock['Pt2_Pt1']:.3f}")
+    print(f"Combustor pressure ratio: {flight['combustor_pressure_ratio']:.3f}")
+    print(f"Combustor exit Tt target: {flight['combustor_exit_temperature']:.2f} K")
+    print(f"Fuel:                     {flight['fuel_name']}")
+    print(f"Fuel LHV:                 {flight['fuel_lhv']/1e6:.2f} MJ/kg")
+    print(f"Vehicle width x height:   {vehicle['width']:.3f} m x {vehicle['height']:.3f} m")
+    print(f"Vehicle frontal area:     {vehicle['frontal_area']:.6f} m^2")
+    print(f"Max circular exit diam.:  {vehicle['max_circular_diameter']:.4f} m")
+    print(f"Rect. fit exit area:      {vehicle['rectangular_fit_exit_area']:.6f} m^2")
+    print(f"Selected max exit area:   {vehicle['max_exit_area']:.6f} m^2")
+    print(f"Inlet width x height:     {inlet['width']:.3f} m x {inlet['height']:.3f} m")
+    print(f"Inlet geometric area:     {inlet['area']:.6f} m^2")
+    print(f"Inlet capture fraction:   {inlet['capture_area_ratio']:.3f}")
     print(f"Capture area:             {flight['capture_area']:.6f} m^2")
     print(f"Captured air flow:        {flight['W_air']:.4f} kg/s")
     print(f"Estimated fuel flow:      {flight['W_fuel']:.4f} kg/s")
@@ -690,6 +1197,20 @@ def print_results(results):
     print(f"Characteristic velocity:  {perf['c_star']:.2f} m/s")
     print(f"Area ratio Ae/At:         {perf['area_ratio']:.4f}")
     print(f"Exit pressure ratio:      {perf['Pe_over_Pamb']:.4f}")
+    if perf.get("exit_area_limit") is not None:
+        print(f"Max exit area limit:      {perf['exit_area_limit']:.6f} m^2")
+        print(f"Exit area limited:        {'Yes' if perf.get('exit_area_limited') else 'No'}")
+        if perf.get("area_constraint_mode"):
+            print(f"Area constraint mode:     {perf['area_constraint_mode']}")
+        if perf.get("ideal_expanded_exit_area") is not None:
+            print(f"Ideal-expanded exit area: {perf['ideal_expanded_exit_area']:.6f} m^2")
+            print(f"Target Mach for area fit: {perf['geometric_target_exit_mach']:.4f}")
+            print(f"Exit area error:          {perf['area_limit_error']:.6e} m^2")
+        if perf.get("exit_area_limited"):
+            if perf.get("unlimited_exit_area") is not None:
+                print(f"Unlimited exit area:      {perf['unlimited_exit_area']:.6f} m^2")
+            if perf.get("area_limit_scale") is not None:
+                print(f"Area/mass-flow scale:     {perf['area_limit_scale']:.6f}")
 
     if perf.get("ramjet_metrics_available"):
         print("\nLiquid ramjet fuel-based metrics")
@@ -720,6 +1241,133 @@ def print_results(results):
         print(f"Throat area error:        {error:.6e} m^2")
 
 
+def default_bell_diverging_length(throat_area, exit_area):
+    """
+    Estimate a starting bell-nozzle divergent length from throat/exit areas.
+    """
+
+    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
+    r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
+    radius_change = max(r_exit - r_throat, 1.0e-6)
+    reference_angle = np.radians(15.0)
+    # Roughly a 75%-length bell compared with a 15-degree conical nozzle.
+    return max(0.50, 0.75 * radius_change / np.tan(reference_angle))
+
+
+def default_bell_converging_length(inlet_area, throat_area):
+    """
+    Estimate converging length from the actual area contraction.
+
+    This uses an equivalent conical contraction half-angle of 30 degrees to
+    size the axial length from the inlet and throat radii.
+    """
+
+    r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
+    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
+    radius_change = max(r_inlet - r_throat, 1.0e-6)
+    reference_angle = np.radians(30.0)
+    return max(0.02, radius_change / np.tan(reference_angle))
+
+
+def size_bell_nozzle_for_vehicle(
+    inlet_area,
+    throat_area,
+    exit_area,
+    converging_length,
+    diverging_length,
+    missile_length,
+    nozzle_length_fraction,
+    nozzle_length,
+    vehicle_radius,
+):
+    """
+    Choose bell-contour lengths that fit a missile packaging budget.
+
+    This sizes the generated geometry only. pyCycle still defines the station
+    areas and thermodynamic performance.
+    """
+
+    if missile_length <= 0.0:
+        raise ValueError("missile_length must be positive.")
+    if nozzle_length_fraction <= 0.0:
+        raise ValueError("nozzle_length_fraction must be positive.")
+    if nozzle_length is not None and nozzle_length <= 0.0:
+        raise ValueError("nozzle_length must be positive.")
+
+    r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
+    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
+    r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
+
+    length_budget = nozzle_length if nozzle_length is not None else missile_length * nozzle_length_fraction
+    if length_budget <= 0.0:
+        raise ValueError("Nozzle length budget must be positive.")
+
+    unconstrained_converging_length = default_bell_converging_length(inlet_area, throat_area)
+    unconstrained_diverging_length = default_bell_diverging_length(throat_area, exit_area)
+    notes = []
+
+    if converging_length is None:
+        sized_converging_length = unconstrained_converging_length
+        notes.append("Converging length was solved from inlet/throat area contraction.")
+    else:
+        if converging_length <= 0.0:
+            raise ValueError("converging_length must be positive.")
+        sized_converging_length = converging_length
+    if diverging_length is None and sized_converging_length >= 0.55 * length_budget:
+        sized_converging_length = max(0.05, 0.35 * length_budget)
+        notes.append("Converging length was reduced to leave room for the divergent bell.")
+
+    if diverging_length is None:
+        available_diverging_length = length_budget - sized_converging_length
+        if available_diverging_length <= 0.05:
+            raise ValueError(
+                "Nozzle length budget is too short for the requested converging section. "
+                "Increase --nozzle_length/--nozzle_length_fraction or reduce --converging_length."
+            )
+        sized_diverging_length = min(unconstrained_diverging_length, available_diverging_length)
+        length_limited = unconstrained_diverging_length > available_diverging_length
+        if length_limited:
+            notes.append("Diverging length was capped by the missile length budget.")
+    else:
+        if diverging_length <= 0.0:
+            raise ValueError("diverging_length must be positive.")
+        sized_diverging_length = diverging_length
+        length_limited = sized_converging_length + sized_diverging_length > length_budget
+        if length_limited:
+            notes.append("User-specified nozzle length exceeds the missile length budget.")
+
+    total_length = sized_converging_length + sized_diverging_length
+    radius_change = r_exit - r_throat
+    equivalent_half_angle = np.degrees(np.arctan2(max(radius_change, 0.0), sized_diverging_length))
+    if equivalent_half_angle > 20.0:
+        notes.append("Equivalent divergent half-angle is high; expect losses in a real nozzle.")
+
+    if vehicle_radius is not None and vehicle_radius > 0.0 and r_exit > vehicle_radius:
+        notes.append("Exit radius is larger than the vehicle radius; reduce exit area or mass flow.")
+
+    return {
+        "missile_length": missile_length,
+        "nozzle_length_fraction": nozzle_length_fraction,
+        "nozzle_length_overridden": nozzle_length is not None,
+        "length_budget": length_budget,
+        "converging_length": sized_converging_length,
+        "diverging_length": sized_diverging_length,
+        "total_length": total_length,
+        "length_fraction": total_length / missile_length,
+        "unconstrained_converging_length": unconstrained_converging_length,
+        "unconstrained_diverging_length": unconstrained_diverging_length,
+        "length_limited": length_limited,
+        "r_inlet": r_inlet,
+        "r_throat": r_throat,
+        "r_exit": r_exit,
+        "equivalent_converging_half_angle_deg": np.degrees(
+            np.arctan2(max(r_inlet - r_throat, 0.0), sized_converging_length)
+        ),
+        "equivalent_divergent_half_angle_deg": equivalent_half_angle,
+        "notes": notes,
+    }
+
+
 def hermite_curve(x0, y0, slope0, x1, y1, slope1, n_points):
     """
     Cubic Hermite curve for a smooth bell-nozzle wall contour.
@@ -741,11 +1389,11 @@ def generate_bell_contour(
     inlet_area,
     throat_area,
     exit_area,
-    converging_length=0.35,
-    diverging_length=None,
-    throat_angle_deg=30.0,
-    exit_angle_deg=8.0,
-    n_points=240,
+    converging_length,
+    diverging_length,
+    throat_angle_deg,
+    exit_angle_deg,
+    n_points,
 ):
     """
     Build a smooth axisymmetric nozzle contour from pyCycle station areas.
@@ -758,17 +1406,19 @@ def generate_bell_contour(
     r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
     r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
 
-    if converging_length <= 0.0:
+    if n_points < 90:
+        raise ValueError("n_points must be at least 90 for a smooth bell contour.")
+
+    if converging_length is None:
+        converging_length = default_bell_converging_length(inlet_area, throat_area)
+    elif converging_length <= 0.0:
         raise ValueError("converging_length must be positive.")
 
     throat_angle = np.radians(throat_angle_deg)
     exit_angle = np.radians(exit_angle_deg)
 
     if diverging_length is None:
-        radius_change = max(r_exit - r_throat, 1.0e-6)
-        reference_angle = np.radians(15.0)
-        # Roughly a 75%-length bell compared with a 15-degree conical nozzle.
-        diverging_length = max(0.50, 0.75 * radius_change / np.tan(reference_angle))
+        diverging_length = default_bell_diverging_length(throat_area, exit_area)
     elif diverging_length <= 0.0:
         raise ValueError("diverging_length must be positive.")
 
@@ -807,6 +1457,48 @@ def generate_bell_contour(
     }
 
 
+def prepare_plot_geometry_areas(inlet_area, throat_area, exit_area, min_gap_fraction=0.005):
+    """
+    Build a physically monotonic area set for geometry display only.
+
+    pyCycle station areas are retained for reporting/performance, but the bell
+    contour plot should always represent a converging-diverging nozzle with
+    A_inlet > A_throat < A_exit. If the raw areas violate that ordering, clamp
+    the displayed throat area slightly below the smaller end area and record a
+    note explaining the adjustment.
+    """
+
+    if inlet_area <= 0.0 or throat_area <= 0.0 or exit_area <= 0.0:
+        raise ValueError("Plot geometry areas must all be positive.")
+
+    display_inlet_area = inlet_area
+    display_throat_area = throat_area
+    display_exit_area = exit_area
+    notes = []
+    adjusted = False
+
+    min_end_area = min(display_inlet_area, display_exit_area)
+    if display_throat_area >= min_end_area:
+        adjusted = True
+        gap = max(min_end_area * min_gap_fraction, 1.0e-9)
+        display_throat_area = max(min_end_area - gap, 1.0e-12)
+        notes.append(
+            "Display geometry throat area was clamped below the smaller end area "
+            "because the raw pyCycle station areas did not form a physical C-D nozzle sequence."
+        )
+
+    return {
+        "raw_inlet_area": inlet_area,
+        "raw_throat_area": throat_area,
+        "raw_exit_area": exit_area,
+        "inlet_area": display_inlet_area,
+        "throat_area": display_throat_area,
+        "exit_area": display_exit_area,
+        "adjusted": adjusted,
+        "notes": notes,
+    }
+
+
 def save_contour_csv(contour, output_path):
     """
     Save the generated nozzle contour for CAD/sketch import.
@@ -819,28 +1511,56 @@ def save_contour_csv(contour, output_path):
 
 def plot_results(
     results,
-    output_path=DEFAULT_PLOT_PATH,
-    geometry_csv_path=None,
-    converging_length=0.35,
-    diverging_length=None,
-    bell_throat_angle=30.0,
-    bell_exit_angle=8.0,
+    output_path,
+    geometry_csv_path,
+    converging_length,
+    diverging_length,
+    bell_throat_angle,
+    bell_exit_angle,
+    bell_points,
+    missile_length,
+    nozzle_length_fraction,
+    nozzle_length,
+    vehicle_radius,
 ):
     inlet = results["inlet"]
     throat = results["throat"]
     exit_station = results["exit"]
     perf = results["performance"]
-
-    stations = ["Inlet", "Throat", "Exit"]
-    areas = np.array([inlet["area"], throat["area"], exit_station["area"]])
-    contour = generate_bell_contour(
+    plot_geometry = prepare_plot_geometry_areas(
         inlet_area=inlet["area"],
         throat_area=throat["area"],
         exit_area=exit_station["area"],
+    )
+
+    stations = ["Inlet", "Throat", "Exit"]
+    areas = np.array(
+        [
+            plot_geometry["inlet_area"],
+            plot_geometry["throat_area"],
+            plot_geometry["exit_area"],
+        ]
+    )
+    sizing = size_bell_nozzle_for_vehicle(
+        inlet_area=plot_geometry["inlet_area"],
+        throat_area=plot_geometry["throat_area"],
+        exit_area=plot_geometry["exit_area"],
         converging_length=converging_length,
         diverging_length=diverging_length,
+        missile_length=missile_length,
+        nozzle_length_fraction=nozzle_length_fraction,
+        nozzle_length=nozzle_length,
+        vehicle_radius=vehicle_radius,
+    )
+    contour = generate_bell_contour(
+        inlet_area=plot_geometry["inlet_area"],
+        throat_area=plot_geometry["throat_area"],
+        exit_area=plot_geometry["exit_area"],
+        converging_length=sizing["converging_length"],
+        diverging_length=sizing["diverging_length"],
         throat_angle_deg=bell_throat_angle,
         exit_angle_deg=bell_exit_angle,
+        n_points=bell_points,
     )
 
     if geometry_csv_path is not None:
@@ -855,7 +1575,7 @@ def plot_results(
     ax0.fill_between(contour["x"], -contour["radius"], contour["radius"], color="steelblue", alpha=0.28)
     ax0.axvline(0.0, color="red", linestyle="--", linewidth=1.2, label="Throat")
     ax0.scatter(
-        [-converging_length, 0.0, contour["diverging_length"]],
+        [-contour["converging_length"], 0.0, contour["diverging_length"]],
         [contour["r_inlet"], contour["r_throat"], contour["r_exit"]],
         color=["#4C78A8", "#F58518", "#54A24B"],
         zorder=5,
@@ -865,6 +1585,7 @@ def plot_results(
     ax0.set_xlabel("Axial position (m)")
     ax0.set_ylabel("Equivalent radius (m)")
     ax0.grid(True, alpha=0.25)
+    ax0.set_aspect("equal", adjustable="box")
     ax0.legend()
 
     ax1 = fig.add_subplot(gs[1, 0])
@@ -888,7 +1609,7 @@ def plot_results(
 
     ax4 = fig.add_subplot(gs[2, 0])
     ax4.bar(stations, areas, color=["#4C78A8", "#F58518", "#54A24B"])
-    ax4.set_title("Flow Area", fontweight="bold")
+    ax4.set_title("Displayed Geometry Area", fontweight="bold")
     ax4.set_ylabel("m^2")
     ax4.grid(True, axis="y", alpha=0.25)
 
@@ -917,10 +1638,14 @@ def plot_results(
     summary = [
         "pyCycle Performance",
         f"mdot  = {exit_station['W']:.4f} kg/s",
-        f"At    = {throat['area']:.5f} m^2",
+        f"Atraw = {throat['area']:.5f} m^2",
+        f"Atrnd = {plot_geometry['throat_area']:.5f} m^2",
         f"Ae    = {exit_station['area']:.5f} m^2",
         f"Ae/At = {perf['area_ratio']:.4f}",
+        f"Ltot  = {sizing['total_length']:.3f} m",
+        f"Lbud  = {sizing['length_budget']:.3f} m",
         f"Ldiv  = {contour['diverging_length']:.3f} m",
+        f"theta = {sizing['equivalent_divergent_half_angle_deg']:.1f} deg",
         f"Exp   = {perf['expansion_state']}",
         f"PR    = {perf['PR']:.4f}",
         f"Cfg_e = {perf['pycycle_Cfg_effective']:.4f}",
@@ -944,6 +1669,8 @@ def plot_results(
         )
         if np.isfinite(perf["fuel_Isp_net"]):
             summary.append(f"IspfN = {perf['fuel_Isp_net']:.1f} s")
+    if plot_geometry["adjusted"]:
+        summary.extend(["", "Display geometry adjusted"])
     ax6.text(
         0.02,
         0.98,
@@ -958,6 +1685,37 @@ def plot_results(
 
     fig.suptitle("Nozzle Analysis From pyCycle", fontweight="bold", fontsize=15)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
+
+    print("\nGeometry sizing")
+    print("-" * 72)
+    print(f"Missile length:           {sizing['missile_length']:.3f} m")
+    if sizing["nozzle_length_overridden"]:
+        print(
+            f"Nozzle length budget:     {sizing['length_budget']:.3f} m "
+            f"({100.0 * sizing['length_budget'] / sizing['missile_length']:.1f}% of missile length override)"
+        )
+    else:
+        print(
+            f"Nozzle length budget:     {sizing['length_budget']:.3f} m "
+            f"({100.0 * sizing['nozzle_length_fraction']:.1f}% of missile length)"
+        )
+    print(f"Generated total length:   {sizing['total_length']:.3f} m")
+    print(f"Converging length:        {sizing['converging_length']:.3f} m")
+    print(f"Diverging length:         {sizing['diverging_length']:.3f} m")
+    print(f"Unconstrained bell Ldiv:  {sizing['unconstrained_diverging_length']:.3f} m")
+    print(f"Equivalent div. angle:    {sizing['equivalent_divergent_half_angle_deg']:.2f} deg")
+    print(f"Exit radius:              {sizing['r_exit']:.4f} m")
+    if plot_geometry["adjusted"]:
+        print(f"Displayed inlet area:     {plot_geometry['inlet_area']:.6f} m^2")
+        print(f"Displayed throat area:    {plot_geometry['throat_area']:.6f} m^2")
+        print(f"Displayed exit area:      {plot_geometry['exit_area']:.6f} m^2")
+    if vehicle_radius is not None:
+        print(f"Vehicle radius reference: {vehicle_radius:.4f} m")
+    for note in sizing["notes"]:
+        print(f"NOTE: {note}")
+    for note in plot_geometry["notes"]:
+        print(f"NOTE: {note}")
+
     print(f"\nPlot saved to: {output_path}")
     if geometry_csv_path is not None:
         print(f"Bell contour saved to: {geometry_csv_path}")
@@ -967,6 +1725,16 @@ def plot_results(
 def resolve_case_from_args(args):
     gamma = args.gamma
     r_air = args.R
+    flight_altitude_m = args.altitude * 0.3048 if args.altitude is not None else args.altitude_m
+    manual_cruise_altitude_m = (
+        args.cruise_altitude * 0.3048 if args.cruise_altitude is not None else args.cruise_altitude_m
+    )
+    vehicle = rectangular_vehicle_packaging(
+        width=args.vehicle_width,
+        height=args.vehicle_height,
+        nozzle_diameter_clearance=args.nozzle_diameter_clearance,
+        max_exit_area=args.max_exit_area,
+    )
 
     if args.flight and args.manual:
         raise ValueError("Use either --flight or --manual, not both.")
@@ -976,10 +1744,18 @@ def resolve_case_from_args(args):
     if use_flight_mode:
         flight = estimate_flight_inputs(
             mach_flight=args.M_flight,
-            altitude_ft=args.altitude,
-            max_radius_inches=args.max_radius,
+            altitude_m=flight_altitude_m,
+            vehicle_width=args.vehicle_width,
+            vehicle_height=args.vehicle_height,
+            inlet_width=args.inlet_width,
+            inlet_height=args.inlet_height,
+            nozzle_diameter_clearance=args.nozzle_diameter_clearance,
+            max_exit_area=args.max_exit_area,
             capture_area_ratio=args.capture_area_ratio,
-            combustor_temp_ratio=args.combustor_temp_ratio,
+            combustor_exit_temperature=args.combustor_exit_temp,
+            inlet_pressure_recovery=args.inlet_pressure_recovery,
+            combustor_pressure_ratio=args.combustor_pressure_ratio,
+            fuel_name=args.fuel,
             fuel_lhv=args.fuel_LHV,
             combustor_efficiency=args.combustor_efficiency,
             combustor_cp=args.combustor_cp,
@@ -1005,6 +1781,8 @@ def resolve_case_from_args(args):
             "target_exit_mach": args.M_exit,
             "gamma": gamma,
             "flight": flight,
+            "vehicle": flight["vehicle"],
+            "max_exit_area": flight["vehicle"]["max_exit_area"],
             "mode": "flight",
         }
 
@@ -1015,8 +1793,8 @@ def resolve_case_from_args(args):
         ambient_pressure = args.Ps
         ambient_source = "user --Ps"
     else:
-        ambient_pressure = standard_atmosphere(args.cruise_altitude)["P"]
-        ambient_source = f"standard atmosphere at {args.cruise_altitude:.0f} ft"
+        ambient_pressure = standard_atmosphere_m(manual_cruise_altitude_m)["P"]
+        ambient_source = f"standard atmosphere at {manual_cruise_altitude_m:.0f} m"
 
     return {
         "M_inlet": args.M_inlet,
@@ -1034,6 +1812,8 @@ def resolve_case_from_args(args):
         "target_exit_mach": args.M_exit,
         "gamma": gamma,
         "flight": None,
+        "vehicle": vehicle,
+        "max_exit_area": vehicle["max_exit_area"],
         "mode": "manual",
     }
 
@@ -1054,6 +1834,7 @@ def run_exit_mach_sweep(case, args):
     mach_values = np.linspace(args.M_exit_min, args.M_exit_max, args.sweep_exit_points)
     rows = []
     ramjet_sweep = case.get("fuel_mass_flow") is not None and case.get("flight_velocity") is not None
+    max_exit_area = None if args.no_exit_area_limit else case.get("max_exit_area")
 
     print("\n" + "=" * 72)
     print("EXIT MACH SWEEP")
@@ -1077,22 +1858,40 @@ def run_exit_mach_sweep(case, args):
     print("-" * 79)
 
     for mach in mach_values:
+        sweep_case = case.copy()
+        if case.get("flight") is not None:
+            sweep_case["flight"] = case["flight"].copy()
         try:
             result = run_pycycle_nozzle(
-                m_inlet=case["M_inlet"],
-                pt_inlet=case["Pt_inlet"],
-                tt_inlet=case["Tt_inlet"],
-                ps_exhaust=case["P_ambient"],
+                m_inlet=sweep_case["M_inlet"],
+                pt_inlet=sweep_case["Pt_inlet"],
+                tt_inlet=sweep_case["Tt_inlet"],
+                ps_exhaust=sweep_case["P_ambient"],
                 cv=args.Cv,
                 nozzle_type=args.nozzle_type,
-                mass_flow=case["W"],
-                throat_area=case["A_throat"],
+                mass_flow=sweep_case["W"],
+                throat_area=sweep_case["A_throat"],
                 target_exit_mach=mach,
-                ambient_pressure=case["P_ambient"],
-                gamma_for_guess=case["gamma"],
+                ambient_pressure=sweep_case["P_ambient"],
+                gamma_for_guess=sweep_case["gamma"],
                 show_solver_warnings=args.show_solver_warnings,
             )
-            result = add_ramjet_metrics(result, case, args)
+            if max_exit_area is not None:
+                result["performance"]["exit_area_limit"] = max_exit_area
+                result["performance"]["exit_area_limited"] = result["exit"]["area"] > max_exit_area
+                result["performance"]["area_constraint_mode"] = "sweep geometry filter"
+                if result["exit"]["area"] > max_exit_area:
+                    print(
+                        f"{mach:>8.3f}"
+                        f"{result['exit']['P']/1e3:>11.3f}"
+                        f"{result['performance']['area_ratio']:>10.4f}"
+                        f"{'REJECT':>15}"
+                        f"{'':>10}"
+                        f"{'':>9}"
+                        f"{'Ae too large':>16}"
+                    )
+                    continue
+            result = add_ramjet_metrics(result, sweep_case, args)
         except Exception as exc:
             print(f"{mach:>8.3f}{'FAILED':>71}  {exc}")
             continue
@@ -1152,6 +1951,13 @@ def main(args):
     print(f"Inlet total temperature:  {case['Tt_inlet']:.2f} K")
     print(f"Cruise ambient pressure:  {case['P_ambient']/1e3:.3f} kPa")
     print(f"Ambient pressure source:  {case['ambient_source']}")
+    print(f"Vehicle width x height:   {case['vehicle']['width']:.3f} m x {case['vehicle']['height']:.3f} m")
+    print(f"Vehicle frontal area:     {case['vehicle']['frontal_area']:.6f} m^2")
+    print(f"Max circular exit diam.:  {case['vehicle']['max_circular_diameter']:.4f} m")
+    if case.get("flight") is not None:
+        inlet = case["flight"]["inlet"]
+        print(f"Inlet width x height:     {inlet['width']:.3f} m x {inlet['height']:.3f} m")
+        print(f"Inlet capture area:       {inlet['capture_area']:.6f} m^2")
     if case["target_exit_mach"] is None:
         print(f"Expansion assumption:     ideal expansion to cruise ambient")
         print(f"pyCycle exhaust pressure: {case['P_exhaust']/1e3:.3f} kPa")
@@ -1159,6 +1965,17 @@ def main(args):
         print("Expansion assumption:     off-design target exit Mach")
         print("pyCycle exhaust pressure: solved by pyCycle balance")
     print(f"Velocity coefficient Cv:  {args.Cv:.4f}")
+    if args.no_exit_area_limit:
+        print("Max exit area limit:      disabled")
+    else:
+        print(f"Max exit area limit:      {case['max_exit_area']:.6f} m^2")
+    if args.nozzle_length is None:
+        print(
+            f"Nozzle length budget:     {args.missile_length * args.nozzle_length_fraction:.3f} m "
+            f"({100.0 * args.nozzle_length_fraction:.1f}% of {args.missile_length:.3f} m)"
+        )
+    else:
+        print(f"Nozzle length budget:     {args.nozzle_length:.3f} m")
     if case["target_exit_mach"] is not None:
         print(f"Target exit Mach balance: {case['target_exit_mach']:.4f}")
     if case["W"] is not None:
@@ -1187,6 +2004,18 @@ def main(args):
         gamma_for_guess=case["gamma"],
         show_solver_warnings=args.show_solver_warnings,
     )
+    max_exit_area = None if args.no_exit_area_limit else case["max_exit_area"]
+    if case["target_exit_mach"] is None:
+        results = solve_exit_area_constrained_nozzle(
+            initial_results=results,
+            case=case,
+            max_exit_area=max_exit_area,
+            cv=args.Cv,
+            nozzle_type=args.nozzle_type,
+            show_solver_warnings=args.show_solver_warnings,
+        )
+    else:
+        results = apply_exit_area_limit(results, case, max_exit_area)
     results = add_ramjet_metrics(results, case, args)
 
     print_results(results)
@@ -1194,11 +2023,17 @@ def main(args):
     geometry_csv_path = None if args.no_geometry_csv else args.geometry_csv
     fig = plot_results(
         results,
+        output_path=args.plot_path,
         geometry_csv_path=geometry_csv_path,
         converging_length=args.converging_length,
         diverging_length=args.diverging_length,
         bell_throat_angle=args.bell_throat_angle,
         bell_exit_angle=args.bell_exit_angle,
+        bell_points=args.bell_points,
+        missile_length=args.missile_length,
+        nozzle_length_fraction=args.nozzle_length_fraction,
+        nozzle_length=args.nozzle_length,
+        vehicle_radius=case["vehicle"]["max_circular_radius"],
     )
 
     backend = plt.get_backend().lower()
@@ -1225,8 +2060,11 @@ Examples:
   # Try several exit Mach values and rank them by cruise-ambient force
   python nozzle_design.py --sweep_exit_mach --M_exit_min 1.5 --M_exit_max 3.0 --sweep_exit_points 4
 
-  # Override flight-estimated inlet conditions
-  python nozzle_design.py --M_flight 5.0 --altitude 60000 --max_radius 18.9
+  # Override mission and rectangular packaging assumptions
+  python nozzle_design.py --M_flight 5.0 --altitude_m 12000 --vehicle_width 0.40 --vehicle_height 0.57 --inlet_width 0.25 --inlet_height 0.05
+
+  # Use an explicit exit-area cap instead of the rectangular-body circular-fit value
+  python nozzle_design.py --max_exit_area 0.10
 
   # Manual mode with user-specified liquid fuel-air ratio for fuel-based Isp
   python nozzle_design.py --manual --W 10 --fuel_air_ratio 0.04 --flight_velocity 1200
@@ -1247,8 +2085,13 @@ Examples:
     parser.add_argument(
         "--cruise_altitude",
         type=float,
-        default=60000.0,
-        help="Manual-mode cruise altitude used to estimate ambient pressure when --P_ambient/--Ps are omitted (ft).",
+        help="Legacy manual-mode cruise altitude in feet. Overrides --cruise_altitude_m.",
+    )
+    parser.add_argument(
+        "--cruise_altitude_m",
+        type=float,
+        default=DEFAULT_CRUISE_ALTITUDE_M,
+        help="Manual-mode cruise altitude in meters when --P_ambient/--Ps are omitted.",
     )
     parser.add_argument("--W", type=float, help="Mass flow rate through the nozzle (kg/s).")
     parser.add_argument(
@@ -1257,6 +2100,15 @@ Examples:
         default=0.01,
         help="Requested throat area (m^2). Ignored if --W is supplied or --flight is used.",
     )
+    parser.add_argument(
+        "--max_exit_area",
+        type=float,
+        help=(
+            "Maximum packaged nozzle exit area (m^2). If omitted, the code uses the largest "
+            "circular exit that fits inside --vehicle_width x --vehicle_height."
+        ),
+    )
+    parser.add_argument("--no_exit_area_limit", action="store_true", help="Disable the packaged exit-area limit.")
     parser.add_argument(
         "--M_exit",
         type=float,
@@ -1273,20 +2125,94 @@ Examples:
         help="pyCycle nozzle type.",
     )
 
-    parser.add_argument("--M_flight", type=float, default=5.0, help="Flight Mach number for --flight mode.")
-    parser.add_argument("--altitude", type=float, default=60000.0, help="Flight altitude in feet for --flight mode.")
+    parser.add_argument("--M_flight", type=float, default=DEFAULT_CRUISE_MACH, help="Flight Mach number for --flight mode.")
+    parser.add_argument("--altitude", type=float, help="Legacy flight altitude in feet. Overrides --altitude_m.")
+    parser.add_argument(
+        "--altitude_m",
+        type=float,
+        default=DEFAULT_CRUISE_ALTITUDE_M,
+        help="Flight altitude in meters for --flight mode.",
+    )
     parser.add_argument(
         "--flight_velocity",
         type=float,
         help="Manual-mode flight velocity for ram-drag/net-ramjet-thrust estimates (m/s).",
     )
-    parser.add_argument("--max_radius", type=float, default=18.9, help="Maximum vehicle radius in inches.")
-    parser.add_argument("--capture_area_ratio", type=float, default=0.8, help="Captured fraction of vehicle frontal area.")
     parser.add_argument(
-        "--combustor_temp_ratio",
+        "--vehicle_width",
         type=float,
-        default=3.5,
-        help="Estimated combustor Tt ratio for flight-mode nozzle-inlet inputs.",
+        default=DEFAULT_VEHICLE_WIDTH,
+        help="Rectangular vehicle body width available for nozzle packaging (m).",
+    )
+    parser.add_argument(
+        "--vehicle_height",
+        type=float,
+        default=DEFAULT_VEHICLE_HEIGHT,
+        help="Rectangular vehicle body height available for nozzle packaging (m).",
+    )
+    parser.add_argument(
+        "--nozzle_diameter_clearance",
+        type=float,
+        default=DEFAULT_NOZZLE_DIAMETER_CLEARANCE,
+        help="Fraction of the smaller rectangular body dimension allowed for the circular nozzle exit.",
+    )
+    parser.add_argument(
+        "--inlet_width",
+        type=float,
+        default=DEFAULT_INLET_WIDTH,
+        help="Rectangular inlet opening width used for air mass-flow estimate (m).",
+    )
+    parser.add_argument(
+        "--inlet_height",
+        type=float,
+        default=DEFAULT_INLET_HEIGHT,
+        help="Rectangular inlet opening height used for air mass-flow estimate (m).",
+    )
+    parser.add_argument(
+        "--missile_length",
+        type=float,
+        default=DEFAULT_MISSILE_LENGTH,
+        help="Total missile length used for nozzle geometry packaging checks (m).",
+    )
+    parser.add_argument(
+        "--nozzle_length_fraction",
+        type=float,
+        default=DEFAULT_NOZZLE_LENGTH_FRACTION,
+        help="Fraction of missile length allocated to the nozzle geometry when --nozzle_length is omitted.",
+    )
+    parser.add_argument(
+        "--nozzle_length",
+        type=float,
+        help="Total generated nozzle geometry length override (m).",
+    )
+    parser.add_argument(
+        "--capture_area_ratio",
+        type=float,
+        default=1.0,
+        help="Captured fraction of the rectangular inlet opening area.",
+    )
+    parser.add_argument(
+        "--combustor_exit_temp",
+        type=float,
+        default=DEFAULT_COMBUSTOR_EXIT_TT,
+        help="Combustor-exit/nozzle-inlet total temperature estimate for flight mode (K).",
+    )
+    parser.add_argument(
+        "--inlet_pressure_recovery",
+        type=float,
+        default=DEFAULT_INLET_PRESSURE_RECOVERY,
+        help="Total-pressure recovery from freestream to combustor inlet for flight-mode estimates.",
+    )
+    parser.add_argument(
+        "--combustor_pressure_ratio",
+        type=float,
+        default=DEFAULT_COMBUSTOR_PRESSURE_RATIO,
+        help="Combustor total-pressure ratio from combustor inlet to nozzle inlet.",
+    )
+    parser.add_argument(
+        "--fuel",
+        default=DEFAULT_FUEL_NAME,
+        help="Fuel label used in output.",
     )
     parser.add_argument(
         "--fuel_air_ratio",
@@ -1298,7 +2224,7 @@ Examples:
         type=float,
         help="Manual-mode liquid fuel flow rate (kg/s) for fuel-based Isp.",
     )
-    parser.add_argument("--fuel_LHV", type=float, default=43.0e6, help="Liquid fuel lower heating value (J/kg).")
+    parser.add_argument("--fuel_LHV", type=float, default=DEFAULT_FUEL_LHV, help="Liquid fuel lower heating value (J/kg).")
     parser.add_argument(
         "--combustor_efficiency",
         type=float,
@@ -1343,6 +2269,18 @@ Examples:
         type=float,
         default=8.0,
         help="Exit wall angle for the generated bell contour (deg).",
+    )
+    parser.add_argument(
+        "--bell_points",
+        type=int,
+        default=240,
+        help="Number of points used for generated bell contour plot/CSV.",
+    )
+    parser.add_argument(
+        "--plot_path",
+        type=Path,
+        default=DEFAULT_PLOT_PATH,
+        help="Output path for the nozzle analysis plot.",
     )
     parser.add_argument(
         "--geometry_csv",

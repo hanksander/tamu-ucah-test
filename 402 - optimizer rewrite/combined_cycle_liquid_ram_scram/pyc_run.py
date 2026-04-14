@@ -228,6 +228,56 @@ def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
 
 
 # ---------------------------------------------------------------------------
+# Combustor geometry helpers
+# ---------------------------------------------------------------------------
+
+def compute_combustor_geometry(
+    nozzle_throat_area: float,
+    combustor_L_star: float,
+    design: dict | None = None,
+    width_m: float | None = None,
+    height_m: float | None = None,
+) -> dict:
+    """
+    Size a constant-area rectangular combustor from characteristic length.
+    """
+    if nozzle_throat_area <= 0.0:
+        raise ValueError("nozzle_throat_area must be positive.")
+    if combustor_L_star <= 0.0:
+        raise ValueError("combustor_L_star must be positive.")
+
+    if width_m is None:
+        width_m = INLET_DESIGN_WIDTH_M
+
+    if height_m is None:
+        if design is None:
+            raise ValueError("height_m or design must be provided.")
+        if "throat_height_m" in design:
+            height_m = float(design["throat_height_m"])
+        else:
+            t_up = np.asarray(design["throat_upper_xy"], dtype=float)
+            t_lo = np.asarray(design["throat_lower_xy"], dtype=float)
+            height_m = float(abs(t_up[1] - t_lo[1]))
+
+    if width_m <= 0.0 or height_m <= 0.0:
+        raise ValueError("Combustor width and height must be positive.")
+
+    combustor_area = width_m * height_m
+    combustor_volume = combustor_L_star * nozzle_throat_area
+    combustor_length = combustor_volume / combustor_area
+
+    return {
+        "L_star": float(combustor_L_star),
+        "width_m": float(width_m),
+        "height_m": float(height_m),
+        "cross_section_area_m2": float(combustor_area),
+        "throat_area_m2": float(nozzle_throat_area),
+        "volume_m3": float(combustor_volume),
+        "length_m": float(combustor_length),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Single-point analysis
 # ---------------------------------------------------------------------------
 
@@ -237,6 +287,7 @@ def analyze(
     phi:          float,
     M_transition: float | None = None,
     ramp_angles:  list  | None = None,
+    combustor_L_star: float | None = None,
     verbose:      bool         = False,
 ) -> dict:
     """
@@ -262,6 +313,7 @@ def analyze(
     """
     M_trans = float(M_transition) if M_transition is not None else M_TRANSITION
     mode    = 'scram' if M0 >= M_trans else 'ram'
+    design  = _get_inlet_design()
 
     # Freestream conditions
     atm  = Atmosphere(altitude_m)
@@ -273,7 +325,7 @@ def analyze(
     # Capture area from the frozen 2-ramp inlet geometry (402inlet2.py).
     # design['A_capture_required_m2'] is the geometric opening sized at the
     # design point; mass flow at off-design scales as rho0*V0*A_capture.
-    A_capture_m2 = float(_get_inlet_design()['A_capture_required_m2'])
+    A_capture_m2 = float(design['A_capture_required_m2'])
     W_kgs   = rho0 * V0 * A_capture_m2         # kg/s
     W_lbms  = W_kgs * KG2LBM                   # lbm/s
 
@@ -323,6 +375,33 @@ def analyze(
     Tt4_K  = _K('burner.Fl_O:tot:T')
     MN4    = _mn('burner.Fl_O:stat:MN')
     W4_kgs = float(prob.get_val('burner.Fl_O:stat:W', units='kg/s')[0])
+    burner_exit_flowstation = {
+        'Fl_O:tot:h': prob.get_val('burner.Fl_O:tot:h'),
+        'Fl_O:tot:T': prob.get_val('burner.Fl_O:tot:T'),
+        'Fl_O:tot:P': prob.get_val('burner.Fl_O:tot:P'),
+        'Fl_O:tot:S': prob.get_val('burner.Fl_O:tot:S'),
+        'Fl_O:tot:rho': prob.get_val('burner.Fl_O:tot:rho'),
+        'Fl_O:tot:gamma': prob.get_val('burner.Fl_O:tot:gamma'),
+        'Fl_O:tot:Cp': prob.get_val('burner.Fl_O:tot:Cp'),
+        'Fl_O:tot:Cv': prob.get_val('burner.Fl_O:tot:Cv'),
+        'Fl_O:tot:R': prob.get_val('burner.Fl_O:tot:R'),
+        'Fl_O:tot:composition': prob.get_val('burner.Fl_O:tot:composition'),
+        'Fl_O:stat:h': prob.get_val('burner.Fl_O:stat:h'),
+        'Fl_O:stat:T': prob.get_val('burner.Fl_O:stat:T'),
+        'Fl_O:stat:P': prob.get_val('burner.Fl_O:stat:P'),
+        'Fl_O:stat:S': prob.get_val('burner.Fl_O:stat:S'),
+        'Fl_O:stat:rho': prob.get_val('burner.Fl_O:stat:rho'),
+        'Fl_O:stat:gamma': prob.get_val('burner.Fl_O:stat:gamma'),
+        'Fl_O:stat:Cp': prob.get_val('burner.Fl_O:stat:Cp'),
+        'Fl_O:stat:Cv': prob.get_val('burner.Fl_O:stat:Cv'),
+        'Fl_O:stat:R': prob.get_val('burner.Fl_O:stat:R'),
+        'Fl_O:stat:V': prob.get_val('burner.Fl_O:stat:V'),
+        'Fl_O:stat:Vsonic': prob.get_val('burner.Fl_O:stat:Vsonic'),
+        'Fl_O:stat:MN': prob.get_val('burner.Fl_O:stat:MN'),
+        'Fl_O:stat:area': prob.get_val('burner.Fl_O:stat:area'),
+        'Fl_O:stat:W': prob.get_val('burner.Fl_O:stat:W'),
+    }
+    burner_exit_flow_port_data = prob.model._get_subsystem('burner').Fl_O_data['Fl_O']
 
     noz = nozzle_design.run_pycycle_nozzle(
         m_inlet=MN4,
@@ -332,11 +411,20 @@ def analyze(
         cv=ETA_NOZZLE_CV,
         nozzle_type=NOZZLE_TYPE,
         mass_flow=W4_kgs,
+        flowstation=burner_exit_flowstation,
+        flow_port_data=burner_exit_flow_port_data,
         ambient_pressure=P0,
     )
     nozzle_exit   = noz['exit']
     nozzle_throat = noz['throat']
     nozzle_perf   = noz['performance']
+    combustor_geometry = None
+    if combustor_L_star is not None:
+        combustor_geometry = compute_combustor_geometry(
+            nozzle_throat_area=float(nozzle_throat['area']),
+            combustor_L_star=combustor_L_star,
+            design=design,
+        )
 
     # F_cruise = momentum + pressure thrust at ambient (gross thrust).
     # Net thrust for a ramjet subtracts ram drag on the captured air stream:
@@ -353,6 +441,28 @@ def analyze(
             choked = bool(_mn('burner.rayleigh.choked') > 0.5)
         except Exception:
             pass
+
+    combustor_section = {
+        "width_m": float(INLET_DESIGN_WIDTH_M),
+        "height_m": float(design["throat_height_m"]),
+        "area_m2": float(INLET_DESIGN_WIDTH_M * design["throat_height_m"]),
+    }
+    inlet_geometry = {
+        "capture_area_m2": float(design["A_capture_required_m2"]),
+        "post_cowl_area_m2": float(design["post_cowl_area_m2"]),
+        "throat_area_m2": float(design["throat_area_actual_m2"]),
+        "throat_height_m": float(design["throat_height_m"]),
+        "width_m": float(INLET_DESIGN_WIDTH_M),
+        "forebody_length_m": float(design["forebody_length_m"]),
+        "ramp1_length_m": float(design["ramp1_length_m"]),
+        "shock2_to_lip_m": float(design["shock2_distance_from_break2_to_lip_m"]),
+    }
+    nozzle_geometry = {
+        "throat_area_m2": float(nozzle_throat["area"]),
+        "exit_area_m2": float(nozzle_exit["area"]),
+        "area_ratio": float(nozzle_perf["area_ratio"]),
+        "expansion_state": nozzle_perf["expansion_state"],
+    }
 
     result = dict(
         mode=mode, M0=M0, altitude=altitude_m, phi=phi, M_trans=M_trans,
@@ -371,6 +481,12 @@ def analyze(
             4: _K('burner.Fl_O:tot:T'),
             9: float(nozzle_exit['Tt']),
         },
+        P_stations={
+            0: _Pa('fc.Fl_O:stat:P'),
+            3: _Pa('inlet.Fl_O:stat:P'),
+            4: _Pa('burner.Fl_O:stat:P'),
+            9: float(nozzle_exit['P']),
+        },
         M_stations={
             0: M0,
             3: _mn('inlet.Fl_O:stat:MN'),
@@ -387,6 +503,10 @@ def analyze(
         nozzle_exit_area=float(nozzle_exit['area']),
         nozzle_area_ratio=float(nozzle_perf['area_ratio']),
         nozzle_expansion=nozzle_perf['expansion_state'],
+        inlet_geometry=inlet_geometry,
+        combustor_section=combustor_section,
+        combustor_geometry=combustor_geometry,
+        nozzle_geometry=nozzle_geometry,
     )
 
     if verbose:
@@ -420,21 +540,55 @@ def mach_sweep(mach_range, altitude_m, phi,
 # ---------------------------------------------------------------------------
 
 def _print_cycle(r):
+    inlet_geom = r.get('inlet_geometry', {})
+    combustor_section = r.get('combustor_section', {})
+    combustor_geom = r.get('combustor_geometry')
+    nozzle_geom = r.get('nozzle_geometry', {})
+
     print(f"\n{'='*70}")
     print(f"  {r['mode'].upper():6s}  |  M0={r['M0']:.2f}  "
           f"|  alt={r['altitude']/1e3:.1f} km  "
           f"|  phi={r['phi']:.2f}  "
           f"|  M_trans={r['M_trans']:.1f}")
     print(f"{'='*70}")
+    print("  Station states")
     print(f"  {'Stn':>8}  {'M':>7}  {'Ts [K]':>8}  {'Tt [K]':>8}  "
-          f"{'Pt [kPa]':>10}")
-    print(f"  {'-'*50}")
+          f"{'Ps [kPa]':>10}  {'Pt [kPa]':>10}")
+    print(f"  {'-'*64}")
     lbl = {0: 'Free', 3: 'Comb.in', 4: 'Comb.out', 9: 'Nozzle'}
     for s in (0, 3, 4, 9):
         print(f"  {lbl[s]:>8}  {r['M_stations'][s]:>7.3f}  "
               f"{r['T_stations'][s]:>8.1f}  {r['Tt_stations'][s]:>8.1f}  "
+              f"{r['P_stations'][s]/1e3:>10.2f}  "
               f"{r['Pt_stations'][s]/1e3:>10.2f}")
     print()
+    print("  Inlet geometry")
+    print(f"  capture area     = {inlet_geom.get('capture_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  post-cowl area   = {inlet_geom.get('post_cowl_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  throat area      = {inlet_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  throat height    = {inlet_geom.get('throat_height_m', float('nan')):>8.5f} m")
+    print(f"  width            = {inlet_geom.get('width_m', float('nan')):>8.5f} m")
+    print(f"  forebody length  = {inlet_geom.get('forebody_length_m', float('nan')):>8.5f} m")
+    print(f"  ramp1 length     = {inlet_geom.get('ramp1_length_m', float('nan')):>8.5f} m")
+    print(f"  break2->lip dist = {inlet_geom.get('shock2_to_lip_m', float('nan')):>8.5f} m")
+    print()
+    print("  Combustor geometry")
+    print(f"  section width    = {combustor_section.get('width_m', float('nan')):>8.5f} m")
+    print(f"  section height   = {combustor_section.get('height_m', float('nan')):>8.5f} m")
+    print(f"  section area     = {combustor_section.get('area_m2', float('nan')):>8.5f} m^2")
+    if combustor_geom is not None:
+        print(f"  L*               = {combustor_geom.get('L_star', float('nan')):>8.5f} m")
+        print(f"  throat area At   = {combustor_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
+        print(f"  chamber volume   = {combustor_geom.get('volume_m3', float('nan')):>8.5f} m^3")
+        print(f"  chamber length   = {combustor_geom.get('length_m', float('nan')):>8.5f} m")
+    print()
+    print("  Nozzle geometry")
+    print(f"  throat area At   = {nozzle_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  exit area Ae     = {nozzle_geom.get('exit_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  area ratio Ae/At = {nozzle_geom.get('area_ratio', float('nan')):>8.5f}")
+    print(f"  expansion state  = {nozzle_geom.get('expansion_state', 'n/a')}")
+    print()
+    print("  Performance")
     print(f"  Isp       = {r['Isp']:>8.1f} s")
     print(f"  F_sp      = {r['F_sp']:>8.1f} N*s/kg_air")
     print(f"  Thrust    = {r['thrust']/1e3:>8.2f} kN ")
@@ -452,5 +606,8 @@ if __name__ == '__main__':
     print("  pyCycle Dual-Mode Ram/Scramjet")
     print("=" * 60)
 
-    print("\n--- Design point: RAM  M=4.5, alt=20km, phi=0.8 ---")
-    analyze(M0=4.0, altitude_m=12_000, phi=0.8, M_transition=5.2, verbose=True)
+    print("\n--- Design point, phi=0.8 ---")
+    analyze(M0=5.0, altitude_m=13500, phi=0.8, M_transition=5.2, verbose=True)
+
+
+

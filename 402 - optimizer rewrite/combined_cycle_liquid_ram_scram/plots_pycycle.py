@@ -50,6 +50,12 @@ plt.rcParams.update({
 
 PHI_DEFAULT = 0.8
 ALT_DEFAULT = 20_000.0
+COMBUSTOR_L_STAR_DEFAULT = 1.25
+NOZZLE_CONVERGING_LENGTH_DEFAULT = None
+NOZZLE_DIVERGING_LENGTH_DEFAULT = None
+NOZZLE_THROAT_ANGLE_DEFAULT = 30.0
+NOZZLE_EXIT_ANGLE_DEFAULT = 8.0
+NOZZLE_BELL_POINTS_DEFAULT = 240
 
 
 def _save(fig, name):
@@ -83,6 +89,85 @@ def _arr(results, key, sub=None):
         v = r[key][sub] if sub is not None else r[key]
         out.append(float(v))
     return np.array(out)
+
+
+def _flowpath_layout(
+    design,
+    design_cycle,
+    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+    diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+    throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+    exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+    n_points=NOZZLE_BELL_POINTS_DEFAULT,
+):
+    """Shared geometry layout for flowpath and axial-property plots."""
+    fore = np.asarray(design['forebody_xy'], dtype=float)
+    t_up = np.asarray(design['throat_upper_xy'], dtype=float)
+    t_lo = np.asarray(design['throat_lower_xy'], dtype=float)
+
+    duct_h = float(abs(t_up[1] - t_lo[1]))
+    duct_y_lo = min(t_up[1], t_lo[1])
+    duct_x0 = max(t_up[0], t_lo[0])
+
+    combustor = design_cycle.get('combustor_geometry')
+    A_throat = float(design_cycle['nozzle_throat_area'])
+    if combustor is None or abs(float(combustor.get('L_star', np.nan)) - combustor_L_star) > 1.0e-12:
+        combustor = pyc_run.compute_combustor_geometry(
+            nozzle_throat_area=A_throat,
+            combustor_L_star=combustor_L_star,
+            design=design,
+        )
+
+    duct_len = float(combustor['length_m'])
+    duct_x1 = duct_x0 + duct_len
+
+    A_exit = float(design_cycle['nozzle_exit_area'])
+    A_inlet = float(combustor['cross_section_area_m2'])
+    bell = nozzle_design.generate_bell_contour(
+        inlet_area=max(A_inlet, A_throat * 1.01),
+        throat_area=A_throat,
+        exit_area=A_exit,
+        converging_length=converging_length,
+        diverging_length=diverging_length,
+        throat_angle_deg=throat_angle_deg,
+        exit_angle_deg=exit_angle_deg,
+        n_points=n_points,
+    )
+
+    x_shift = duct_x1 - bell['x'][0]
+    bx = bell['x'] + x_shift
+    y_center = 0.5 * (t_up[1] + t_lo[1])
+
+    return {
+        'fore': fore,
+        't_up': t_up,
+        't_lo': t_lo,
+        'duct_h': duct_h,
+        'duct_y_lo': duct_y_lo,
+        'duct_x0': duct_x0,
+        'duct_len': duct_len,
+        'duct_x1': duct_x1,
+        'combustor': combustor,
+        'A_inlet': A_inlet,
+        'A_throat': A_throat,
+        'A_exit': A_exit,
+        'bell': bell,
+        'bx': bx,
+        'y_center': y_center,
+        'station_x': {
+            0: float(fore[0]),
+            3: float(duct_x0),
+            4: float(duct_x1),
+            9: float(bx[-1]),
+        },
+        'station_labels': {
+            0: 'Freestream',
+            3: 'Inlet exit',
+            4: 'Combustor exit',
+            9: 'Nozzle exit',
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +218,16 @@ def fig_inlet_pt_vs_alpha(design):
 # Flowpath to-scale: inlet profile + combustor duct + nozzle bell
 # ---------------------------------------------------------------------------
 
-def fig_flowpath(design, design_cycle):
+def fig_flowpath(
+    design,
+    design_cycle,
+    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+    diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+    throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+    exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+    n_points=NOZZLE_BELL_POINTS_DEFAULT,
+):
     """
     Nose-to-tail to-scale flowpath.  Inlet is 2D side view (from 402inlet2);
     combustor is a rectangular duct; nozzle is axisymmetric (radius plotted
@@ -154,17 +248,29 @@ def fig_flowpath(design, design_cycle):
     duct_h  = float(abs(t_up[1] - t_lo[1]))
     duct_y_lo = min(t_up[1], t_lo[1])
     duct_x0 = max(t_up[0], t_lo[0])
-    duct_len = 1.8 * duct_h   # arbitrary aspect for display
+    combustor = design_cycle.get('combustor_geometry')
+    A_throat = float(design_cycle['nozzle_throat_area'])
+    if combustor is None or abs(float(combustor.get('L_star', np.nan)) - combustor_L_star) > 1.0e-12:
+        combustor = pyc_run.compute_combustor_geometry(
+            nozzle_throat_area=A_throat,
+            combustor_L_star=combustor_L_star,
+            design=design,
+        )
+    duct_len = float(combustor['length_m'])
     duct_x1 = duct_x0 + duct_len
 
     # Nozzle bell — axisymmetric; match bell inlet radius to half duct height
-    A_throat = float(design_cycle['nozzle_throat_area'])
     A_exit   = float(design_cycle['nozzle_exit_area'])
-    A_inlet  = np.pi * (duct_h / 2.0) ** 2
+    A_inlet  = float(combustor['cross_section_area_m2'])
     bell = nozzle_design.generate_bell_contour(
         inlet_area=max(A_inlet, A_throat * 1.01),
         throat_area=A_throat,
         exit_area=A_exit,
+        converging_length=converging_length,
+        diverging_length=diverging_length,
+        throat_angle_deg=throat_angle_deg,
+        exit_angle_deg=exit_angle_deg,
+        n_points=n_points,
     )
     # Shift bell so its -converging_length end sits at duct_x1
     x_shift = duct_x1 - bell['x'][0]
@@ -194,7 +300,8 @@ def fig_flowpath(design, design_cycle):
                      fill=False, ec='darkgreen', lw=2.0)
     ax.add_patch(duct)
     ax.text(duct_x0 + 0.5 * duct_len, duct_y_lo + duct_h + 0.02 * duct_h,
-            'Combustor', ha='center', va='bottom', color='darkgreen')
+            f'Combustor  L*={combustor["L_star"]:.2f} m',
+            ha='center', va='bottom', color='darkgreen')
 
     # ── Nozzle bell (axisymmetric about duct centerline) ────────────────────
     ax.plot(bx, y_center + r, '-', color='darkorange', lw=2.2, label='Nozzle')
@@ -209,6 +316,16 @@ def fig_flowpath(design, design_cycle):
     ax.annotate(f'Exit  Ae/A* = {A_exit/A_throat:.2f}',
                 xy=(bx[-1], y_center + r[-1]),
                 xytext=(bx[-1], y_center + r[-1] + duct_h),
+                ha='center', fontsize=9,
+                arrowprops=dict(arrowstyle='->', color='gray'))
+    ax.annotate(f'Lc = {duct_len:.2f} m',
+                xy=(duct_x0 + 0.5 * duct_len, duct_y_lo + duct_h),
+                xytext=(duct_x0 + 0.5 * duct_len, duct_y_lo - 0.9 * duct_h),
+                ha='center', fontsize=9,
+                arrowprops=dict(arrowstyle='->', color='gray'))
+    ax.annotate(f'Ain,eq = {A_inlet*1e4:.2f} cm²',
+                xy=(bx[0], y_center + r[0]),
+                xytext=(bx[0], y_center + r[0] + 1.8 * duct_h),
                 ha='center', fontsize=9,
                 arrowprops=dict(arrowstyle='->', color='gray'))
 
@@ -340,6 +457,82 @@ def fig_nozzle_geom_vs_mach(results, mach_range):
     _save(fig, 'fig11_nozzle_geometry_vs_mach')
 
 
+def _plot_engine_profile(
+    design,
+    design_cycle,
+    quantity_key,
+    total_key,
+    ylabel,
+    title,
+    outfile,
+):
+    """Plot one property along the engine using the design-point geometry."""
+    layout = _flowpath_layout(
+        design,
+        design_cycle,
+        combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+        converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+        diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+        throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+        exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+        n_points=NOZZLE_BELL_POINTS_DEFAULT,
+    )
+
+    stations = (0, 3, 4, 9)
+    x = np.array([layout['station_x'][s] for s in stations], dtype=float)
+    y_static = np.array([design_cycle[quantity_key][s] for s in stations], dtype=float)
+    y_total = np.array([design_cycle[total_key][s] for s in stations], dtype=float)
+
+    scale = 1e3 if 'Pa' in ylabel else 1.0
+    y_static_plot = y_static / scale
+    y_total_plot = y_total / scale
+
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    ax.plot(x, y_static_plot, 'o-', color='firebrick', label='Static')
+    ax.plot(x, y_total_plot, 's--', color='navy', label='Total')
+
+    for s in stations:
+        xs = layout['station_x'][s]
+        ax.axvline(xs, color='gray', ls=':', lw=0.9, alpha=0.6)
+        ax.text(xs, ax.get_ylim()[1], layout['station_labels'][s],
+                rotation=90, ha='right', va='top', fontsize=8, color='gray')
+
+    ax.axvspan(layout['station_x'][3], layout['station_x'][4],
+               color='darkgreen', alpha=0.08, label='Combustor')
+    ax.axvspan(layout['station_x'][4], layout['station_x'][9],
+               color='darkorange', alpha=0.06, label='Nozzle')
+
+    ax.set_xlabel('Axial distance x [m]')
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(loc='best', fontsize=8)
+    _save(fig, outfile)
+
+
+def fig_engine_pressure_profile(design, design_cycle):
+    _plot_engine_profile(
+        design,
+        design_cycle,
+        quantity_key='P_stations',
+        total_key='Pt_stations',
+        ylabel='Pressure [kPa]',
+        title='Pressure Along Engine at Design Point',
+        outfile='fig12_engine_pressure_profile',
+    )
+
+
+def fig_engine_temperature_profile(design, design_cycle):
+    _plot_engine_profile(
+        design,
+        design_cycle,
+        quantity_key='T_stations',
+        total_key='Tt_stations',
+        ylabel='Temperature [K]',
+        title='Temperature Along Engine at Design Point',
+        outfile='fig13_engine_temperature_profile',
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -359,6 +552,7 @@ def main():
         M0=INLET_DESIGN_M0,
         altitude_m=INLET_DESIGN_ALT_M,
         phi=PHI_DEFAULT,
+        combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
     )
 
     # Mach sweep
@@ -368,17 +562,22 @@ def main():
     results = mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT)
 
     print('\n  writing figures:')
-    fig_inlet_design_detail(design)
-    fig_inlet_fixed_grid(design)
-    fig_inlet_pt_vs_mach(design)
-    fig_inlet_pt_vs_alpha(design)
-    fig_flowpath(design, design_cycle)
+    fig_flowpath(
+        design,
+        design_cycle,
+        combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+        converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+        diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+        throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+        exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+        n_points=NOZZLE_BELL_POINTS_DEFAULT,
+    )
     fig_performance(results, mach_range)
     fig_mass_flows(results, mach_range)
     fig_station_T(results, mach_range)
     fig_station_Pt(results, mach_range)
-    fig_inlet_recovery_cycle(results, mach_range)
-    fig_nozzle_geom_vs_mach(results, mach_range)
+    fig_engine_pressure_profile(design, design_cycle)
+    fig_engine_temperature_profile(design, design_cycle)
 
     print(f'\n  done — figures in {OUTDIR}')
 
