@@ -41,6 +41,7 @@ def compute_combustor(
     phi: float,
     thermo,
     eta_c: float = ETA_COMBUSTOR,
+    area_ratio: float = 1.0,
     mode: str = 'scram',
 ) -> tuple[FlowState, bool]:
     """
@@ -52,6 +53,7 @@ def compute_combustor(
     phi    : float       Equivalence ratio
     thermo : JP10Thermo  Thermodynamic model
     eta_c  : float       Combustion efficiency
+    area_ratio : float   Exit/inlet area ratio
     mode   : 'ram' | 'scram'
 
     Returns

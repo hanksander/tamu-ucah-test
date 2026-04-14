@@ -25,6 +25,7 @@ from pycycle.elements.nozzle import Nozzle
 from pycycle.element_base import Element
 from pycycle.mp_cycle import Cycle
 from pycycle.thermo.cea.species_data import janaf
+from pyc_config import INLET_DESIGN_WIDTH_M
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent
@@ -64,6 +65,8 @@ DEFAULT_FUEL_LHV = 43.5e6
 DEFAULT_COMBUSTOR_EXIT_TT = 2500.0
 DEFAULT_INLET_PRESSURE_RECOVERY = 0.45
 DEFAULT_COMBUSTOR_PRESSURE_RATIO = 0.95
+DEFAULT_CONV_HALF_ANGLE = 25.0   # degrees
+DEFAULT_DIV_HALF_ANGLE  = 12.0
 G0 = 9.80665
 LBM_PER_KG = 2.2046226218
 LBF_PER_N = 0.2248089431
@@ -1396,10 +1399,12 @@ def generate_bell_contour(
     n_points,
 ):
     """
-    Build a smooth axisymmetric nozzle contour from pyCycle station areas.
+    Build a smooth nozzle contour from pyCycle station areas.
 
     pyCycle gives station areas, not wall shape. This function creates a
     reasonable bell-style profile for visualization and preliminary geometry.
+    Performance still comes from pyCycle station areas. For plotting, the
+    area distribution is converted to a 2D rectangular duct of constant width.
     """
 
     r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
@@ -1442,11 +1447,20 @@ def generate_bell_contour(
 
     x = np.concatenate([x_conv, x_div[1:]])
     r = np.concatenate([r_conv, r_div[1:]])
+    area = np.pi * r**2
+    width = float(INLET_DESIGN_WIDTH_M)
+    height = area / width
+    half_height = 0.5 * height
 
     return {
         "x": x,
         "radius": r,
-        "area": np.pi * r**2,
+        "area": area,
+        "width": width,
+        "height": height,
+        "half_height": half_height,
+        "upper_wall": half_height,
+        "lower_wall": -half_height,
         "r_inlet": r_inlet,
         "r_throat": r_throat,
         "r_exit": r_exit,
@@ -1504,8 +1518,8 @@ def save_contour_csv(contour, output_path):
     Save the generated nozzle contour for CAD/sketch import.
     """
 
-    data = np.column_stack((contour["x"], contour["radius"], -contour["radius"], contour["area"]))
-    header = "x_m,radius_upper_m,radius_lower_m,area_m2"
+    data = np.column_stack((contour["x"], contour["upper_wall"], contour["lower_wall"], contour["height"], contour["area"]))
+    header = "x_m,wall_upper_m,wall_lower_m,height_m,area_m2"
     np.savetxt(output_path, data, delimiter=",", header=header, comments="")
 
 
@@ -1570,20 +1584,24 @@ def plot_results(
     gs = GridSpec(3, 3, figure=fig)
 
     ax0 = fig.add_subplot(gs[0, :])
-    ax0.plot(contour["x"], contour["radius"], color="black", linewidth=2)
-    ax0.plot(contour["x"], -contour["radius"], color="black", linewidth=2)
-    ax0.fill_between(contour["x"], -contour["radius"], contour["radius"], color="steelblue", alpha=0.28)
+    ax0.plot(contour["x"], contour["upper_wall"], color="black", linewidth=2)
+    ax0.plot(contour["x"], contour["lower_wall"], color="black", linewidth=2)
+    ax0.fill_between(contour["x"], contour["lower_wall"], contour["upper_wall"], color="steelblue", alpha=0.28)
     ax0.axvline(0.0, color="red", linestyle="--", linewidth=1.2, label="Throat")
     ax0.scatter(
         [-contour["converging_length"], 0.0, contour["diverging_length"]],
-        [contour["r_inlet"], contour["r_throat"], contour["r_exit"]],
+        [
+            0.5 * contour["height"][0],
+            0.5 * contour["height"][np.argmin(contour["area"])],
+            0.5 * contour["height"][-1],
+        ],
         color=["#4C78A8", "#F58518", "#54A24B"],
         zorder=5,
-        label="pyCycle station radii",
+        label="pyCycle station heights/2",
     )
-    ax0.set_title("Bell Nozzle Contour From pyCycle Areas", fontweight="bold")
+    ax0.set_title("Rectangular Nozzle Contour From pyCycle Areas", fontweight="bold")
     ax0.set_xlabel("Axial position (m)")
-    ax0.set_ylabel("Equivalent radius (m)")
+    ax0.set_ylabel("Half-height from centerline (m)")
     ax0.grid(True, alpha=0.25)
     ax0.set_aspect("equal", adjustable="box")
     ax0.legend()

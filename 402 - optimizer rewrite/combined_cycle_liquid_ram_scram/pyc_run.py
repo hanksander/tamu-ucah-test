@@ -5,7 +5,7 @@ Analysis runner for the pyCycle dual-mode ram/scramjet.
 
 Mode selection
 --------------
-    M0 < M_transition  ->  RAM   (pyc.Combustor,  constant-pressure)
+    M0 < M_transition  ->  RAM   (RayleighCombustor, subsonic Rayleigh)
     M0 >= M_transition ->  SCRAM (ScramCombustor, Rayleigh)
 
 User-visible functions
@@ -40,11 +40,12 @@ import numpy as np
 import openmdao.api as om
 from ambiance import Atmosphere
 
-from gas_dynamics import pi_milspec
+from gas_dynamics import FlowState, isentropic_P, isentropic_T, pi_milspec
+from nozzle import compute_nozzle
 from pyc_config import (
     F_STOICH_JP7, ETA_COMBUSTOR,
     ETA_NOZZLE_CV, ISOLATOR_PT_RECOVERY,
-    M_TRANSITION, RAM_COMBUSTOR_EXIT_MN,
+    M_TRANSITION,
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M,
     INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
     INLET_DESIGN_MDOT_KGS, INLET_DESIGN_WIDTH_M,
@@ -55,6 +56,7 @@ from pyc_config import (
 from pyc_ram_cycle   import RamCycle
 from pyc_scram_cycle import ScramCycle
 import nozzle_design
+from thermo import get_thermo
 
 # 402inlet2.py — module name begins with a digit, import via importlib
 _inlet2_spec = importlib.util.spec_from_file_location(
@@ -289,6 +291,55 @@ def compute_combustor_geometry(
     }
 
 
+def _reconstruct_ram_nozzle_geometry(state4, state9, mass_flow, phi, thermo, eta_n):
+    """
+    Build throat and exit areas from the local nozzle solution.
+    """
+    gamma_star = state4.gamma
+    r_star = state4.R
+    T_star = isentropic_T(state4.Tt, 1.0, gamma_star)
+    P_star = isentropic_P(state4.Pt, 1.0, gamma_star)
+
+    for _ in range(2):
+        gamma_star = thermo.gamma(T_star, phi, P_star)
+        r_star = thermo.R(T_star, phi, P_star)
+        T_star = isentropic_T(state4.Tt, 1.0, gamma_star)
+        P_star = isentropic_P(state4.Pt, 1.0, gamma_star)
+
+    rho_star = P_star / max(r_star * T_star, 1.0e-12)
+    a_star = np.sqrt(gamma_star * r_star * T_star)
+    throat_area = mass_flow / max(rho_star * a_star, 1.0e-12)
+
+    rho9 = state9.P / max(state9.R * state9.T, 1.0e-12)
+    v9 = eta_n * state9.V
+    exit_area = mass_flow / max(rho9 * v9, 1.0e-12)
+
+    throat = {
+        "area": float(throat_area),
+        "T": float(T_star),
+        "P": float(P_star),
+        "M": 1.0,
+        "Pt": float(state4.Pt),
+        "Tt": float(state4.Tt),
+        "gamma": float(gamma_star),
+    }
+    exit = {
+        "area": float(exit_area),
+        "T": float(state9.T),
+        "P": float(state9.P),
+        "M": float(state9.M),
+        "Pt": float(state9.Pt),
+        "Tt": float(state9.Tt),
+        "gamma": float(state9.gamma),
+    }
+    perf = {
+        "F_cruise": np.nan,
+        "area_ratio": float(exit_area / throat_area) if throat_area > 0.0 else np.nan,
+        "expansion_state": "ideally expanded",
+    }
+    return throat, exit, perf
+
+
 # ---------------------------------------------------------------------------
 # Single-point analysis
 # ---------------------------------------------------------------------------
@@ -344,6 +395,16 @@ def analyze(
     # Effective FAR (combustion efficiency applied here)
     FAR = ETA_COMBUSTOR * phi * F_STOICH_JP7
 
+    combustor_L_star_eff = float(combustor_L_star) if combustor_L_star is not None else 1.0
+    combustor_geometry = compute_combustor_geometry(
+        nozzle_throat_area=float(design["throat_area_actual_m2"]),
+        combustor_L_star=combustor_L_star_eff,
+        design=design,
+    )
+    combustor_area_ratio = (
+        combustor_geometry["cross_section_area_m2"] / design["throat_area_actual_m2"]
+    )
+
     # Inlet shock recovery + exit Mach
     ram_recovery, inlet_MN = compute_inlet_conditions(
         M0, altitude_m, mode, ramp_angles
@@ -376,7 +437,7 @@ def analyze(
     # ── Combustor ────────────────────────────────────────────────────────────
     prob.set_val('burner.Fl_I:FAR', FAR)
     if mode == 'ram':
-        prob.set_val('burner.MN', RAM_COMBUSTOR_EXIT_MN)
+        prob.set_val('burner.area_ratio', combustor_area_ratio)
 
     # ── Solve ────────────────────────────────────────────────────────────────
     prob.run_model()
@@ -394,77 +455,113 @@ def analyze(
     Tt4_K  = _K('burner.Fl_O:tot:T')
     MN4    = _mn('burner.Fl_O:stat:MN')
     W4_kgs = float(prob.get_val('burner.Fl_O:stat:W', units='kg/s')[0])
-    burner_exit_flowstation = {
-        'Fl_O:tot:h': prob.get_val('burner.Fl_O:tot:h'),
-        'Fl_O:tot:T': prob.get_val('burner.Fl_O:tot:T'),
-        'Fl_O:tot:P': prob.get_val('burner.Fl_O:tot:P'),
-        'Fl_O:tot:S': prob.get_val('burner.Fl_O:tot:S'),
-        'Fl_O:tot:rho': prob.get_val('burner.Fl_O:tot:rho'),
-        'Fl_O:tot:gamma': prob.get_val('burner.Fl_O:tot:gamma'),
-        'Fl_O:tot:Cp': prob.get_val('burner.Fl_O:tot:Cp'),
-        'Fl_O:tot:Cv': prob.get_val('burner.Fl_O:tot:Cv'),
-        'Fl_O:tot:R': prob.get_val('burner.Fl_O:tot:R'),
-        'Fl_O:tot:composition': prob.get_val('burner.Fl_O:tot:composition'),
-        'Fl_O:stat:h': prob.get_val('burner.Fl_O:stat:h'),
-        'Fl_O:stat:T': prob.get_val('burner.Fl_O:stat:T'),
-        'Fl_O:stat:P': prob.get_val('burner.Fl_O:stat:P'),
-        'Fl_O:stat:S': prob.get_val('burner.Fl_O:stat:S'),
-        'Fl_O:stat:rho': prob.get_val('burner.Fl_O:stat:rho'),
-        'Fl_O:stat:gamma': prob.get_val('burner.Fl_O:stat:gamma'),
-        'Fl_O:stat:Cp': prob.get_val('burner.Fl_O:stat:Cp'),
-        'Fl_O:stat:Cv': prob.get_val('burner.Fl_O:stat:Cv'),
-        'Fl_O:stat:R': prob.get_val('burner.Fl_O:stat:R'),
-        'Fl_O:stat:V': prob.get_val('burner.Fl_O:stat:V'),
-        'Fl_O:stat:Vsonic': prob.get_val('burner.Fl_O:stat:Vsonic'),
-        'Fl_O:stat:MN': prob.get_val('burner.Fl_O:stat:MN'),
-        'Fl_O:stat:area': prob.get_val('burner.Fl_O:stat:area'),
-        'Fl_O:stat:W': prob.get_val('burner.Fl_O:stat:W'),
-    }
-    burner_exit_flow_port_data = prob.model._get_subsystem('burner').Fl_O_data['Fl_O']
-
-    noz = nozzle_design.run_pycycle_nozzle(
-        m_inlet=MN4,
-        pt_inlet=Pt4_Pa,
-        tt_inlet=Tt4_K,
-        ps_exhaust=P0,
-        cv=ETA_NOZZLE_CV,
-        nozzle_type=NOZZLE_TYPE,
-        mass_flow=W4_kgs,
-        flowstation=burner_exit_flowstation,
-        flow_port_data=burner_exit_flow_port_data,
-        ambient_pressure=P0,
+    state4 = FlowState(
+        M=MN4,
+        T=_K('burner.Fl_O:stat:T'),
+        P=_Pa('burner.Fl_O:stat:P'),
+        Pt=Pt4_Pa,
+        Tt=Tt4_K,
+        gamma=float(prob.get_val('burner.Fl_O:stat:gamma')[0]),
+        R=float(prob.get_val('burner.Fl_O:stat:R', units='J/(kg*K)')[0]),
     )
-    nozzle_exit   = noz['exit']
-    nozzle_throat = noz['throat']
-    nozzle_perf   = noz['performance']
-    combustor_geometry = None
-    if combustor_L_star is not None:
-        combustor_geometry = compute_combustor_geometry(
-            nozzle_throat_area=float(nozzle_throat['area']),
-            combustor_L_star=combustor_L_star,
-            design=design,
-        )
 
+    if mode == 'ram':
+        thermo = get_thermo()
+        state0 = FlowState(
+            M=M0,
+            T=T0,
+            P=P0,
+            Pt=_Pa('fc.Fl_O:tot:P'),
+            Tt=_K('fc.Fl_O:tot:T'),
+            gamma=AIR_GAM,
+            R=AIR_R,
+        )
+        F_sp, Isp, state9 = compute_nozzle(
+            state4=state4,
+            state0=state0,
+            P0=P0,
+            phi=phi,
+            thermo=thermo,
+            eta_n=ETA_NOZZLE_CV,
+        )
+        nozzle_throat, nozzle_exit, nozzle_perf = _reconstruct_ram_nozzle_geometry(
+            state4=state4,
+            state9=state9,
+            mass_flow=W4_kgs,
+            phi=phi,
+            thermo=thermo,
+            eta_n=ETA_NOZZLE_CV,
+        )
+        Fn_N = F_sp * W_kgs
+    else:
+        burner_exit_flowstation = {
+            'Fl_O:tot:h': prob.get_val('burner.Fl_O:tot:h'),
+            'Fl_O:tot:T': prob.get_val('burner.Fl_O:tot:T'),
+            'Fl_O:tot:P': prob.get_val('burner.Fl_O:tot:P'),
+            'Fl_O:tot:S': prob.get_val('burner.Fl_O:tot:S'),
+            'Fl_O:tot:rho': prob.get_val('burner.Fl_O:tot:rho'),
+            'Fl_O:tot:gamma': prob.get_val('burner.Fl_O:tot:gamma'),
+            'Fl_O:tot:Cp': prob.get_val('burner.Fl_O:tot:Cp'),
+            'Fl_O:tot:Cv': prob.get_val('burner.Fl_O:tot:Cv'),
+            'Fl_O:tot:R': prob.get_val('burner.Fl_O:tot:R'),
+            'Fl_O:tot:composition': prob.get_val('burner.Fl_O:tot:composition'),
+            'Fl_O:stat:h': prob.get_val('burner.Fl_O:stat:h'),
+            'Fl_O:stat:T': prob.get_val('burner.Fl_O:stat:T'),
+            'Fl_O:stat:P': prob.get_val('burner.Fl_O:stat:P'),
+            'Fl_O:stat:S': prob.get_val('burner.Fl_O:stat:S'),
+            'Fl_O:stat:rho': prob.get_val('burner.Fl_O:stat:rho'),
+            'Fl_O:stat:gamma': prob.get_val('burner.Fl_O:stat:gamma'),
+            'Fl_O:stat:Cp': prob.get_val('burner.Fl_O:stat:Cp'),
+            'Fl_O:stat:Cv': prob.get_val('burner.Fl_O:stat:Cv'),
+            'Fl_O:stat:R': prob.get_val('burner.Fl_O:stat:R'),
+            'Fl_O:stat:V': prob.get_val('burner.Fl_O:stat:V'),
+            'Fl_O:stat:Vsonic': prob.get_val('burner.Fl_O:stat:Vsonic'),
+            'Fl_O:stat:MN': prob.get_val('burner.Fl_O:stat:MN'),
+            'Fl_O:stat:area': prob.get_val('burner.Fl_O:stat:area'),
+            'Fl_O:stat:W': prob.get_val('burner.Fl_O:stat:W'),
+        }
+        burner_exit_flow_port_data = prob.model._get_subsystem('burner').Fl_O_data['Fl_O']
+
+        noz = nozzle_design.run_pycycle_nozzle(
+            m_inlet=MN4,
+            pt_inlet=Pt4_Pa,
+            tt_inlet=Tt4_K,
+            ps_exhaust=P0,
+            cv=ETA_NOZZLE_CV,
+            nozzle_type=NOZZLE_TYPE,
+            mass_flow=W4_kgs,
+            flowstation=burner_exit_flowstation,
+            flow_port_data=burner_exit_flow_port_data,
+            ambient_pressure=P0,
+        )
+        nozzle_exit   = noz['exit']
+        nozzle_throat = noz['throat']
+        nozzle_perf   = noz['performance']
+        Fn_N  = float(nozzle_perf['F_cruise']) - W_kgs * V0
     # F_cruise = momentum + pressure thrust at ambient (gross thrust).
     # Net thrust for a ramjet subtracts ram drag on the captured air stream:
     #     Fn = F_cruise - mdot_air * V0
-    Fn_N  = float(nozzle_perf['F_cruise']) - W_kgs * V0
     Wfuel = float(W_kgs * FAR)
-
-    F_sp = Fn_N / max(W_kgs, 1e-12)
-    Isp  = Fn_N / max(Wfuel * G0, 1e-12)
+    if mode != 'ram':
+        F_sp = Fn_N / max(W_kgs, 1e-12)
+        Isp  = Fn_N / max(Wfuel * G0, 1e-12)
 
     choked = False
-    if mode == 'scram':
+    if mode == 'ram':
+        try:
+            choked = bool(_mn('burner.choked') > 0.5)
+        except Exception:
+            pass
+    else:
         try:
             choked = bool(_mn('burner.rayleigh.choked') > 0.5)
         except Exception:
             pass
 
     combustor_section = {
-        "width_m": float(INLET_DESIGN_WIDTH_M),
-        "height_m": float(design["throat_height_m"]),
-        "area_m2": float(INLET_DESIGN_WIDTH_M * design["throat_height_m"]),
+        "width_m": float(combustor_geometry["width_m"]),
+        "height_m": float(combustor_geometry["height_m"]),
+        "area_m2": float(combustor_geometry["cross_section_area_m2"]),
     }
     inlet_geometry = {
         "capture_area_m2": float(design["A_capture_required_m2"]),
@@ -629,6 +726,20 @@ if __name__ == '__main__':
 
     print("\n--- Design point, phi=0.8 ---")
     analyze(M0=5.0, altitude_m=13500, phi=0.8, M_transition=5.2, verbose=True)
+
+
+
+    '''
+    
+    BEFORE RUNNING IN VIRTUAL ENVIRONMENTS OR ROOT DIRECTORY INTERPRETER PYCYCLE MUST BE MODIFIED
+    
+#    - pycycle\thermo\cea\props_rhs.py
+    change outputs['rhs_P'][num_element] = inputs['n_moles'] to inputs['n_moles'][0]
+    
+#    - pycycle\ thermo\cea\props_calcs.py
+    change both n_moles = inputs['n_moles'] assignments to inputs['n_moles'][0]
+    
+    '''
 
 
 

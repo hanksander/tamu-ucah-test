@@ -1,12 +1,13 @@
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.interpolate import CubicSpline
 
 GAMMA = 1.4
 R = 287.05
 
 # Subsonic-diffuser (throat -> combustor face) geometry defaults.
-DIFFUSER_AREA_RATIO = 2.0
+DIFFUSER_AREA_RATIO = 3
 DIFFUSER_HALF_ANGLE_DEG = 3.0
 
 def std_atmosphere_1976(h_m):
@@ -665,7 +666,7 @@ def build_d2r_result(fs,A_capture_required,h_req_normal,
 def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
                             area_ratio_exit_to_throat,
                             half_angle_deg=None, length_m=None,
-                            n_stations=51):
+                            n_stations=201):
     """
     Build a straight-walled symmetric subsonic diffuser downstream of the
     throat. Exactly one of (half_angle_deg, length_m) must be provided.
@@ -746,23 +747,23 @@ def _subsonic_mach_from_area_ratio(A_over_Astar, tol=1e-10, max_iter=200):
 
 
 def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
-                                       M_throat=1.0):
+                                       area_spline=None, M_throat=1.0):
     """
     Given a trial shock axial station x_s in the diverging (supersonic)
     region, propagate to the diffuser exit and return predicted exit static
     pressure plus intermediate state.
     """
-    import numpy as np
-
     A_throat = diffuser["A_throat"]
     A_exit   = diffuser["A_exit"]
     xs       = diffuser["x_stations"]
-    A_stats  = diffuser["A_stations"]
 
     if x_s <= xs[0] or x_s >= xs[-1]:
         raise ValueError("Trial shock station outside diffuser.")
 
-    A_s = float(np.interp(x_s, xs, A_stats))
+    if area_spline is None:
+        area_spline = CubicSpline(xs, diffuser["A_stations"], bc_type='natural')
+
+    A_s = float(area_spline(x_s))
 
     M_sup = invert_area_mach_ratio_supersonic(A_s / A_throat)
 
@@ -786,20 +787,23 @@ def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
 
 
 def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
-                                  tol=1e-4, max_iter=80):
+                                  tol=1e-6, max_iter=100):
     """
     Find axial shock station x_s in the subsonic diffuser such that the
     predicted exit static pressure equals p_back.
     """
     diffuser = result["diffuser"]
     xs = diffuser["x_stations"]
+    area_spline = CubicSpline(xs, diffuser["A_stations"], bc_type='natural')
 
     eps = 1e-4 * (xs[-1] - xs[0])
     x_lo = xs[0] + eps
     x_hi = xs[-1] - eps
 
-    hi_state = _exit_static_pressure_for_shock_at(x_hi, diffuser, Pt_after_cowl)
-    lo_state = _exit_static_pressure_for_shock_at(x_lo, diffuser, Pt_after_cowl)
+    hi_state = _exit_static_pressure_for_shock_at(
+        x_hi, diffuser, Pt_after_cowl, area_spline=area_spline)
+    lo_state = _exit_static_pressure_for_shock_at(
+        x_lo, diffuser, Pt_after_cowl, area_spline=area_spline)
 
     Ps_max = lo_state["Ps_exit"]
     Ps_min = hi_state["Ps_exit"]
@@ -821,7 +825,8 @@ def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
     state = None
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        state = _exit_static_pressure_for_shock_at(mid, diffuser, Pt_after_cowl)
+        state = _exit_static_pressure_for_shock_at(
+            mid, diffuser, Pt_after_cowl, area_spline=area_spline)
         err = state["Ps_exit"] - p_back
         if abs(err) < tol * max(p_back, 1.0):
             break

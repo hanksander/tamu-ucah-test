@@ -27,6 +27,7 @@ sys.path.insert(0, _HERE)
 import pyc_run
 from pyc_config import (
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M, INLET_DESIGN_ALPHA_DEG,
+    INLET_DESIGN_WIDTH_M,
     M_TRANSITION, M_MIN, M_MAX,
 )
 import nozzle_design
@@ -53,8 +54,8 @@ ALT_DEFAULT = 20_000.0
 COMBUSTOR_L_STAR_DEFAULT = 1.25
 NOZZLE_CONVERGING_LENGTH_DEFAULT = None
 NOZZLE_DIVERGING_LENGTH_DEFAULT = None
-NOZZLE_THROAT_ANGLE_DEFAULT = 30.0
-NOZZLE_EXIT_ANGLE_DEFAULT = 8.0
+NOZZLE_THROAT_ANGLE_DEFAULT = 25.0
+NOZZLE_EXIT_ANGLE_DEFAULT = 12.0
 NOZZLE_BELL_POINTS_DEFAULT = 240
 
 
@@ -140,9 +141,10 @@ def _flowpath_layout(
     duct_x1 = duct_x0 + duct_len
 
     A_exit = float(design_cycle['nozzle_exit_area'])
-    A_inlet = float(combustor['cross_section_area_m2'])
+    nozzle_width = float(INLET_DESIGN_WIDTH_M)
+    A_inlet = nozzle_width * duct_h
     bell = nozzle_design.generate_bell_contour(
-        inlet_area=max(A_inlet, A_throat * 1.01),
+        inlet_area=A_inlet,
         throat_area=A_throat,
         exit_area=A_exit,
         converging_length=converging_length,
@@ -227,7 +229,7 @@ def fig_inlet_fixed_grid(design):
 
 def fig_inlet_pt_vs_mach(design):
     """Inlet Pt recovery vs Mach (402inlet2 shock train)."""
-    mach_vals = np.linspace(2.5, 7.0, 19)
+    mach_vals = np.linspace(2.25, 5.5, 19)
     cases = _inlet2.sweep_fixed_geometry_vs_mach(
         design, INLET_DESIGN_ALT_M, mach_vals, INLET_DESIGN_ALPHA_DEG,
         _design_back_pressure(design))
@@ -301,7 +303,9 @@ def fig_flowpath(
     bell      = layout['bell']
     bx        = layout['bx']
     y_center  = layout['y_center']
-    r         = bell['radius']
+    h_nozz    = bell['height']
+    y_nozz_up = y_center + 0.5 * h_nozz
+    y_nozz_lo = y_center - 0.5 * h_nozz
 
     fig, ax = plt.subplots(figsize=(16, 5.5))
 
@@ -337,28 +341,28 @@ def fig_flowpath(
             ha='center', va='bottom', color='darkgreen')
 
     # ── Nozzle bell (axisymmetric about duct centerline) ────────────────────
-    ax.plot(bx, y_center + r, '-', color='darkorange', lw=2.2, label='Nozzle')
-    ax.plot(bx, y_center - r, '-', color='darkorange', lw=2.2)
+    ax.plot(bx, y_nozz_up, '-', color='darkorange', lw=2.2, label='Nozzle')
+    ax.plot(bx, y_nozz_lo, '-', color='darkorange', lw=2.2)
 
     # ── Annotations ─────────────────────────────────────────────────────────
     ax.annotate(f'Throat  A* = {A_throat*1e4:.2f} cm²',
-                xy=(bx[np.argmin(r)], y_center + r.min()),
-                xytext=(bx[np.argmin(r)], y_center + r.min() + 3 * duct_h),
+                xy=(bx[np.argmin(h_nozz)], y_nozz_up[np.argmin(h_nozz)]),
+                xytext=(bx[np.argmin(h_nozz)], y_nozz_up[np.argmin(h_nozz)] + 3 * duct_h),
                 ha='center', fontsize=9,
                 arrowprops=dict(arrowstyle='->', color='gray'))
     ax.annotate(f'Exit  Ae/A* = {A_exit/A_throat:.2f}',
-                xy=(bx[-1], y_center + r[-1]),
-                xytext=(bx[-1], y_center + r[-1] + duct_h),
+                xy=(bx[-1], y_nozz_up[-1]),
+                xytext=(bx[-1], y_nozz_up[-1] + duct_h),
                 ha='center', fontsize=9,
                 arrowprops=dict(arrowstyle='->', color='gray'))
     ax.annotate(f'Lc = {duct_len:.2f} m',
                 xy=(duct_x0 + 0.5 * duct_len, duct_y_lo + duct_h),
-                xytext=(duct_x0 + 0.5 * duct_len, duct_y_lo - 0.9 * duct_h),
+                xytext=(duct_x0 + 0.5 * duct_len, duct_y_lo - 1.4 * duct_h),
                 ha='center', fontsize=9,
                 arrowprops=dict(arrowstyle='->', color='gray'))
     ax.annotate(f'Ain,eq = {A_inlet*1e4:.2f} cm²',
-                xy=(bx[0], y_center + r[0]),
-                xytext=(bx[0], y_center + r[0] + 1.8 * duct_h),
+                xy=(bx[0], y_nozz_up[0]),
+                xytext=(bx[0], y_nozz_up[0] + 1.8 * duct_h),
                 ha='center', fontsize=9,
                 arrowprops=dict(arrowstyle='->', color='gray'))
 
@@ -368,7 +372,7 @@ def fig_flowpath(
                  f'alt={INLET_DESIGN_ALT_M/1e3:.0f} km')
     ax.set_aspect('equal')
     ax.legend(loc='upper left')
-    _save(fig, 'fig05_flowpath_geometry')
+    _save(fig, 'flowpath_geometry')
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +403,7 @@ def fig_performance(results, mach_range):
                    label=f'RAM→SCRAM  M={M_TRANSITION}')
         ax.legend(loc='best', fontsize=8)
     fig.suptitle(f'pyc_run sweep  (alt={ALT_DEFAULT/1e3:.0f} km, φ={PHI_DEFAULT})')
-    _save(fig, 'fig06_performance_vs_mach')
+    _save(fig, 'performance_vs_mach')
 
 
 def fig_mass_flows(results, mach_range):
@@ -414,7 +418,7 @@ def fig_mass_flows(results, mach_range):
     ax.set_title('Captured / fuel mass flow vs Mach')
     ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.6)
     ax.legend()
-    _save(fig, 'fig07_mass_flows')
+    _save(fig, 'mass_flows')
 
 
 def fig_station_T(results, mach_range):
@@ -433,7 +437,7 @@ def fig_station_T(results, mach_range):
         ax.set_xlabel('M0'); ax.set_ylabel(yl); ax.set_title(ttl)
         ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
         ax.legend(fontsize=8)
-    _save(fig, 'fig08_station_temperatures')
+    _save(fig, 'station_temperatures')
 
 
 def fig_station_Pt(results, mach_range):
@@ -448,7 +452,7 @@ def fig_station_Pt(results, mach_range):
     ax.set_title('Total pressure through the flowpath')
     ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     ax.legend(fontsize=8)
-    _save(fig, 'fig09_station_total_pressures')
+    _save(fig, 'station_total_pressures')
 
 
 def fig_inlet_recovery_cycle(results, mach_range):
@@ -461,7 +465,7 @@ def fig_inlet_recovery_cycle(results, mach_range):
                  '(frozen 2-ramp geometry + isolator)')
     ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     ax.set_ylim(bottom=0)
-    _save(fig, 'fig10_inlet_recovery_vs_mach')
+    _save(fig, 'inlet_recovery_vs_mach')
 
 
 def fig_nozzle_geom_vs_mach(results, mach_range):
@@ -487,7 +491,7 @@ def fig_nozzle_geom_vs_mach(results, mach_range):
     ax2.legend(handles=[l1, l2], loc='best')
     for ax in (axes[0], ax2):
         ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
-    _save(fig, 'fig11_nozzle_geometry_vs_mach')
+    _save(fig, 'nozzle_geometry_vs_mach')
 
 
 def _plot_engine_profile(
@@ -550,7 +554,7 @@ def fig_engine_pressure_profile(design, design_cycle):
         total_key='Pt_stations',
         ylabel='Pressure [kPa]',
         title='Pressure Along Engine at Design Point',
-        outfile='fig12_engine_pressure_profile',
+        outfile='engine_pressure_profile',
     )
 
 
@@ -562,7 +566,7 @@ def fig_engine_temperature_profile(design, design_cycle):
         total_key='Tt_stations',
         ylabel='Temperature [K]',
         title='Temperature Along Engine at Design Point',
-        outfile='fig13_engine_temperature_profile',
+        outfile='engine_temperature_profile',
     )
 
 
@@ -589,7 +593,7 @@ def main():
     )
 
     # Mach sweep
-    mach_range = np.linspace(max(M_MIN, 2.5), min(M_MAX, 7.0), 16)
+    mach_range = np.linspace(max(M_MIN, 2.25), min(M_MAX, 5.5), 16)
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={ALT_DEFAULT/1e3:.0f} km, φ={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT)
