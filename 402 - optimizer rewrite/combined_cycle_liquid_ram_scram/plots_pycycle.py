@@ -50,13 +50,14 @@ plt.rcParams.update({
 })
 
 PHI_DEFAULT = 0.8
-ALT_DEFAULT = 20_000.0
+ALT_DEFAULT = 18_000.0
 COMBUSTOR_L_STAR_DEFAULT = 1.25
 NOZZLE_CONVERGING_LENGTH_DEFAULT = None
 NOZZLE_DIVERGING_LENGTH_DEFAULT = None
 NOZZLE_THROAT_ANGLE_DEFAULT = 25.0
 NOZZLE_EXIT_ANGLE_DEFAULT = 12.0
 NOZZLE_BELL_POINTS_DEFAULT = 240
+CAD_WALL_THICKNESS_M = 0.003
 
 
 def _save(fig, name):
@@ -229,7 +230,7 @@ def fig_inlet_fixed_grid(design):
 
 def fig_inlet_pt_vs_mach(design):
     """Inlet Pt recovery vs Mach (402inlet2 shock train)."""
-    mach_vals = np.linspace(2.25, 5.5, 19)
+    mach_vals = np.linspace(4.0, 5.5, 10)
     cases = _inlet2.sweep_fixed_geometry_vs_mach(
         design, INLET_DESIGN_ALT_M, mach_vals, INLET_DESIGN_ALPHA_DEG,
         _design_back_pressure(design))
@@ -373,6 +374,143 @@ def fig_flowpath(
     ax.set_aspect('equal')
     ax.legend(loc='upper left')
     _save(fig, 'flowpath_geometry')
+
+
+# ---------------------------------------------------------------------------
+# 3D CAD export (trimesh + shapely) — diffuser + combustor + nozzle hollow shell
+# ---------------------------------------------------------------------------
+
+def fig_cad_model(
+    design,
+    design_cycle,
+    wall_thickness_m,
+    output_path=None,
+    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+    diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+    throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+    exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+    n_points=NOZZLE_BELL_POINTS_DEFAULT,
+):
+    """
+    Build a 3D CAD model of the diffuser + combustor + nozzle.
+
+    The side-profile polyline from _flowpath_layout (diffuser walls,
+    rectangular combustor, nozzle bell half-heights) is extruded across
+    INLET_DESIGN_WIDTH_M and hollowed to a shell of `wall_thickness_m`.
+    Inlet and exit planes are left open (no end caps).
+
+    Parameters
+    ----------
+    design            : dict from 402inlet2.design_2ramp_shock_matched_inlet.
+    design_cycle      : dict returned by pyc_run.analyze at the design point.
+    wall_thickness_m  : shell wall thickness [m].
+    output_path       : destination file ('.stl', '.obj', '.ply', '.glb');
+                        defaults to <OUTDIR>/engine_cad.stl.
+
+    Returns
+    -------
+    trimesh.Trimesh  the hollow engine body.
+    """
+    import numpy as _np
+    import trimesh
+    from shapely.geometry import Polygon
+
+    t = float(wall_thickness_m)
+    if t <= 0.0:
+        raise ValueError("wall_thickness_m must be positive.")
+
+    layout = _flowpath_layout(
+        design, design_cycle,
+        combustor_L_star=combustor_L_star,
+        converging_length=converging_length,
+        diverging_length=diverging_length,
+        throat_angle_deg=throat_angle_deg,
+        exit_angle_deg=exit_angle_deg,
+        n_points=n_points,
+    )
+
+    width    = float(INLET_DESIGN_WIDTH_M)
+    y_center = layout['y_center']
+    duct_x0  = layout['duct_x0']
+    duct_x1  = layout['duct_x1']
+    duct_h   = layout['duct_h']
+    bx       = layout['bx']
+    h_nozz   = layout['bell']['height']
+
+    # ---- Build inner (flow-path) upper-wall polyline, left to right ---------
+    upper = []
+    if layout['diff_len'] > 0.0:
+        for p in layout['diff_upper']:
+            upper.append((float(p[0]), float(p[1])))
+    y_up = y_center + 0.5 * duct_h
+    if not upper or abs(upper[-1][0] - duct_x0) > 1.0e-12:
+        upper.append((float(duct_x0), float(y_up)))
+    upper.append((float(duct_x1), float(y_up)))
+    for xi, hi in zip(bx, h_nozz):
+        upper.append((float(xi), float(y_center + 0.5 * hi)))
+
+    # ---- Inner lower wall, left to right (mirrors duct + nozzle) ------------
+    lower = []
+    if layout['diff_len'] > 0.0:
+        for p in layout['diff_lower']:
+            lower.append((float(p[0]), float(p[1])))
+    y_lo = y_center - 0.5 * duct_h
+    if not lower or abs(lower[-1][0] - duct_x0) > 1.0e-12:
+        lower.append((float(duct_x0), float(y_lo)))
+    lower.append((float(duct_x1), float(y_lo)))
+    for xi, hi in zip(bx, h_nozz):
+        lower.append((float(xi), float(y_center - 0.5 * hi)))
+
+    # Deduplicate consecutive points (shapely dislikes repeated vertices).
+    def _dedup(pts):
+        out = [pts[0]]
+        for p in pts[1:]:
+            if abs(p[0] - out[-1][0]) > 1.0e-12 or abs(p[1] - out[-1][1]) > 1.0e-12:
+                out.append(p)
+        return out
+
+    upper = _dedup(upper)
+    lower = _dedup(lower)
+
+    # Closed inner profile (upper L→R then lower R→L).
+    inner_profile = upper + list(reversed(lower))
+
+    # Outer profile: upper shifted +t, lower shifted -t. Same x-range as
+    # the inner, so the inlet and exit planes stay open and get a rim of
+    # thickness t in y; thickness t in ±z comes from the wider z-extrusion.
+    outer_upper = [(x, y + t) for (x, y) in upper]
+    outer_lower = [(x, y - t) for (x, y) in lower]
+    outer_profile = outer_upper + list(reversed(outer_lower))
+
+    # ---- Extrude both profiles, then boolean-subtract ----------------------
+    # trimesh.creation.extrude_polygon extrudes from z=0 to z=height; translate
+    # each solid so its z-extent is centered on z=0.
+    inner_poly = Polygon(inner_profile)
+    outer_poly = Polygon(outer_profile)
+    if not inner_poly.is_valid:
+        inner_poly = inner_poly.buffer(0)
+    if not outer_poly.is_valid:
+        outer_poly = outer_poly.buffer(0)
+
+    inner_height = width
+    outer_height = width + 2.0 * t
+
+    inner_solid = trimesh.creation.extrude_polygon(
+        inner_poly, inner_height, engine='earcut')
+    outer_solid = trimesh.creation.extrude_polygon(
+        outer_poly, outer_height, engine='earcut')
+    inner_solid.apply_translation((0.0, 0.0, -0.5 * inner_height))
+    outer_solid.apply_translation((0.0, 0.0, -0.5 * outer_height))
+
+    engine = trimesh.boolean.difference([outer_solid, inner_solid])
+
+    # ---- Export ------------------------------------------------------------
+    if output_path is None:
+        output_path = os.path.join(OUTDIR, 'engine_cad.stl')
+    engine.export(output_path)
+    print(f'  wrote {output_path}')
+    return engine
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +731,7 @@ def main():
     )
 
     # Mach sweep
-    mach_range = np.linspace(max(M_MIN, 2.25), min(M_MAX, 5.5), 16)
+    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.5), 10)
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={ALT_DEFAULT/1e3:.0f} km, φ={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT)
@@ -615,6 +753,24 @@ def main():
     fig_station_Pt(results, mach_range)
     fig_engine_pressure_profile(design, design_cycle)
     fig_engine_temperature_profile(design, design_cycle)
+
+    print(f'\n  generating 3D CAD model (wall={CAD_WALL_THICKNESS_M*1e3:.1f} mm) ...')
+    try:
+        fig_cad_model(
+            design,
+            design_cycle,
+            wall_thickness_m=CAD_WALL_THICKNESS_M,
+            combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+            converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+            diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+            throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+            exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+            n_points=NOZZLE_BELL_POINTS_DEFAULT,
+        )
+    except Exception as exc:
+        import traceback
+        print(f'  [warn] CAD export failed: {type(exc).__name__}: {exc}')
+        traceback.print_exc()
 
     print(f'\n  done — figures in {OUTDIR}')
 

@@ -12,7 +12,9 @@ packages = [
     "cantera",
     "scikit-learn",
     "pandas",
-    "om-pycycle"
+    "trimesh",
+    "shapely",
+    "manifold3d"
 ]
 
 print("Installing aerospace packages in virtual environment...")

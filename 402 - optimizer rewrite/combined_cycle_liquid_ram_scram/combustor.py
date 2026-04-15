@@ -33,7 +33,7 @@ CHANGES vs original
 from scipy.optimize import brentq
 
 from gas_dynamics import FlowState, rayleigh_exit, isentropic_T, isentropic_P
-from config import F_STOICH, LHV_JP10, ETA_COMBUSTOR
+from pyc_config import F_STOICH, LHV_JP10, ETA_COMBUSTOR
 
 
 def compute_combustor(

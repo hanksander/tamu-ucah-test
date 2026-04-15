@@ -43,7 +43,7 @@ from ambiance import Atmosphere
 from gas_dynamics import FlowState, isentropic_P, isentropic_T, pi_milspec
 from nozzle import compute_nozzle
 from pyc_config import (
-    F_STOICH_JP7, ETA_COMBUSTOR,
+    F_STOICH_JP10, ETA_COMBUSTOR,
     ETA_NOZZLE_CV, ISOLATOR_PT_RECOVERY,
     M_TRANSITION,
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M,
@@ -392,8 +392,11 @@ def analyze(
     W_kgs   = rho0 * V0 * A_capture_m2         # kg/s
     W_lbms  = W_kgs * KG2LBM                   # lbm/s
 
-    # Effective FAR (combustion efficiency applied here)
-    FAR = ETA_COMBUSTOR * phi * F_STOICH_JP7
+    # True fuel-air ratio by mass. Combustion efficiency is applied to the
+    # heat release inside compute_combustor (not to the fuel mass flow), so
+    # FAR here is the physical injected-fuel ratio. This prevents eta_c from
+    # being double-counted between mass bookkeeping and heat release.
+    FAR = phi * F_STOICH_JP10
 
     combustor_L_star_eff = float(combustor_L_star) if combustor_L_star is not None else 1.0
     combustor_geometry = compute_combustor_geometry(
@@ -725,7 +728,7 @@ if __name__ == '__main__':
     print("=" * 60)
 
     print("\n--- Design point, phi=0.8 ---")
-    analyze(M0=5.0, altitude_m=13500, phi=0.8, M_transition=5.2, verbose=True)
+    analyze(M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=0.8, M_transition=5.2, verbose=True)
 
 
 

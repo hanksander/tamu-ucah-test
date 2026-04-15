@@ -7,8 +7,8 @@ GAMMA = 1.4
 R = 287.05
 
 # Subsonic-diffuser (throat -> combustor face) geometry defaults.
-DIFFUSER_AREA_RATIO = 3
-DIFFUSER_HALF_ANGLE_DEG = 3.0
+DIFFUSER_AREA_RATIO = 1.5
+DIFFUSER_HALF_ANGLE_DEG = 7.0
 
 def std_atmosphere_1976(h_m):
     """
@@ -809,10 +809,15 @@ def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
     Ps_min = hi_state["Ps_exit"]
 
     if p_back > Ps_max:
+        # Back pressure exceeds what the diffuser can contain with a shock
+        # anywhere inside it -> inlet unstart. The correct physics is a bow
+        # shock at freestream Mach, which the caller applies separately.
+        # Report pt_frac from the weakest (throat) in-diffuser shock here so
+        # this field reflects a real Pt loss instead of an impossible 1.0.
         return {"status": "expelled", "p_back": p_back,
                 "Ps_max": Ps_max, "Ps_min": Ps_min,
                 "pt_frac_after_terminal_shock":
-                    Pt_after_cowl / Pt_after_cowl,
+                    lo_state["pt_ratio_shock"],
                 **lo_state}
     if p_back < Ps_min:
         return {"status": "swallowed", "p_back": p_back,

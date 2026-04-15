@@ -15,10 +15,15 @@ pyCycle works internally in American engineering units (degR, psia, lbm/s,
 lbf, ft).  pyc_run.py accepts SI inputs and reports SI outputs.
 """
 
-# Fuel
-FUEL_TYPE     = 'JP-7'    # closest to JP-10 in pyCycle CEA database
-F_STOICH_JP7  = 0.0664    # stoichiometric fuel-air mass ratio
-LHV_JP7       = 43.5e6    # lower heating value [J/kg]
+# Fuel — JP-10 (C10H16, tetrahydrodicyclopentadiene)
+# All RAM-cycle thermochemistry is handled by Cantera via JP10Thermo;
+# the constants below are used for stoichiometry and heat-release bookkeeping.
+FUEL_TYPE      = 'JP-10'
+F_STOICH_JP10  = 0.0667    # stoichiometric fuel-air mass ratio
+F_STOICH = 0.0667
+LHV_JP10       = 43.4e6    # lower heating value [J/kg]
+
+
 
 
 """
@@ -76,12 +81,12 @@ After changing parameters, re-run design and check:
    - Off-design sweep: success=True across range, smooth recovery curve.
 """
 
-INLET_DESIGN_M0                    = 4
-INLET_DESIGN_ALT_M                 = 12_000.0
+INLET_DESIGN_M0                    = 5
+INLET_DESIGN_ALT_M                 = 18_000.0
 INLET_DESIGN_ALPHA_DEG             = 0.0
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 5.0
-INLET_DESIGN_MDOT_KGS              = 7.0     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.25    # inlet spanwise width [m]
+INLET_DESIGN_MDOT_KGS              = 10.0     # design-point air mass flow [kg/s]
+INLET_DESIGN_WIDTH_M               = 0.275    # inlet spanwise width [m]
 INLET_FOREBODY_SEP_MARGIN          = 0.15
 INLET_RAMP_SEP_MARGIN              = 0.18
 INLET_KANTROWITZ_MARGIN            = 0.85

@@ -19,7 +19,7 @@ import pycycle.api as pyc
 from combustor import compute_combustor
 from gas_dynamics import FlowState, isentropic_P, isentropic_T
 from pyc_config import (
-    ETA_COMBUSTOR, F_STOICH_JP7,
+    ETA_COMBUSTOR, F_STOICH_JP10,
     ISOLATOR_PT_RECOVERY, INLET_DESIGN_ALPHA_DEG,
 )
 from thermo import get_thermo
@@ -153,7 +153,10 @@ class RayleighCombustorCalcs(om.ExplicitComponent):
         P3 = isentropic_P(Pt3, M3, gamma3)
 
         state3 = FlowState(M=M3, T=T3, P=P3, Pt=Pt3, Tt=Tt3, gamma=gamma3, R=R3)
-        phi = far / max(ETA_COMBUSTOR * F_STOICH_JP7, 1.0e-12)
+        # FAR from analyze() is now the true phi*f_stoich (no eta_c baked in),
+        # so recover phi by dividing by f_stoich alone. eta_c is applied by
+        # compute_combustor to the heat release only.
+        phi = far / max(F_STOICH_JP10, 1.0e-12)
         state4, choked = compute_combustor(
             state3,
             phi,
@@ -250,8 +253,13 @@ class DiffuserTerminalShock(om.ExplicitComponent):
             Pt_ac  = case.get('Pt_after_cowl',
                               term.get('Pt_after_shock', 1.0))
             if status == 'expelled':
-                Pt_after_shock = float(term.get('Pt_after_shock', Pt_ac))
-                outputs['ram_recovery'] = (Pt_after_shock / max(Pt0, 1.0e-12)) * iso_pt
+                # Inlet unstart: the terminal shock cannot be contained in the
+                # diffuser, so a bow shock stands ahead of the cowl at the
+                # freestream Mach. Recovery is the freestream normal-shock Pt
+                # ratio, not the (much weaker) shock-at-throat estimate that
+                # the in-diffuser solver returned.
+                _, _, _, _, pt_ratio_bow = _inlet2.normal_shock(M0)
+                outputs['ram_recovery'] = float(pt_ratio_bow) * iso_pt
                 outputs['MN_exit']      = float(np.clip(
                     term.get('M_exit', term.get('M_sub', 0.05)), 0.05, 0.95))
                 outputs['unstart_flag'] = +1.0
