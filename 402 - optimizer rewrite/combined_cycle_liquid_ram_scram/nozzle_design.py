@@ -1403,8 +1403,9 @@ def generate_bell_contour(
 
     pyCycle gives station areas, not wall shape. This function creates a
     reasonable bell-style profile for visualization and preliminary geometry.
-    Performance still comes from pyCycle station areas. For plotting, the
-    area distribution is converted to a 2D rectangular duct of constant width.
+    Performance still comes from pyCycle station areas. The stored geometry is
+    axisymmetric and is reported in terms of local radius/diameter; the 2D
+    plots use that radius about the centerline.
     """
 
     r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
@@ -1455,6 +1456,7 @@ def generate_bell_contour(
     return {
         "x": x,
         "radius": r,
+        "diameter": 2.0 * r,
         "area": area,
         "width": width,
         "height": height,

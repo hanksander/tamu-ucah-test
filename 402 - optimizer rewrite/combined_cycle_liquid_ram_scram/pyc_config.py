@@ -82,15 +82,20 @@ After changing parameters, re-run design and check:
 """
 
 INLET_DESIGN_M0                    = 5
-INLET_DESIGN_ALT_M                 = 18_000.0
-INLET_DESIGN_ALPHA_DEG             = 0.0
-INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 5.0
+INLET_DESIGN_ALT_M                 = 12_000.0
+INLET_DESIGN_ALPHA_DEG             = 4.0
+INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 4.0
 INLET_DESIGN_MDOT_KGS              = 10.0     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.275    # inlet spanwise width [m]
-INLET_FOREBODY_SEP_MARGIN          = 0.15
-INLET_RAMP_SEP_MARGIN              = 0.18
+INLET_DESIGN_WIDTH_M               = 0.25    # inlet spanwise width [m]
+INLET_FOREBODY_SEP_MARGIN          = 0.25
+INLET_RAMP_SEP_MARGIN              = 0.25
 INLET_KANTROWITZ_MARGIN            = 0.85
 INLET_SHOCK_FOCUS_FACTOR           = 1.18
+
+DIFFUSER_AREA_RATIO = 1.5
+DIFFUSER_HALF_ANGLE_DEG = 7.0
+DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 2.5
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4.0
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.92   # combustion efficiency
@@ -107,4 +112,4 @@ RAM_COMBUSTOR_EXIT_MN = 0.6
 
 # Operating range
 M_MIN = 2.0
-M_MAX = 8.0
+M_MAX = 5.5

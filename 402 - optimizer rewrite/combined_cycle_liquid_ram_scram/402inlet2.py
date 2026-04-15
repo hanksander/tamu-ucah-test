@@ -3,12 +3,56 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 
-GAMMA = 1.4
+GAMMA = 1.4        # reference cold-air ratio; kept only for freestream-level
+                   # isentropic relations where T ~ 220 K and gamma_air(T)~1.400
 R = 287.05
 
+# ----------------------------------------------------------------------------
+# Thermally-perfect frozen-air specific heat ratio, gamma(T)
+#
+# NASA-7 polynomial cp/R coefficients for N2 and O2 (from CEA thermo.inp).
+# Air is treated as a frozen mixture of 79% N2 + 21% O2 by mole (ignoring
+# Ar/CO2 -- <1% effect on cp). Valid 200--6000 K. This matches the frozen-
+# chemistry assumption of the classical Rankine-Hugoniot shock relations
+# used in this file: cp is temperature-dependent (vibrational modes excite),
+# but chemistry is frozen across the shock. Equilibrium (dissociation) is
+# NOT included -- above ~3000 K the recovery computed here is still
+# optimistic, but by a few percent rather than 10-15%.
+# ----------------------------------------------------------------------------
+_NASA7_N2_LO = (3.53100528, -1.23660987e-4, -5.02999437e-7,  2.43530612e-9,  -1.40881235e-12)
+_NASA7_N2_HI = (2.95257626,  1.39690057e-3, -4.92631691e-7,  7.86010190e-11, -4.60755348e-15)
+_NASA7_O2_LO = (3.78245636, -2.99673415e-3,  9.84730200e-6, -9.68129508e-9,   3.24372836e-12)
+_NASA7_O2_HI = (3.66096083,  6.56365523e-4, -1.41149485e-7,  2.05797658e-11, -1.29913248e-15)
+_X_N2_AIR = 0.79
+_X_O2_AIR = 0.21
+
+
+def _cp_over_R_nasa7(T, lo, hi):
+    a = lo if T < 1000.0 else hi
+    return a[0] + a[1] * T + a[2] * T * T + a[3] * T ** 3 + a[4] * T ** 4
+
+
+def gamma_air(T):
+    """
+    Frozen-air specific heat ratio gamma = cp/cv as a function of static
+    temperature T [K]. Uses NASA-7 polynomials for N2/O2 at standard mole
+    fractions. Clamped to the polynomial's validity range [200, 6000] K.
+
+    Spot values (for reference):
+        T=  300 K -> 1.400
+        T= 1000 K -> 1.336
+        T= 1500 K -> 1.321
+        T= 2500 K -> 1.297
+    """
+    T = max(200.0, min(float(T), 6000.0))
+    cpR = (_X_N2_AIR * _cp_over_R_nasa7(T, _NASA7_N2_LO, _NASA7_N2_HI)
+         + _X_O2_AIR * _cp_over_R_nasa7(T, _NASA7_O2_LO, _NASA7_O2_HI))
+    return cpR / (cpR - 1.0)
+
 # Subsonic-diffuser (throat -> combustor face) geometry defaults.
-DIFFUSER_AREA_RATIO = 1.5
-DIFFUSER_HALF_ANGLE_DEG = 7.0
+from pyc_config import (DIFFUSER_AREA_RATIO, DIFFUSER_HALF_ANGLE_DEG,
+                        DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG, DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH)
+
 
 def std_atmosphere_1976(h_m):
     """
@@ -112,6 +156,60 @@ def oblique_shock(M1, theta_deg, gamma=GAMMA):
 
     return math.degrees(beta), M2, p2_p1, pt2_pt1
 
+def normal_shock_tpg(M1, T1, n_iter=6, tol=1e-6):
+    """
+    Thermally-perfect (frozen-chemistry, T-dependent gamma) normal shock.
+
+    gamma is iterated using gamma_air evaluated at the arithmetic mean of
+    the upstream and downstream static temperatures. This is the standard
+    "effective constant-gamma" approximation for thermally perfect gases
+    (Anderson, Modern Compressible Flow, 3rd ed., ch. 16).
+
+    Returns: (M2, p2/p1, rho2/rho1, T2/T1, pt2/pt1, T2 [K], gamma_eff)
+    """
+    gamma = gamma_air(T1)
+    T2 = T1
+    for _ in range(n_iter):
+        M2, p2p1, rho2rho1, T2T1, pt2pt1 = normal_shock(M1, gamma)
+        T2_new = T1 * T2T1
+        gamma_new = gamma_air(0.5 * (T1 + T2_new))
+        if abs(gamma_new - gamma) < tol:
+            gamma = gamma_new
+            T2 = T2_new
+            break
+        gamma = gamma_new
+        T2 = T2_new
+    M2, p2p1, rho2rho1, T2T1, pt2pt1 = normal_shock(M1, gamma)
+    return M2, p2p1, rho2rho1, T2T1, pt2pt1, T1 * T2T1, gamma
+
+
+def oblique_shock_tpg(M1, theta_deg, T1, n_iter=6, tol=1e-6):
+    """
+    Thermally-perfect oblique shock. gamma is iterated at the mean static T
+    across the shock (see normal_shock_tpg).
+
+    Returns: (beta_deg, M2, p2/p1, pt2/pt1, T2/T1, T2 [K], gamma_eff)
+    or None if no attached weak solution exists at the converged gamma.
+    """
+    theta = math.radians(theta_deg)
+    gamma = gamma_air(T1)
+    last = None
+    for _ in range(n_iter):
+        beta = solve_weak_beta(M1, theta, gamma)
+        if beta is None:
+            return None
+        Mn1 = M1 * math.sin(beta)
+        Mn2, p2p1, _, T2T1, pt2pt1 = normal_shock(Mn1, gamma)
+        M2 = Mn2 / math.sin(beta - theta)
+        T2 = T1 * T2T1
+        last = (math.degrees(beta), M2, p2p1, pt2pt1, T2T1, T2, gamma)
+        gamma_new = gamma_air(0.5 * (T1 + T2))
+        if abs(gamma_new - gamma) < tol:
+            break
+        gamma = gamma_new
+    return last
+
+
 def theta_max_attached(M, gamma=GAMMA):
     """
     Maximum attached-shock turning angle [deg] from the theta-beta-M relation.
@@ -198,8 +296,131 @@ def required_opening_from_mdot(mdot_required, rho0, V0, width_m):
     h_req_normal = A_capture_required / width_m
     return A_capture_required, h_req_normal
 
+
+def _rectangle_polar_boundary(theta, half_width, half_height):
+    c = math.cos(theta)
+    s = math.sin(theta)
+    denom_x = max(abs(c), 1.0e-12)
+    denom_y = max(abs(s), 1.0e-12)
+    ray = min(half_width / denom_x, half_height / denom_y)
+    return np.array([ray * c, ray * s], dtype=float)
+
+
+def _section_polygon_area(points):
+    x = points[:, 0]
+    y = points[:, 1]
+    return 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def morphed_rectangle_to_circle_section(
+    area_m2,
+    blend,
+    rect_width_m,
+    rect_height_m,
+    circle_radius_m,
+    n_points=128,
+):
+    """
+    Build a smooth cross-section polygon that morphs from a rectangle at
+    blend=0 to a circle at blend=1, then uniformly rescales it to the target
+    area. The polygon lives in the (z, y) plane and is centered at the origin.
+    """
+    if area_m2 <= 0.0:
+        raise ValueError("area_m2 must be positive.")
+    if rect_width_m <= 0.0 or rect_height_m <= 0.0 or circle_radius_m <= 0.0:
+        raise ValueError("Section dimensions must be positive.")
+
+    blend = float(np.clip(blend, 0.0, 1.0))
+    angles = np.linspace(0.0, 2.0 * np.pi, n_points, endpoint=False)
+    half_width = 0.5 * rect_width_m
+    half_height = 0.5 * rect_height_m
+
+    pts = []
+    for theta in angles:
+        rect_pt = _rectangle_polar_boundary(theta, half_width, half_height)
+        circ_pt = np.array(
+            [circle_radius_m * math.cos(theta), circle_radius_m * math.sin(theta)],
+            dtype=float,
+        )
+        pts.append((1.0 - blend) * rect_pt + blend * circ_pt)
+
+    pts = np.asarray(pts, dtype=float)
+    raw_area = _section_polygon_area(pts)
+    scale = math.sqrt(area_m2 / max(raw_area, 1.0e-12))
+    return pts * scale
+
+
+def _quintic_smoothstep(u):
+    """
+    C2-continuous 0->1 blend with zero slope and curvature at both ends.
+    """
+    u = float(np.clip(u, 0.0, 1.0))
+    return u**3 * (10.0 + u * (-15.0 + 6.0 * u))
+
+
+def hydraulic_diameter_rect(width_m, height_m):
+    area = width_m * height_m
+    wetted_perimeter = 2.0 * (width_m + height_m)
+    return 4.0 * area / max(wetted_perimeter, 1.0e-12)
+
+
+def size_diffuser_length_physics_based(
+    A_throat,
+    A_exit,
+    throat_width_m,
+    throat_height_m,
+    max_equiv_half_angle_deg=DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG,
+    min_shock_accommodation_dh=DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
+):
+    """
+    Size diffuser length from the physics the present 1D model can support.
+
+    In this model, expulsion/swallow thresholds are governed by diffuser
+    area ratio; axial length only determines how much room the terminal shock
+    has to sit inside the diffuser. Length is therefore set by the larger of:
+
+    1) a conservative equivalent circular half-angle to avoid subsonic
+       diffuser separation, and
+    2) a minimum shock-accommodation length measured in throat hydraulic
+       diameters so the terminal-shock / interaction region has axial room.
+    """
+    if A_throat <= 0.0 or A_exit <= 0.0:
+        raise ValueError("Diffuser areas must be positive.")
+    if throat_width_m <= 0.0 or throat_height_m <= 0.0:
+        raise ValueError("Throat dimensions must be positive.")
+    if max_equiv_half_angle_deg <= 0.0:
+        raise ValueError("max_equiv_half_angle_deg must be positive.")
+    if min_shock_accommodation_dh <= 0.0:
+        raise ValueError("min_shock_accommodation_dh must be positive.")
+
+    r_throat = math.sqrt(A_throat / math.pi)
+    r_exit = math.sqrt(A_exit / math.pi)
+    radius_change = max(r_exit - r_throat, 0.0)
+
+    length_from_angle = radius_change / math.tan(math.radians(max_equiv_half_angle_deg))
+    dh_throat = hydraulic_diameter_rect(throat_width_m, throat_height_m)
+    length_from_shock = min_shock_accommodation_dh * dh_throat
+
+    if length_from_angle >= length_from_shock:
+        governing_mode = "equivalent_half_angle"
+    else:
+        governing_mode = "shock_accommodation"
+
+    return {
+        "length_m": float(max(length_from_angle, length_from_shock)),
+        "governing_mode": governing_mode,
+        "max_equiv_half_angle_deg": float(max_equiv_half_angle_deg),
+        "min_shock_accommodation_dh": float(min_shock_accommodation_dh),
+        "length_from_angle_m": float(length_from_angle),
+        "length_from_shock_m": float(length_from_shock),
+        "throat_hydraulic_diameter_m": float(dh_throat),
+        "throat_equivalent_radius_m": float(r_throat),
+        "exit_equivalent_radius_m": float(r_exit),
+    }
+
 def solve_forebody_stage(
-    M0,alpha_deg,leading_edge_angle_deg,forebody_separation_margin,):
+    M0,alpha_deg,leading_edge_angle_deg,forebody_separation_margin,
+    T0=None,):
     theta_fore = leading_edge_angle_deg
 
     # Actual operating forebody turn
@@ -221,15 +442,26 @@ def solve_forebody_stage(
             f"{forebody_separation_margin:.2f} of attached-shock limit ({theta_fore_eff_max:.3f} deg)."
         )
 
-    # ACTUAL SHOCK
-    shf = oblique_shock(M0, dtheta_fore_eff)
-    if shf is None:
-        raise ValueError("Forebody has no attached weak shock solution.")
+    # ACTUAL SHOCK (thermally perfect if T0 supplied; legacy gamma=1.4 otherwise)
+    if T0 is None:
+        shf = oblique_shock(M0, dtheta_fore_eff)
+        if shf is None:
+            raise ValueError("Forebody has no attached weak shock solution.")
+        beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio = shf
+        T_fore = None
+        T_ratio_fore = None
+        gamma_eff_fore = GAMMA
+    else:
+        shf = oblique_shock_tpg(M0, dtheta_fore_eff, T0)
+        if shf is None:
+            raise ValueError("Forebody has no attached weak shock solution.")
+        beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio, T_ratio_fore, T_fore, gamma_eff_fore = shf
 
-    beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio = shf
-
-    # MARGIN SHOCK
-    shf_margin = oblique_shock(M0, dtheta_fore_margin)
+    # MARGIN SHOCK (same gamma treatment as actual shock for consistency)
+    if T0 is None:
+        shf_margin = oblique_shock(M0, dtheta_fore_margin)
+    else:
+        shf_margin = oblique_shock_tpg(M0, dtheta_fore_margin, T0)
     if shf_margin is None:
         raise ValueError("Margin forebody shock invalid.")
 
@@ -248,23 +480,37 @@ def solve_forebody_stage(
         "p_fore_ratio": p_fore_ratio,
         "pt_fore_ratio": pt_fore_ratio,
 
+        "T_ratio": T_ratio_fore,
+        "T_down": T_fore,
+        "gamma_eff": gamma_eff_fore,
+
         "shock_fore_abs": beta_fore_rel,
         "shock_fore_margin_abs": beta_fore_margin_rel,
     }
 
-def solve_ramp_stage(M_up, theta_base, ramp_separation_margin, stage_name):
-    dtheta_max = theta_max_attached(M_up)
+def solve_ramp_stage(M_up, theta_base, ramp_separation_margin, stage_name,
+                     T_up=None):
+    dtheta_max = theta_max_attached(M_up, gamma=gamma_air(T_up) if T_up is not None else GAMMA)
     if dtheta_max is None:
         raise ValueError(f"Could not determine attached-shock limit for {stage_name}.")
 
     dtheta = ramp_separation_margin * dtheta_max
     theta_abs = theta_base + dtheta
 
-    sh = oblique_shock(M_up, dtheta)
-    if sh is None:
-        raise ValueError(f"{stage_name} has no attached weak shock solution.")
+    if T_up is None:
+        sh = oblique_shock(M_up, dtheta)
+        if sh is None:
+            raise ValueError(f"{stage_name} has no attached weak shock solution.")
+        beta_rel, M_down, p_ratio, pt_ratio = sh
+        T_down = None
+        T_ratio = None
+        gamma_eff = GAMMA
+    else:
+        sh = oblique_shock_tpg(M_up, dtheta, T_up)
+        if sh is None:
+            raise ValueError(f"{stage_name} has no attached weak shock solution.")
+        beta_rel, M_down, p_ratio, pt_ratio, T_ratio, T_down, gamma_eff = sh
 
-    beta_rel, M_down, p_ratio, pt_ratio = sh
     shock_abs = theta_base + beta_rel
 
     return {
@@ -274,6 +520,9 @@ def solve_ramp_stage(M_up, theta_base, ramp_separation_margin, stage_name):
         "M_down": M_down,
         "p_ratio": p_ratio,
         "pt_ratio": pt_ratio,
+        "T_ratio": T_ratio,
+        "T_down": T_down,
+        "gamma_eff": gamma_eff,
         "shock_abs": shock_abs,
     }
 
@@ -348,17 +597,26 @@ def solve_forebody_start_from_focus(focus_point,shock_fore_abs,):
     x_fore = focus_point[0] - focus_point[1] / tan_bf
     return np.array([x_fore, 0.0], dtype=float)
 
-def solve_cowl_stage(M2, theta2, leading_edge_angle_deg):
+def solve_cowl_stage(M2, theta2, leading_edge_angle_deg, T2=None):
     theta_cowl = -leading_edge_angle_deg
     cowl_turn_mag = theta2 - theta_cowl
     if cowl_turn_mag <= 0.0:
         raise ValueError("Cowl turn magnitude must be positive.")
 
-    shc = oblique_shock(M2, cowl_turn_mag)
-    if shc is None:
-        raise ValueError("Cowl shock has no attached weak shock solution.")
+    if T2 is None:
+        shc = oblique_shock(M2, cowl_turn_mag)
+        if shc is None:
+            raise ValueError("Cowl shock has no attached weak shock solution.")
+        beta_cowl_rel, M3, p43, pt43 = shc
+        T_ratio = None
+        T3 = None
+        gamma_eff = GAMMA
+    else:
+        shc = oblique_shock_tpg(M2, cowl_turn_mag, T2)
+        if shc is None:
+            raise ValueError("Cowl shock has no attached weak shock solution.")
+        beta_cowl_rel, M3, p43, pt43, T_ratio, T3, gamma_eff = shc
 
-    beta_cowl_rel, M3, p43, pt43 = shc
     cowl_shock_abs = theta2 - beta_cowl_rel
 
     return {
@@ -368,15 +626,33 @@ def solve_cowl_stage(M2, theta2, leading_edge_angle_deg):
         "M3": M3,
         "p43": p43,
         "pt43": pt43,
+        "T_ratio": T_ratio,
+        "T_down": T3,
+        "gamma_eff": gamma_eff,
         "cowl_shock_abs": cowl_shock_abs,
     }
 
-def solve_immediate_normal_after_cowl(M3, pt_frac_after_cowl, Tt0):
-    M4, p54, rho54, T54, pt54 = normal_shock(M3)
-    pt_frac_after_immediate_normal = pt_frac_after_cowl * pt54
+def solve_immediate_normal_after_cowl(M3, pt_frac_after_cowl, Tt0, T3=None):
+    """
+    Immediate normal shock downstream of the cowl-shock region.
 
-    T4 = Tt0 / (1.0 + 0.5 * (GAMMA - 1.0) * M4**2)
-    a4 = math.sqrt(GAMMA * R * T4)
+    If T3 (static temperature upstream of the normal shock) is provided,
+    the shock is solved with temperature-dependent gamma via
+    normal_shock_tpg. The downstream static T4 then uses the converged
+    gamma, preserving adiabatic energy balance h_t = cp*Tt = const within
+    the thermally-perfect approximation.
+    """
+    if T3 is None:
+        M4, p54, rho54, T54, pt54 = normal_shock(M3)
+        pt_frac_after_immediate_normal = pt_frac_after_cowl * pt54
+        T4 = Tt0 / (1.0 + 0.5 * (GAMMA - 1.0) * M4 ** 2)
+        a4 = math.sqrt(GAMMA * R * T4)
+        gamma_eff = GAMMA
+    else:
+        M4, p54, rho54, T54, pt54, T4, gamma_eff = normal_shock_tpg(M3, T3)
+        pt_frac_after_immediate_normal = pt_frac_after_cowl * pt54
+        a4 = math.sqrt(gamma_eff * R * T4)
+
     V4 = M4 * a4
 
     return {
@@ -389,7 +665,107 @@ def solve_immediate_normal_after_cowl(M3, pt_frac_after_cowl, Tt0):
         "T4": T4,
         "a4": a4,
         "V4": V4,
+        "gamma_eff": gamma_eff,
     }
+
+def solve_reflection_cascade(M3, T3, pt_frac_before, C, F, T_upper, T_lower,
+                             theta_cowl_deg, max_reflections=20):
+    """
+    R2 isolator pressure-loss model: oblique-shock reflection cascade.
+
+    Supersonic flow enters the isolator at direction theta_cowl_deg with
+    state (M3, T3) and pt_frac_before (cumulative pt/pt0 up to and including
+    the cowl shock). It reflects alternately off the floor (F -> T_lower)
+    and the roof (C -> T_upper). Each reflection is a wall-aligned oblique
+    shock solved with gamma(T). The cascade terminates when:
+      - the flow is subsonic (accept subsonic exit),
+      - the wall turn exceeds the detachment limit (cap with normal shock),
+      - max_reflections is reached (cap with normal shock).
+
+    Returns the subsonic exit state and a list of reflection records suitable
+    for plotting.
+    """
+    phi_floor = math.degrees(math.atan2(T_lower[1] - F[1], T_lower[0] - F[0]))
+    phi_roof  = math.degrees(math.atan2(T_upper[1] - C[1], T_upper[0] - C[0]))
+
+    M = float(M3)
+    T = float(T3)
+    pt_frac = float(pt_frac_before)
+    flow_dir = float(theta_cowl_deg)
+    reflections = []
+    wall = "floor"  # cowl shock emanates from roof, first reflection on floor
+
+    # Geometric bounce points: start at F (cowl shock focus on floor in design)
+    point = np.array(F, dtype=float).copy()
+
+    for _ in range(max_reflections):
+        if M <= 1.0 + 1e-4:
+            break
+        if wall == "floor":
+            turn = phi_floor - flow_dir
+            wall_dir = phi_floor
+        else:
+            turn = flow_dir - phi_roof
+            wall_dir = phi_roof
+
+        if turn <= 1e-6:
+            # Flow already parallel (or diverging) - no reflection shock
+            flow_dir = wall_dir
+            wall = "roof" if wall == "floor" else "floor"
+            continue
+
+        sh = oblique_shock_tpg(M, turn, T)
+        if sh is None:
+            ns = normal_shock_tpg(M, T)
+            M_ns, _, _, _, pt_r, T_ns, _ = ns
+            pt_frac *= pt_r
+            reflections.append({
+                "wall": wall, "turn_deg": turn, "detached": True,
+                "x": float(point[0]), "y": float(point[1]),
+                "M_up": M, "M_down": M_ns, "pt_ratio": pt_r,
+            })
+            M, T = M_ns, T_ns
+            break
+
+        beta_rel, M_new, _, pt_r, _, T_new, _ = sh
+        pt_frac *= pt_r
+        reflections.append({
+            "wall": wall, "turn_deg": turn, "beta_rel_deg": beta_rel,
+            "x": float(point[0]), "y": float(point[1]),
+            "flow_dir_in_deg": flow_dir, "wall_dir_deg": wall_dir,
+            "M_up": M, "M_down": M_new, "pt_ratio": pt_r,
+        })
+        M, T = M_new, T_new
+        flow_dir = wall_dir
+        wall = "roof" if wall == "floor" else "floor"
+
+    # Cap any residual supersonic with a normal shock (isolator terminates)
+    if M > 1.0:
+        ns = normal_shock_tpg(M, T)
+        M_ns, _, _, _, pt_r, T_ns, _ = ns
+        pt_frac *= pt_r
+        reflections.append({
+            "wall": "terminal", "turn_deg": 0.0,
+            "M_up": M, "M_down": M_ns, "pt_ratio": pt_r,
+        })
+        M, T = M_ns, T_ns
+
+    gamma_eff = gamma_air(T)
+    a = math.sqrt(gamma_eff * R * T)
+    V = M * a
+    return {
+        "M_exit": M,
+        "T_exit": T,
+        "V_exit": V,
+        "a_exit": a,
+        "gamma_eff": gamma_eff,
+        "pt_frac_after_cascade": pt_frac,
+        "reflections": reflections,
+        "phi_floor_deg": phi_floor,
+        "phi_roof_deg": phi_roof,
+        "n_reflections": len(reflections),
+    }
+
 
 def size_throat_from_post_cowl(M3, width_m, h_req_normal, throat_area_factor):
     A_post_cowl = width_m * h_req_normal
@@ -460,15 +836,16 @@ def point_in_body_frame(point_xy,leading_edge_angle_deg,):
 
     return np.array([x_body, y_body], dtype=float)
 
-def invert_area_mach_ratio_supersonic(target_A_over_Astar,tol=1e-8,max_iter=200,):
+def invert_area_mach_ratio_supersonic(target_A_over_Astar, gamma=GAMMA,
+                                      tol=1e-8, max_iter=200,):
     if target_A_over_Astar < 1.0:
         raise ValueError("Supersonic A/A* target must be >= 1.")
 
     lo = 1.0 + 1e-8
     hi = 50.0
 
-    f_lo = area_mach_ratio(lo) - target_A_over_Astar
-    f_hi = area_mach_ratio(hi) - target_A_over_Astar
+    f_lo = area_mach_ratio(lo, gamma=gamma) - target_A_over_Astar
+    f_hi = area_mach_ratio(hi, gamma=gamma) - target_A_over_Astar
 
     if f_lo > 0.0:
         return lo
@@ -477,7 +854,7 @@ def invert_area_mach_ratio_supersonic(target_A_over_Astar,tol=1e-8,max_iter=200,
 
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        f_mid = area_mach_ratio(mid) - target_A_over_Astar
+        f_mid = area_mach_ratio(mid, gamma=gamma) - target_A_over_Astar
         if abs(f_mid) < tol:
             return mid
         if f_mid > 0.0:
@@ -513,17 +890,27 @@ def target_post_cowl_mach_from_throat(A_post_cowl,A_throat,):
         "M3_target": M3_target,
     }
 
-def solve_cowl_stage_for_target_postshock(M2,theta2,M3_target,):
-    theta_max = theta_max_attached(M2)
+def solve_cowl_stage_for_target_postshock(M2,theta2,M3_target, T2=None,):
+    gamma_up = gamma_air(T2) if T2 is not None else GAMMA
+    theta_max = theta_max_attached(M2, gamma=gamma_up)
     if theta_max is None:
         raise ValueError("Could not determine attached-shock limit for cowl stage.")
 
     def eval_candidate(turn_deg):
-        sh = oblique_shock(M2, turn_deg)
-        if sh is None:
-            return None
+        if T2 is None:
+            sh = oblique_shock(M2, turn_deg)
+            if sh is None:
+                return None
+            beta_rel, M3, p43, pt43 = sh
+            T3 = None
+            T_ratio = None
+            gamma_eff = GAMMA
+        else:
+            sh = oblique_shock_tpg(M2, turn_deg, T2)
+            if sh is None:
+                return None
+            beta_rel, M3, p43, pt43, T_ratio, T3, gamma_eff = sh
 
-        beta_rel, M3, p43, pt43 = sh
         err = abs(M3 - M3_target)
 
         return {
@@ -533,6 +920,9 @@ def solve_cowl_stage_for_target_postshock(M2,theta2,M3_target,):
             "M3": M3,
             "p43": p43,
             "pt43": pt43,
+            "T_ratio": T_ratio,
+            "T_down": T3,
+            "gamma_eff": gamma_eff,
             "cowl_shock_abs": theta2 - beta_rel,
             "M3_target": M3_target,
             "M3_error": err,
@@ -675,16 +1065,26 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
 
     if area_ratio_exit_to_throat <= 1.0:
         raise ValueError("Diffuser exit/throat area ratio must exceed 1.")
-    if (half_angle_deg is None) == (length_m is None):
-        raise ValueError("Specify exactly one of half_angle_deg or length_m.")
-
     A_throat = h_throat * width_m
     A_exit   = area_ratio_exit_to_throat * A_throat
-    h_exit   = A_exit / width_m
+    exit_radius_m = math.sqrt(A_exit / math.pi)
+    exit_diameter_m = 2.0 * exit_radius_m
 
-    if length_m is None:
-        dh_per_side = 0.5 * (h_exit - h_throat)
-        length_m = dh_per_side / math.tan(math.radians(half_angle_deg))
+    throat_equiv_radius_m = math.sqrt(A_throat / math.pi)
+    length_sizing = None
+    if length_m is None and half_angle_deg is None:
+        length_sizing = size_diffuser_length_physics_based(
+            A_throat=A_throat,
+            A_exit=A_exit,
+            throat_width_m=width_m,
+            throat_height_m=h_throat,
+        )
+        length_m = length_sizing["length_m"]
+    elif length_m is None:
+        radius_change = max(exit_radius_m - throat_equiv_radius_m, 0.0)
+        length_m = radius_change / math.tan(math.radians(half_angle_deg))
+    elif half_angle_deg is not None:
+        raise ValueError("Specify either half_angle_deg or length_m, not both.")
 
     x0 = 0.5 * (T_upper[0] + T_lower[0])
     y_mid = 0.5 * (T_upper[1] + T_lower[1])
@@ -692,11 +1092,22 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
 
     xs = np.linspace(x0, x_exit, n_stations)
     s  = (xs - x0) / length_m
-    A_of_x = A_throat + s * (A_exit - A_throat)
-    h_of_x = A_of_x / width_m
+    smooth_s = np.array([_quintic_smoothstep(si) for si in s], dtype=float)
+    r_of_x = throat_equiv_radius_m + smooth_s * (exit_radius_m - throat_equiv_radius_m)
+    A_of_x = math.pi * r_of_x**2
+    section_half_heights = np.empty_like(A_of_x)
+    for i, (Ai, si) in enumerate(zip(A_of_x, smooth_s)):
+        section = morphed_rectangle_to_circle_section(
+            area_m2=Ai,
+            blend=si,
+            rect_width_m=width_m,
+            rect_height_m=h_throat,
+            circle_radius_m=exit_radius_m,
+        )
+        section_half_heights[i] = np.max(np.abs(section[:, 1]))
 
-    upper_wall = np.column_stack([xs, y_mid + 0.5 * h_of_x])
-    lower_wall = np.column_stack([xs, y_mid - 0.5 * h_of_x])
+    upper_wall = np.column_stack([xs, y_mid + section_half_heights])
+    lower_wall = np.column_stack([xs, y_mid - section_half_heights])
 
     exit_upper = upper_wall[-1]
     exit_lower = lower_wall[-1]
@@ -708,13 +1119,27 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
         "A_throat":      float(A_throat),
         "A_exit":        float(A_exit),
         "h_throat":      float(h_throat),
-        "h_exit":        float(h_exit),
+        "h_exit":        float(2.0 * exit_radius_m),
         "area_ratio":    float(area_ratio_exit_to_throat),
         "width_m":       float(width_m),
+        "throat_shape":  "rectangular",
+        "exit_shape":    "circular",
+        "shape_transition": "rectangle_to_circle",
+        "throat_width_m": float(width_m),
+        "throat_height_m": float(h_throat),
+        "throat_equivalent_radius_m": float(throat_equiv_radius_m),
+        "exit_radius_m": float(exit_radius_m),
+        "exit_diameter_m": float(exit_diameter_m),
         "y_centerline":  float(y_mid),
         "x_stations":    xs,
         "A_stations":    A_of_x,
-        "h_stations":    h_of_x,
+        "radius_stations": r_of_x,
+        "h_stations":    2.0 * section_half_heights,
+        "section_half_height_stations": section_half_heights,
+        "section_blend_stations": smooth_s,
+        "section_axial_fraction_stations": s,
+        "profile_type": "quintic_smooth_radius",
+        "length_sizing": length_sizing,
         "upper_wall_xy": upper_wall,
         "lower_wall_xy": lower_wall,
         "exit_upper_xy": exit_upper,
@@ -729,14 +1154,15 @@ def _static_over_total(M, gamma=GAMMA):
     return (1.0 + 0.5 * (gamma - 1.0) * M * M) ** (-gamma / (gamma - 1.0))
 
 
-def _subsonic_mach_from_area_ratio(A_over_Astar, tol=1e-10, max_iter=200):
+def _subsonic_mach_from_area_ratio(A_over_Astar, gamma=GAMMA,
+                                   tol=1e-10, max_iter=200):
     """Subsonic branch of the isentropic area-Mach relation."""
     if A_over_Astar < 1.0:
         raise ValueError("A/A* must be >= 1 for a real subsonic solution.")
     lo, hi = 1e-6, 1.0 - 1e-8
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        f = area_mach_ratio(mid) - A_over_Astar
+        f = area_mach_ratio(mid, gamma=gamma) - A_over_Astar
         if abs(f) < tol:
             return mid
         if f > 0.0:
@@ -746,12 +1172,52 @@ def _subsonic_mach_from_area_ratio(A_over_Astar, tol=1e-10, max_iter=200):
     return 0.5 * (lo + hi)
 
 
+def _iterate_supersonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-6):
+    """
+    Supersonic-branch Mach from A/A*, iterating gamma at the local static T
+    implied by Tt and the current Mach.
+    """
+    gamma = gamma_air(Tt * 2.0 / (GAMMA + 1.0))  # warm start at throat-like T
+    for _ in range(n_iter):
+        M = invert_area_mach_ratio_supersonic(A_over_Astar, gamma=gamma)
+        T = Tt / (1.0 + 0.5 * (gamma - 1.0) * M * M)
+        gamma_new = gamma_air(T)
+        if abs(gamma_new - gamma) < tol:
+            gamma = gamma_new
+            break
+        gamma = gamma_new
+    M = invert_area_mach_ratio_supersonic(A_over_Astar, gamma=gamma)
+    return M, gamma
+
+
+def _iterate_subsonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-6):
+    """
+    Subsonic-branch Mach from A/A*, iterating gamma at local static T.
+    """
+    gamma = gamma_air(Tt)  # warm start near stagnation
+    for _ in range(n_iter):
+        M = _subsonic_mach_from_area_ratio(A_over_Astar, gamma=gamma)
+        T = Tt / (1.0 + 0.5 * (gamma - 1.0) * M * M)
+        gamma_new = gamma_air(T)
+        if abs(gamma_new - gamma) < tol:
+            gamma = gamma_new
+            break
+        gamma = gamma_new
+    M = _subsonic_mach_from_area_ratio(A_over_Astar, gamma=gamma)
+    return M, gamma
+
+
 def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
-                                       area_spline=None, M_throat=1.0):
+                                       Tt0, area_spline=None, M_throat=1.0):
     """
     Given a trial shock axial station x_s in the diverging (supersonic)
     region, propagate to the diffuser exit and return predicted exit static
     pressure plus intermediate state.
+
+    Uses temperature-dependent gamma via gamma_air(T) throughout:
+      - supersonic Mach from A/A* is iterated on gamma(T_sup)
+      - the normal shock is solved via normal_shock_tpg at T_sup
+      - subsonic A/A* inversion and p/pt use gamma(T_sub), gamma(T_exit).
     """
     A_throat = diffuser["A_throat"]
     A_exit   = diffuser["A_exit"]
@@ -765,15 +1231,21 @@ def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
 
     A_s = float(area_spline(x_s))
 
-    M_sup = invert_area_mach_ratio_supersonic(A_s / A_throat)
+    # Supersonic branch upstream of the terminal shock. gamma iterated on
+    # T_sup = Tt0 / (1 + (gamma-1)/2 M_sup^2).
+    M_sup, gamma_sup = _iterate_supersonic_mach_tpg(A_s / A_throat, Tt0)
+    T_sup = Tt0 / (1.0 + 0.5 * (gamma_sup - 1.0) * M_sup * M_sup)
 
-    M_sub, p2_p1, _, _, pt2_pt1 = normal_shock(M_sup)
+    # Normal shock with T-dependent gamma.
+    M_sub, p2_p1, _, _, pt2_pt1, T_sub, gamma_shock = normal_shock_tpg(M_sup, T_sup)
     Pt_after_shock = Pt_after_cowl * pt2_pt1
 
-    Astar_sub = A_s / area_mach_ratio(M_sub)
-    M_exit    = _subsonic_mach_from_area_ratio(A_exit / Astar_sub)
+    # Subsonic area-Mach with gamma at local T_sub. Note: Tt is (approx)
+    # conserved through the shock since h_t is conserved (thermally perfect).
+    Astar_sub = A_s / area_mach_ratio(M_sub, gamma=gamma_shock)
+    M_exit, gamma_exit = _iterate_subsonic_mach_tpg(A_exit / Astar_sub, Tt0)
 
-    Ps_exit = Pt_after_shock * _static_over_total(M_exit)
+    Ps_exit = Pt_after_shock * _static_over_total(M_exit, gamma=gamma_exit)
     return {
         "x_s":            x_s,
         "A_s":            A_s,
@@ -783,6 +1255,11 @@ def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
         "Pt_after_shock": Pt_after_shock,
         "M_exit":         M_exit,
         "Ps_exit":        Ps_exit,
+        "gamma_sup":      gamma_sup,
+        "gamma_shock":    gamma_shock,
+        "gamma_exit":     gamma_exit,
+        "T_sup":          T_sup,
+        "T_sub":          T_sub,
     }
 
 
@@ -801,9 +1278,9 @@ def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
     x_hi = xs[-1] - eps
 
     hi_state = _exit_static_pressure_for_shock_at(
-        x_hi, diffuser, Pt_after_cowl, area_spline=area_spline)
+        x_hi, diffuser, Pt_after_cowl, Tt0, area_spline=area_spline)
     lo_state = _exit_static_pressure_for_shock_at(
-        x_lo, diffuser, Pt_after_cowl, area_spline=area_spline)
+        x_lo, diffuser, Pt_after_cowl, Tt0, area_spline=area_spline)
 
     Ps_max = lo_state["Ps_exit"]
     Ps_min = hi_state["Ps_exit"]
@@ -831,7 +1308,7 @@ def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
         state = _exit_static_pressure_for_shock_at(
-            mid, diffuser, Pt_after_cowl, area_spline=area_spline)
+            mid, diffuser, Pt_after_cowl, Tt0, area_spline=area_spline)
         err = state["Ps_exit"] - p_back
         if abs(err) < tol * max(p_back, 1.0):
             break
@@ -842,8 +1319,9 @@ def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
 
     pt_frac_terminal = state["Pt_after_shock"] / Pt_after_cowl
 
-    T_exit = Tt0 / (1.0 + 0.5 * (GAMMA - 1.0) * state["M_exit"] ** 2)
-    a_exit = math.sqrt(GAMMA * R * T_exit)
+    gamma_exit = state.get("gamma_exit", GAMMA)
+    T_exit = Tt0 / (1.0 + 0.5 * (gamma_exit - 1.0) * state["M_exit"] ** 2)
+    a_exit = math.sqrt(gamma_exit * R * T_exit)
     V_exit = state["M_exit"] * a_exit
 
     return {
@@ -894,6 +1372,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         alpha_deg=alpha_deg,
         leading_edge_angle_deg=leading_edge_angle_deg,
         forebody_separation_margin=forebody_separation_margin,
+        T0=fs["T0"],
     )
 
     ramp1 = solve_ramp_stage(
@@ -901,6 +1380,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         theta_base=forebody["theta_fore"],
         ramp_separation_margin=ramp_separation_margin,
         stage_name="Ramp 1",
+        T_up=forebody["T_down"],
     )
 
     ramp2 = solve_ramp_stage(
@@ -908,6 +1388,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         theta_base=ramp1["theta_abs"],
         ramp_separation_margin=ramp_separation_margin,
         stage_name="Ramp 2",
+        T_up=ramp1["T_down"],
     )
 
     geom = solve_external_geometry(
@@ -943,6 +1424,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         M2=ramp2["M_down"],
         theta2=ramp2["theta_abs"],
         M3_target=post_cowl_target["M3_target"],
+        T2=ramp2["T_down"],
     )
 
     pt_frac_after_cowl = (
@@ -956,6 +1438,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         M3=cowl["M3"],
         pt_frac_after_cowl=pt_frac_after_cowl,
         Tt0=fs["Tt0"],
+        T3=cowl["T_down"],
     )
 
     throat_geom = place_throat_on_cowl_and_cowl_shock(
@@ -967,13 +1450,23 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         leading_edge_angle_deg= -leading_edge_angle_deg
     )
 
+    cascade = solve_reflection_cascade(
+        M3=cowl["M3"],
+        T3=cowl["T_down"],
+        pt_frac_before=pt_frac_after_cowl,
+        C=geom["C"],
+        F=geom["F"],
+        T_upper=throat_geom["T_upper"],
+        T_lower=throat_geom["T_lower"],
+        theta_cowl_deg=cowl["theta_cowl"],
+    )
+
     diffuser = build_subsonic_diffuser(
         T_upper=throat_geom["T_upper"],
         T_lower=throat_geom["T_lower"],
         h_throat=throat_k["h_throat"],
         width_m=width_m,
         area_ratio_exit_to_throat=DIFFUSER_AREA_RATIO,
-        half_angle_deg=DIFFUSER_HALF_ANGLE_DEG,
     )
 
     # Report actual Kantrowitz using M2 and chosen throat
@@ -1036,6 +1529,15 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         "pt_frac_after_shock2": pt_frac_after_shock2,
         "pt_frac_after_cowl_shock": pt_frac_after_cowl,
         "pt_frac_after_immediate_normal_shock": normal_after_cowl["pt_frac_after_immediate_normal"],
+
+        "pt_frac_after_reflection_cascade": cascade["pt_frac_after_cascade"],
+        "M_after_reflection_cascade":       cascade["M_exit"],
+        "T_after_reflection_cascade":       cascade["T_exit"],
+        "V_after_reflection_cascade_ms":    cascade["V_exit"],
+        "reflection_list":                  cascade["reflections"],
+        "reflection_phi_floor_deg":         cascade["phi_floor_deg"],
+        "reflection_phi_roof_deg":          cascade["phi_roof_deg"],
+        "n_reflections":                    cascade["n_reflections"],
 
         "forebody_xy": P_fore,
         "nose_xy": geom["P0"],
@@ -1152,6 +1654,23 @@ def print_d2r_report(result):
     print(f"Throat upper point              = ({result['throat_upper_xy'][0]:.6f}, {result['throat_upper_xy'][1]:.6f}) m")
     print(f"Throat top body-frame x          = {result['throat_upper_body_x_m']:.6f} m")
     print(f"Throat top body-frame y          = {result['throat_upper_body_y_m']:.6f} m")
+
+    diffuser = result.get("diffuser")
+    if diffuser is not None:
+        print("\nDIFFUSER")
+        print("------------------------------")
+        print(f"Diffuser transition             = {diffuser.get('shape_transition', 'n/a')}")
+        print(f"Diffuser profile                = {diffuser.get('profile_type', 'n/a')}")
+        print(f"Diffuser length                 = {diffuser.get('length_m', float('nan')):.6f} m")
+        print(f"Diffuser exit area              = {diffuser.get('A_exit', float('nan')):.6f} m^2")
+        print(f"Diffuser exit shape             = {diffuser.get('exit_shape', 'n/a')}")
+        print(f"Diffuser exit diameter          = {diffuser.get('exit_diameter_m', float('nan')):.6f} m")
+        length_sizing = diffuser.get("length_sizing")
+        if isinstance(length_sizing, dict):
+            print(f"Diffuser length basis           = {length_sizing.get('governing_mode', 'n/a')}")
+            print(f"Length from half-angle          = {length_sizing.get('length_from_angle_m', float('nan')):.6f} m")
+            print(f"Length from shock room          = {length_sizing.get('length_from_shock_m', float('nan')):.6f} m")
+            print(f"Throat hydraulic diameter       = {length_sizing.get('throat_hydraulic_diameter_m', float('nan')):.6f} m")
 
     print("\nKANTROWITZ CHECK")
     print("------------------------------")
@@ -1395,11 +1914,12 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         return {"success": False,
                 "reason": "Non-positive forebody effective turn",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    shf = oblique_shock(M0, dtheta_fore_eff)
+    # Thermally-perfect shock train: gamma(T) propagates stage-by-stage.
+    shf = oblique_shock_tpg(M0, dtheta_fore_eff, T0)
     if shf is None:
         return {"success": False, "reason": "Forebody shock unattached",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio = shf
+    beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio, _, T_fore, _ = shf
     shock_fore_abs = beta_fore_rel
 
     # ---- Ramp 1
@@ -1408,11 +1928,11 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         return {"success": False,
                 "reason": "Invalid ramp 1 turn from frozen geometry",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    sh1 = oblique_shock(M_fore, dtheta1)
+    sh1 = oblique_shock_tpg(M_fore, dtheta1, T_fore)
     if sh1 is None:
         return {"success": False, "reason": "Ramp 1 shock unattached",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta1_rel, M1, p21, pt21 = sh1
+    beta1_rel, M1, p21, pt21, _, T1_s, _ = sh1
     shock1_abs = theta_fore + beta1_rel
 
     # ---- Ramp 2
@@ -1421,11 +1941,11 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         return {"success": False,
                 "reason": "Invalid ramp 2 turn from frozen geometry",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    sh2 = oblique_shock(M1, dtheta2)
+    sh2 = oblique_shock_tpg(M1, dtheta2, T1_s)
     if sh2 is None:
         return {"success": False, "reason": "Ramp 2 shock unattached",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta2_rel, M2, p32, pt32 = sh2
+    beta2_rel, M2, p32, pt32, _, T2_s, _ = sh2
     shock2_abs = theta1 + beta2_rel
 
     # ---- Cowl shock
@@ -1433,11 +1953,11 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
     if cowl_turn_mag <= 0.0:
         return {"success": False, "reason": "Non-positive cowl turn",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    shc = oblique_shock(M2, cowl_turn_mag)
+    shc = oblique_shock_tpg(M2, cowl_turn_mag, T2_s)
     if shc is None:
         return {"success": False, "reason": "Cowl shock unattached",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta_cowl_rel, M3, p43, pt43 = shc
+    beta_cowl_rel, M3, p43, pt43, _, T3_s, _ = shc
     cowl_shock_abs = theta2 - beta_cowl_rel
 
     pt_frac_after_forebody = pt_fore_ratio
@@ -1445,6 +1965,15 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
     pt_frac_after_shock2   = pt_fore_ratio * pt21 * pt32
     pt_frac_after_cowl     = pt_fore_ratio * pt21 * pt32 * pt43
 
+    # R2 reflection cascade through the isolator (canonical pt loss model).
+    cascade = solve_reflection_cascade(
+        M3=M3, T3=T3_s, pt_frac_before=pt_frac_after_cowl,
+        C=C, F=F, T_upper=T_upper, T_lower=T_lower,
+        theta_cowl_deg=theta_cowl,
+    )
+
+    # Freestream totals use cold-air gamma (T0~220K, gamma_air~1.400); the
+    # difference from constant GAMMA=1.4 is <0.1% so we leave it.
     Tt0 = total_temperature(T0, M0)
     Pt0 = p0 * (1.0 + 0.5 * (GAMMA - 1.0) * M0 * M0) ** (GAMMA / (GAMMA - 1.0))
     Pt_after_cowl = Pt0 * pt_frac_after_cowl
@@ -1517,6 +2046,15 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         "pt_frac_after_immediate_normal_shock": pt_frac_after_terminal,
         "M_after_immediate_normal_shock":       terminal["M_exit"],
         "V_after_immediate_normal_shock_ms":    terminal["V_exit"],
+
+        "pt_frac_after_reflection_cascade": cascade["pt_frac_after_cascade"],
+        "M_after_reflection_cascade":       cascade["M_exit"],
+        "T_after_reflection_cascade":       cascade["T_exit"],
+        "V_after_reflection_cascade_ms":    cascade["V_exit"],
+        "reflection_list":                  cascade["reflections"],
+        "reflection_phi_floor_deg":         cascade["phi_floor_deg"],
+        "reflection_phi_roof_deg":          cascade["phi_roof_deg"],
+        "n_reflections":                    cascade["n_reflections"],
 
         "forebody_xy":         P_fore,
         "nose_xy":             P0_xy,
@@ -1776,11 +2314,17 @@ else:
         # 3x3 shock grid
         mach_grid = [4.0, 4.5, 5.0]
         alpha_grid = [2.0, 5.0, 8.0]
+        # Back pressure for off-design terminal-shock solver [Pa]. Tune as
+        # needed for the flight envelope; 50 kPa is a nominal combustor face
+        # static pressure at ~12 km.
+        p_back_sweep = 3000000.0
+
         plot_fixed_geometry_3x3_grid(
             result=result,
             altitude_m=12000.0,
             mach_values=mach_grid,
             alpha_values=alpha_grid,
+            p_back=p_back_sweep,
         )
 
         # pt vs Mach at fixed alpha
@@ -1790,6 +2334,7 @@ else:
             altitude_m=12000.0,
             mach_values=mach_sweep,
             alpha_deg=5.0,
+            p_back=p_back_sweep,
         )
         plot_pt_vs_mach(cases_mach, use_immediate_normal=True)
 
@@ -1800,5 +2345,6 @@ else:
             altitude_m=12000.0,
             alpha_values=alpha_sweep,
             M0=5.0,
+            p_back=p_back_sweep,
         )
         plot_pt_vs_alpha(cases_alpha, use_immediate_normal=True)

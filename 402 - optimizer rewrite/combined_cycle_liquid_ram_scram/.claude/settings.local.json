@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import cantera; print\\(cantera.__version__\\); g=cantera.Solution\\('air.yaml'\\); g.TPX=300,1e5,'O2:0.21,N2:0.79'; print\\('gamma@300K:',g.cp/g.cv\\); g.TP=1500,1e5; print\\('gamma@1500K:',g.cp/g.cv\\); g.TP=2500,1e5; print\\('gamma@2500K:',g.cp/g.cv\\)\")",
+      "Bash(python -c \"import pycycle; print\\(pycycle.__file__\\)\")",
+      "Bash(python -c \"from pycycle.cea import species_data; from pycycle.thermo.cea.thermo_data import janaf; import numpy as np; print\\('janaf keys sample:', list\\(janaf.products.keys\\(\\)\\)[:5] if hasattr\\(janaf,'products'\\) else 'n/a'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import importlib.util, sys; spec=importlib.util.spec_from_file_location\\('inlet','402inlet2.py'\\); m=importlib.util.module_from_spec\\(spec\\); spec.loader.exec_module\\(m\\); r=m.design_2ramp_shock_matched_inlet\\(M0=6.0, altitude_m=25000.0, alpha_deg=0.0, leading_edge_angle_deg=0.0, forebody_separation_margin=0.25, ramp_separation_margin=0.25, kantrowitz_margin=0.95, shock_focus_factor=1.0, width_m=0.3\\); print\\('success:', r.get\\('success'\\)\\); print\\('pt_frac_after_cowl_shock:', r.get\\('pt_frac_after_cowl_shock'\\)\\); print\\('pt_frac_after_reflection_cascade:', r.get\\('pt_frac_after_reflection_cascade'\\)\\); print\\('M_after_reflection_cascade:', r.get\\('M_after_reflection_cascade'\\)\\); print\\('n_reflections:', r.get\\('n_reflections'\\)\\)\")"
+    ]
+  }
+}

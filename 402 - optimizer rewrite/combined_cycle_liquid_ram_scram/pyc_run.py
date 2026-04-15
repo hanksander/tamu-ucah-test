@@ -233,9 +233,13 @@ def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
         exit_MN  = max(M0 * 0.75, 1.05)
         return float(Pt_ratio), float(exit_MN)
 
-    Pt_ratio = case['pt_frac_after_cowl_shock'] * ISOLATOR_PT_RECOVERY
-    exit_MN  = float(case['M_after_cowl_shock'])
-    return float(Pt_ratio), float(exit_MN)
+    # R2 reflection cascade is now the canonical isolator pt-loss model.
+    # It already includes all oblique reflections and a terminating normal
+    # shock to subsonic, so no additional ISOLATOR_PT_RECOVERY factor is
+    # applied here.
+    Pt_ratio = float(case['pt_frac_after_reflection_cascade'])
+    exit_MN  = float(case['M_after_reflection_cascade'])
+    return Pt_ratio, exit_MN
 
 
 # ---------------------------------------------------------------------------
@@ -246,49 +250,79 @@ def compute_combustor_geometry(
     nozzle_throat_area: float,
     combustor_L_star: float,
     design: dict | None = None,
+    cross_section_area_m2: float | None = None,
+    cross_section_shape: str | None = None,
     width_m: float | None = None,
     height_m: float | None = None,
 ) -> dict:
     """
-    Size a constant-area rectangular combustor from characteristic length.
+    Size a constant-area combustor from characteristic length.
+
+    When a diffuser is present, the combustor inherits the diffuser exit area
+    and is treated as circular. Legacy rectangular sizing is retained as a
+    fallback for cases without a diffuser block.
     """
     if nozzle_throat_area <= 0.0:
         raise ValueError("nozzle_throat_area must be positive.")
     if combustor_L_star <= 0.0:
         raise ValueError("combustor_L_star must be positive.")
 
-    if width_m is None:
-        width_m = INLET_DESIGN_WIDTH_M
-
-    if height_m is None:
-        if design is None:
-            raise ValueError("height_m or design must be provided.")
+    if cross_section_area_m2 is None:
         diff = design.get("diffuser") if isinstance(design, dict) else None
         if diff is not None:
-            height_m = float(diff["h_exit"])
-        elif "throat_height_m" in design:
-            height_m = float(design["throat_height_m"])
+            cross_section_area_m2 = float(diff["A_exit"])
+            if cross_section_shape is None:
+                cross_section_shape = "circular"
         else:
-            t_up = np.asarray(design["throat_upper_xy"], dtype=float)
-            t_lo = np.asarray(design["throat_lower_xy"], dtype=float)
-            height_m = float(abs(t_up[1] - t_lo[1]))
+            if width_m is None:
+                width_m = INLET_DESIGN_WIDTH_M
+            if height_m is None:
+                if design is None:
+                    raise ValueError("geometry inputs or design must be provided.")
+                if "throat_height_m" in design:
+                    height_m = float(design["throat_height_m"])
+                else:
+                    t_up = np.asarray(design["throat_upper_xy"], dtype=float)
+                    t_lo = np.asarray(design["throat_lower_xy"], dtype=float)
+                    height_m = float(abs(t_up[1] - t_lo[1]))
+            if width_m <= 0.0 or height_m <= 0.0:
+                raise ValueError("Combustor width and height must be positive.")
+            cross_section_area_m2 = width_m * height_m
+            if cross_section_shape is None:
+                cross_section_shape = "rectangular"
 
-    if width_m <= 0.0 or height_m <= 0.0:
-        raise ValueError("Combustor width and height must be positive.")
-
-    combustor_area = width_m * height_m
+    combustor_area = float(cross_section_area_m2)
+    if combustor_area <= 0.0:
+        raise ValueError("Combustor cross_section_area_m2 must be positive.")
     combustor_volume = combustor_L_star * nozzle_throat_area
     combustor_length = combustor_volume / combustor_area
 
-    return {
+    geometry = {
         "L_star": float(combustor_L_star),
-        "width_m": float(width_m),
-        "height_m": float(height_m),
+        "cross_section_shape": str(cross_section_shape or "circular"),
         "cross_section_area_m2": float(combustor_area),
         "throat_area_m2": float(nozzle_throat_area),
         "volume_m3": float(combustor_volume),
         "length_m": float(combustor_length),
     }
+
+    if geometry["cross_section_shape"] == "circular":
+        radius_m = np.sqrt(combustor_area / np.pi)
+        geometry.update({
+            "radius_m": float(radius_m),
+            "diameter_m": float(2.0 * radius_m),
+            "width_m": float(2.0 * radius_m),
+            "height_m": float(2.0 * radius_m),
+        })
+    else:
+        geometry.update({
+            "width_m": float(width_m),
+            "height_m": float(height_m),
+            "radius_m": float(np.sqrt(combustor_area / np.pi)),
+            "diameter_m": float(np.sqrt(4.0 * combustor_area / np.pi)),
+        })
+
+    return geometry
 
 
 def _reconstruct_ram_nozzle_geometry(state4, state9, mass_flow, phi, thermo, eta_n):
@@ -562,8 +596,11 @@ def analyze(
             pass
 
     combustor_section = {
+        "shape": str(combustor_geometry["cross_section_shape"]),
         "width_m": float(combustor_geometry["width_m"]),
         "height_m": float(combustor_geometry["height_m"]),
+        "radius_m": float(combustor_geometry["radius_m"]),
+        "diameter_m": float(combustor_geometry["diameter_m"]),
         "area_m2": float(combustor_geometry["cross_section_area_m2"]),
     }
     inlet_geometry = {
@@ -572,6 +609,8 @@ def analyze(
         "throat_area_m2": float(design["throat_area_actual_m2"]),
         "throat_height_m": float(design["throat_height_m"]),
         "width_m": float(INLET_DESIGN_WIDTH_M),
+        "diffuser_exit_shape": str(design.get("diffuser", {}).get("exit_shape", "unknown")),
+        "diffuser_exit_diameter_m": float(design.get("diffuser", {}).get("exit_diameter_m", np.nan)),
         "forebody_length_m": float(design["forebody_length_m"]),
         "ramp1_length_m": float(design["ramp1_length_m"]),
         "shock2_to_lip_m": float(design["shock2_distance_from_break2_to_lip_m"]),
@@ -579,6 +618,10 @@ def analyze(
     nozzle_geometry = {
         "throat_area_m2": float(nozzle_throat["area"]),
         "exit_area_m2": float(nozzle_exit["area"]),
+        "throat_radius_m": float(np.sqrt(float(nozzle_throat["area"]) / np.pi)),
+        "throat_diameter_m": float(np.sqrt(4.0 * float(nozzle_throat["area"]) / np.pi)),
+        "exit_radius_m": float(np.sqrt(float(nozzle_exit["area"]) / np.pi)),
+        "exit_diameter_m": float(np.sqrt(4.0 * float(nozzle_exit["area"]) / np.pi)),
         "area_ratio": float(nozzle_perf["area_ratio"]),
         "expansion_state": nozzle_perf["expansion_state"],
     }
@@ -689,13 +732,18 @@ def _print_cycle(r):
     print(f"  throat area      = {inlet_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
     print(f"  throat height    = {inlet_geom.get('throat_height_m', float('nan')):>8.5f} m")
     print(f"  width            = {inlet_geom.get('width_m', float('nan')):>8.5f} m")
+    print(f"  diffuser exit    = {inlet_geom.get('diffuser_exit_shape', 'n/a')}")
+    print(f"  diffuser exit dia= {inlet_geom.get('diffuser_exit_diameter_m', float('nan')):>8.5f} m")
     print(f"  forebody length  = {inlet_geom.get('forebody_length_m', float('nan')):>8.5f} m")
     print(f"  ramp1 length     = {inlet_geom.get('ramp1_length_m', float('nan')):>8.5f} m")
     print(f"  break2->lip dist = {inlet_geom.get('shock2_to_lip_m', float('nan')):>8.5f} m")
     print()
     print("  Combustor geometry")
+    print(f"  section shape    = {combustor_section.get('shape', 'n/a')}")
     print(f"  section width    = {combustor_section.get('width_m', float('nan')):>8.5f} m")
     print(f"  section height   = {combustor_section.get('height_m', float('nan')):>8.5f} m")
+    print(f"  section radius   = {combustor_section.get('radius_m', float('nan')):>8.5f} m")
+    print(f"  section diameter = {combustor_section.get('diameter_m', float('nan')):>8.5f} m")
     print(f"  section area     = {combustor_section.get('area_m2', float('nan')):>8.5f} m^2")
     if combustor_geom is not None:
         print(f"  L*               = {combustor_geom.get('L_star', float('nan')):>8.5f} m")
@@ -705,7 +753,9 @@ def _print_cycle(r):
     print()
     print("  Nozzle geometry")
     print(f"  throat area At   = {nozzle_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  throat diameter  = {nozzle_geom.get('throat_diameter_m', float('nan')):>8.5f} m")
     print(f"  exit area Ae     = {nozzle_geom.get('exit_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  exit diameter    = {nozzle_geom.get('exit_diameter_m', float('nan')):>8.5f} m")
     print(f"  area ratio Ae/At = {nozzle_geom.get('area_ratio', float('nan')):>8.5f}")
     print(f"  expansion state  = {nozzle_geom.get('expansion_state', 'n/a')}")
     print()
