@@ -27,58 +27,92 @@ LHV_JP10       = 43.4e6    # lower heating value [J/kg]
 
 
 """
-INLET DESIGN PARAMETERS 
+DESIGN PARAMETERS 
 =========================================
+ INLET_DESIGN_M0
 
-1. DESIGN MACH NUMBER (INLET_DESIGN_M0)
-   - Choose ~midpoint of operating range (e.g., 4.0–4.5), NOT the maximum.
-   - Higher → more compression, smaller throat → harder to start at low Mach.
-   - Lower → easier starting but lower recovery at high Mach.
+  - Sets the Mach number the inlet geometry is designed around.
+  - Higher: stronger design-point compression, smaller throat tendency, worse low-Mach operability.
+  - Lower: easier starting/off-design at low Mach, weaker high-Mach design performance.
 
-2. KANTROWITZ MARGIN (INLET_KANTROWITZ_MARGIN)
-   - Fraction of the self-starting contraction limit. Must be < 1.0.
-   - Lower (0.85–0.90) ensures starting at lowest Mach in range.
-   - Check: CR_geom < kantrowitz_limit(M_min) after design.
+  INLET_DESIGN_ALT_M
 
-3. DIFFUSER AREA RATIO (DIFFUSER_AREA_RATIO)
-   - Ratio of combustor face area to throat area.
-   - Larger (2.5–3.0) gives more room for terminal shock to move aft,
-     delaying swallowing at high Mach.
-   - Too large → long diffuser, risk of separation.
+  - Sets design altitude for freestream density, pressure, and temperature during inlet sizing.
+  - Higher: thinner air, affects required capture opening and shock thermodynamics.
+  - Lower: denser air, changes required opening and mass-flow-based geometry sizing.
 
-4. DIFFUSER HALF-ANGLE (DIFFUSER_HALF_ANGLE_DEG)
-   - Divergence angle of subsonic diffuser walls.
-   - Shallow (2.5–3.0°) prevents flow separation, especially at low Mach
-     when shock is near throat and pressure gradient is steep.
+  INLET_DESIGN_ALPHA_DEG
 
-5. FOREBODY / RAMP SEPARATION MARGINS
-   - Fraction of maximum attached-shock turning angle allowed.
-   - Conservative (0.15–0.20) avoids unstart at low Mach / high AoA.
-   - Lower margins improve recovery but narrow operability.
+  - Sets the angle of attack used during inlet design.
+  - Higher: increases effective forebody turn, usually makes shock attachment margins tighter.
+  - Lower: more benign design geometry, generally better robustness.
 
-6. SHOCK FOCUS FACTOR (INLET_SHOCK_FOCUS_FACTOR)
-   - Positions cowl lip relative to ramp-2 shock impingement.
-   - Lower (1.15–1.20) moves lip forward → safer low-Mach starting,
-     slightly reduced capture area.
-   - Higher → better mass flow capture at design point.
+  INLET_DESIGN_LEADING_EDGE_ANGLE_DEG
 
-7. ANGLE OF ATTACK (INLET_DESIGN_ALPHA_DEG)
-   - Design at 0° unless cruise AoA is known and fixed.
-   - Positive AoA increases effective ramp angles → reduces low-Mach margin.
+  - Sets the forebody leading-edge / initial compression angle.
+  - Higher: stronger initial compression, more risk of separation/unattached shocks.
+  - Lower: gentler compression, safer off design, lower peak recovery.
 
-TYPICAL VALUES FOR MACH 2.5–5.0 RAMJET:
-   M0_design       = 4.2
-   Kantrowitz_margin = 0.88
-   Diffuser_AR     = 2.8
-   Diffuser_half_angle = 2.5°
-   Forebody_sep    = 0.15
-   Ramp_sep        = 0.18
-   Shock_focus     = 1.18
-   Alpha_design    = 0.0
+  INLET_DESIGN_MDOT_KGS
 
-After changing parameters, re-run design and check:
-   - Kantrowitz pass at M_min (CR_geom < CR_k(M_min))
-   - Off-design sweep: success=True across range, smooth recovery curve.
+  - Sets required captured air mass flow at the design point.
+  - Higher: requires larger capture area / inlet opening.
+  - Lower: smaller inlet opening and generally smaller geometry.
+
+  INLET_DESIGN_WIDTH_M
+
+  - Sets spanwise inlet width used to convert area into heights.
+  - Higher: same area can be achieved with smaller vertical height.
+  - Lower: larger required heights for the same flow area.
+
+  INLET_FOREBODY_SEP_MARGIN
+
+  - Fraction of max attached-shock turn allowed on the forebody.
+  - Higher: more aggressive forebody compression, better potential recovery, less margin.
+  - Lower: more conservative, more robust, less compression.
+
+  INLET_RAMP_SEP_MARGIN
+
+  - Fraction of max attached-shock turn allowed on ramp 1 and ramp 2.
+  - Higher: stronger ramp compression, smaller/tighter geometry, more risk off design.
+  - Lower: gentler ramps, smoother off-design behavior, less total compression.
+
+  INLET_KANTROWITZ_MARGIN
+
+  - Fraction of the Kantrowitz contraction limit used to size the throat.
+  - Higher: smaller throat, stronger contraction, better design compression, worse starting/off-design tolerance.
+  - Lower: larger throat, easier starting, weaker compression, usually more robust.
+
+  INLET_SHOCK_FOCUS_FACTOR
+
+  - Controls where the cowl lip sits relative to the ramp-2 shock focus.
+  - Higher: pushes geometry toward tighter shock focusing / capture, can get more fragile.
+  - Lower: safer/less aggressive placement, often better off-design robustness.
+
+  DIFFUSER_AREA_RATIO
+
+  - Sets combustor-face area divided by throat area.
+  - Higher: more diffuser expansion, more subsonic diffusion, more room for terminal-shock travel, but can create stronger regime
+    sensitivity and discontinuities in this model.
+  - Lower: more compact diffuser, less shock travel room, usually smoother but less flexible back-pressure accommodation.
+
+  DIFFUSER_HALF_ANGLE_DEG
+
+  - User-set diffuser half-angle if explicit angle sizing is used.
+  - Higher: shorter diffuser, stronger geometric divergence, more real-world separation risk.
+  - Lower: longer, gentler diffuser.
+
+  DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG
+
+  - Equivalent half-angle limit used by the physics-based diffuser length sizing.
+  - Higher: allows shorter diffuser.
+  - Lower: forces longer diffuser for gentler diffusion.
+
+  DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH
+
+  - Minimum diffuser length in throat hydraulic diameters to give the terminal shock room.
+  - Higher: longer diffuser, better modeled off-design shock accommodation.
+  - Lower: shorter diffuser, less shock travel room, earlier expelled/swallowed transitions.
 """
 
 INLET_DESIGN_M0                    = 5
@@ -95,7 +129,7 @@ INLET_SHOCK_FOCUS_FACTOR           = 1.18
 DIFFUSER_AREA_RATIO = 1.5
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 2.5
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4.0
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 5.0
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.92   # combustion efficiency

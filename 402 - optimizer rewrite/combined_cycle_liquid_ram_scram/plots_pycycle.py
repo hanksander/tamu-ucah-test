@@ -176,11 +176,11 @@ def _polyline_slope(points, at_start=False):
     return float((p1[1] - p0[1]) / max(p1[0] - p0[0], 1.0e-12))
 
 
-def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, throat_lower_xy, diffuser_lower_xy):
+def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, diffuser_lower_xy):
     ramp2_start_xy = np.asarray(ramp2_start_xy, dtype=float)
     foot_xy = np.asarray(foot_xy, dtype=float)
-    throat_lower_xy = np.asarray(throat_lower_xy, dtype=float)
     diffuser_lower_xy = np.asarray(diffuser_lower_xy, dtype=float)
+    end_xy = np.asarray(diffuser_lower_xy[0], dtype=float)
 
     if diffuser_lower_xy.shape[0] >= 2:
         end_slope = _polyline_slope(diffuser_lower_xy, at_start=True)
@@ -192,11 +192,38 @@ def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, throat_lower_xy, diffuser_
         start_slope = end_slope
     else:
         start_slope = float((foot_xy[1] - ramp2_start_xy[1]) / dx_ramp)
-    if throat_lower_xy[0] <= foot_xy[0] + 1.0e-9:
-        return np.array([foot_xy, throat_lower_xy], dtype=float)
+    if end_xy[0] <= foot_xy[0] + 1.0e-9:
+        return np.array([foot_xy, end_xy], dtype=float)
     return _quintic_floor_curve(
         foot_xy,
-        throat_lower_xy,
+        end_xy,
+        start_slope=start_slope,
+        end_slope=end_slope,
+    )
+
+
+def _build_inlet_roof_curve(cowl_xy, throat_upper_xy, diffuser_upper_xy):
+    cowl_xy = np.asarray(cowl_xy, dtype=float)
+    throat_upper_xy = np.asarray(throat_upper_xy, dtype=float)
+    diffuser_upper_xy = np.asarray(diffuser_upper_xy, dtype=float)
+    end_xy = np.asarray(diffuser_upper_xy[0], dtype=float)
+
+    if diffuser_upper_xy.shape[0] >= 2:
+        end_slope = _polyline_slope(diffuser_upper_xy, at_start=True)
+    else:
+        end_slope = 0.0
+
+    dx_cowl = throat_upper_xy[0] - cowl_xy[0]
+    if abs(dx_cowl) <= 1.0e-12:
+        start_slope = end_slope
+    else:
+        start_slope = float((throat_upper_xy[1] - cowl_xy[1]) / dx_cowl)
+
+    if end_xy[0] <= throat_upper_xy[0] + 1.0e-9:
+        return np.array([throat_upper_xy, end_xy], dtype=float)
+    return _quintic_floor_curve(
+        throat_upper_xy,
+        end_xy,
         start_slope=start_slope,
         end_slope=end_slope,
     )
@@ -238,7 +265,8 @@ def _flowpath_layout(
         diff_upper  = np.asarray(diff['upper_wall_xy'], dtype=float)
         diff_lower  = np.asarray(diff['lower_wall_xy'], dtype=float)
 
-    inlet_floor = _build_inlet_floor_curve(brk2, foot, t_lo, diff_lower)
+    inlet_floor = _build_inlet_floor_curve(brk2, foot, diff_lower)
+    inlet_roof = _build_inlet_roof_curve(cowl, t_up, diff_upper)
     inlet_lower = np.vstack([
         fore,
         nose,
@@ -246,7 +274,7 @@ def _flowpath_layout(
         foot,
         inlet_floor[1:],
     ])
-    inlet_upper = np.vstack([cowl, t_up])
+    inlet_upper = np.vstack([cowl, inlet_roof[1:]])
 
     duct_x0   = throat_x0 + diff_len        # combustor face
 
@@ -290,6 +318,7 @@ def _flowpath_layout(
         't_lo': t_lo,
         'inlet_upper': inlet_upper,
         'inlet_lower': inlet_lower,
+        'inlet_roof': inlet_roof,
         'inlet_floor': inlet_floor,
         'throat_h':  throat_h,
         'throat_x0': throat_x0,
@@ -652,15 +681,21 @@ def fig_cad_model(
         theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
         return np.column_stack([radius_m * np.cos(theta), radius_m * np.sin(theta)])
 
-    def _rectangle_ring(width_m, height_m):
-        half_w = 0.5 * float(width_m)
-        half_h = 0.5 * float(height_m)
-        return np.array([
-            [-half_w, -half_h],
-            [-half_w,  half_h],
-            [ half_w,  half_h],
-            [ half_w, -half_h],
-        ], dtype=float)
+    def _rectangle_ring(width_m, height_m, outer=False, n_theta=None):
+        if n_theta is None:
+            n_theta = ring_points
+        width_m = float(width_m)
+        height_m = float(height_m)
+        area_m2 = width_m * height_m
+        circle_radius = diffuser_exit_radius + (t if outer else 0.0)
+        return _inlet2.morphed_rectangle_to_circle_section(
+            area_m2=area_m2,
+            blend=0.0,
+            rect_width_m=width_m,
+            rect_height_m=height_m,
+            circle_radius_m=circle_radius,
+            n_points=n_theta,
+        )
 
     def _morph_ring(area_m2, blend, outer=False, n_theta=None):
         if n_theta is None:
@@ -752,8 +787,8 @@ def fig_cad_model(
         areas = np.asarray(diff['A_stations'], dtype=float)
         blends = np.asarray(diff['section_blend_stations'], dtype=float)
         throat_x = float(xs[0])
-        inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h)))
-        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t)))
+        inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=False)))
+        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True)))
         diffuser_idx = np.linspace(0, len(xs) - 1, diffuser_section_count, dtype=int).tolist()
         diffuser_idx = sorted(set(diffuser_idx))
         if diffuser_idx[-1] != len(xs) - 1:
@@ -785,17 +820,17 @@ def fig_cad_model(
     for ring_a, ring_b in zip(inner_sections[:-1], inner_sections[1:]):
         meshes.append(_bridge_rings(ring_b, ring_a))
 
-    inlet_lower_resampled = _resample_polyline(inlet_lower, max(64, diffuser_section_count))
-    inlet_upper_resampled = _resample_polyline(inlet_upper, max(32, diffuser_section_count // 2))
+    inlet_lower_resampled = _resample_polyline(inlet_lower, max(128, 2 * diffuser_section_count))
+    inlet_upper_resampled = _resample_polyline(inlet_upper, max(96, diffuser_section_count))
     for mesh in _wall_shell_from_polyline(inlet_lower_resampled, is_upper=False):
         meshes.append(mesh)
     for mesh in _wall_shell_from_polyline(inlet_upper_resampled, is_upper=True):
         meshes.append(mesh)
 
     overlap_x0 = float(cowl[0])
-    overlap_x1 = float(layout['t_up'][0])
+    overlap_x1 = float(inlet_upper[-1, 0])
     if overlap_x1 > overlap_x0 + 1.0e-9:
-        side_x = np.linspace(overlap_x0, overlap_x1, max(40, diffuser_section_count))
+        side_x = np.linspace(overlap_x0, overlap_x1, max(96, 2 * diffuser_section_count))
         side_lower = np.column_stack([
             side_x,
             [_polyline_y_at_x(inlet_lower, x) for x in side_x],
