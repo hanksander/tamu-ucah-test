@@ -2132,7 +2132,7 @@ def plot_fixed_geometry_case(ax,case,shock_extension_factor=1.20,
     ax.grid(True)
     ax.set_title(
         f"M={case['M0']:.2f}, α={case['alpha_deg']:.1f}\n"
-        f"pt/pt0={case['pt_frac_after_immediate_normal_shock']:.3f}")
+        f"pt/pt0={case['pt_frac_after_terminal_shock']:.3f}")
 
 def plot_fixed_geometry_3x3_grid(result,altitude_m,mach_values,alpha_values,p_back,):
     """
@@ -2206,7 +2206,7 @@ def sweep_fixed_geometry_vs_alpha(result,altitude_m,alpha_values,M0,p_back,):
 
     return out
 
-def plot_pt_vs_mach(cases,use_immediate_normal=False,):
+def plot_pt_vs_mach(cases, use_terminal_shock=True):
     """
     Plot total pressure recovery vs Mach.
     Also plots MIL-E-5008B:
@@ -2219,8 +2219,8 @@ def plot_pt_vs_mach(cases,use_immediate_normal=False,):
         if not case["success"]:
             continue
         xs.append(case["M0"])
-        if use_immediate_normal:
-            ys.append(case["pt_frac_after_immediate_normal_shock"])
+        if use_terminal_shock:
+            ys.append(case["pt_frac_after_terminal_shock"])
         else:
             ys.append(case["pt_frac_after_cowl_shock"])
 
@@ -2235,11 +2235,16 @@ def plot_pt_vs_mach(cases,use_immediate_normal=False,):
     plt.grid(True)
     plt.xlabel("Freestream Mach")
     plt.ylabel("pt/pt0")
-    plt.title("Total Pressure Recovery vs Mach")
+    title = "Total Pressure Recovery vs Mach"
+    if use_terminal_shock:
+        title += " (cowl shock + terminal diffuser shock)"
+    else:
+        title += " (cowl shock only)"
+    plt.title(title)
     plt.legend()
     plt.show()
 
-def plot_pt_vs_alpha(cases,use_immediate_normal=False,):
+def plot_pt_vs_alpha(cases, use_terminal_shock=True):
     """
     Plot total pressure recovery vs alpha.
     """
@@ -2250,8 +2255,8 @@ def plot_pt_vs_alpha(cases,use_immediate_normal=False,):
         if not case["success"]:
             continue
         xs.append(case["alpha_deg"])
-        if use_immediate_normal:
-            ys.append(case["pt_frac_after_immediate_normal_shock"])
+        if use_terminal_shock:
+            ys.append(case["pt_frac_after_terminal_shock"])
         else:
             ys.append(case["pt_frac_after_cowl_shock"])
 
@@ -2260,7 +2265,12 @@ def plot_pt_vs_alpha(cases,use_immediate_normal=False,):
     plt.grid(True)
     plt.xlabel("Alpha [deg]")
     plt.ylabel("pt/pt0")
-    plt.title("Total Pressure Recovery vs Alpha")
+    title = "Total Pressure Recovery vs Alpha"
+    if use_terminal_shock:
+        title += " (cowl shock + terminal diffuser shock)"
+    else:
+        title += " (cowl shock only)"
+    plt.title(title)
     plt.show()
 
 
@@ -2336,7 +2346,7 @@ else:
             alpha_deg=5.0,
             p_back=p_back_sweep,
         )
-        plot_pt_vs_mach(cases_mach, use_immediate_normal=True)
+        plot_pt_vs_mach(cases_mach, use_terminal_shock=True)
 
         # pt vs alpha at fixed Mach
         alpha_sweep = np.linspace(0.0, 10.0, 17)
@@ -2347,4 +2357,4 @@ else:
             M0=5.0,
             p_back=p_back_sweep,
         )
-        plot_pt_vs_alpha(cases_alpha, use_immediate_normal=True)
+        plot_pt_vs_alpha(cases_alpha, use_terminal_shock=True)

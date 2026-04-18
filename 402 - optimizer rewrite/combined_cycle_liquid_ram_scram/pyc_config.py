@@ -116,7 +116,7 @@ DESIGN PARAMETERS
 """
 
 INLET_DESIGN_M0                    = 5
-INLET_DESIGN_ALT_M                 = 12_000.0
+INLET_DESIGN_ALT_M                 = 18_000.0
 INLET_DESIGN_ALPHA_DEG             = 4.0
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 4.0
 INLET_DESIGN_MDOT_KGS              = 10.0     # design-point air mass flow [kg/s]
@@ -129,13 +129,18 @@ INLET_SHOCK_FOCUS_FACTOR           = 1.18
 DIFFUSER_AREA_RATIO = 1.5
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 2.5
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 5.0
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4.0
+
+
+COMBUSTOR_L_STAR_DEFAULT = 1.25
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.92   # combustion efficiency
 ETA_NOZZLE_CV        = 0.97   # nozzle velocity coefficient (Cv)
 NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV', or 'CD_CV'
 ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
+
+PHI_DEFAULT = 0.5
 
 # Mode transition (default; overridable per-call in pyc_run.analyze)
 M_TRANSITION = 5.2
@@ -146,4 +151,4 @@ RAM_COMBUSTOR_EXIT_MN = 0.6
 
 # Operating range
 M_MIN = 2.0
-M_MAX = 5.5
+M_MAX = 5.0

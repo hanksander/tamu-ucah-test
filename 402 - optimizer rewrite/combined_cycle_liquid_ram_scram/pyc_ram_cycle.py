@@ -41,6 +41,18 @@ class RayleighCombustorCalcs(om.ExplicitComponent):
     RAM-mode combustor using the local Rayleigh-flow combustor model.
     """
 
+    _FD_INPUTS = (
+        'Fl_I:tot:T',
+        'Fl_I:tot:P',
+        'Fl_I:stat:MN',
+        'Fl_I:FAR',
+        'area_ratio',
+    )
+    _MASS_DEPENDENT_OUTPUTS = (
+        'Fl_O:stat:area',
+        'Fl_O:stat:W',
+    )
+
     _FLOW_OUTPUTS = (
         ('Fl_O:tot:h', 'J/kg', 1.0e6),
         ('Fl_O:tot:T', 'K', 1200.0),
@@ -107,7 +119,20 @@ class RayleighCombustorCalcs(om.ExplicitComponent):
         self.add_output('Wfuel', val=0.1, units='kg/s')
         self.add_output('choked', val=0.0)
 
-        self.declare_partials('*', '*', method='fd')
+        for out_name, _, _ in self._FLOW_OUTPUTS:
+            for in_name in self._FD_INPUTS:
+                self.declare_partials(out_name, in_name, method='fd')
+        for out_name in self._MASS_DEPENDENT_OUTPUTS:
+            self.declare_partials(out_name, 'Fl_I:stat:W', method='fd')
+        self.declare_partials('Wfuel', 'Fl_I:stat:W', method='fd')
+        self.declare_partials('Wfuel', 'Fl_I:FAR', method='fd')
+        for in_name in self._FD_INPUTS:
+            self.declare_partials('choked', in_name, method='fd')
+
+        # Composition is a pass-through from the inlet state; only declare the
+        # matching dependencies instead of a full output-input Cartesian product.
+        self.declare_partials('Fl_O:tot:composition', 'Fl_I:tot:composition', method='fd')
+        self.declare_partials('Fl_O:stat:composition', 'Fl_I:stat:composition', method='fd')
 
     @staticmethod
     def _entropy(thermo, T, phi, P):
@@ -228,30 +253,54 @@ class DiffuserTerminalShock(om.ExplicitComponent):
         self.add_output('ram_recovery', val=0.5)
         self.add_output('MN_exit', val=0.3)
         self.add_output('Pt_after_cowl_Pa', val=1e5, units='Pa')
+        self.add_output('M_after_cowl', val=2.0)
+        self.add_output('Tt_after_cowl', val=1000.0, units='K')
         self.add_output('x_shock', val=0.0)
         self.add_output('unstart_flag', val=0.0)
         self.declare_partials('*', '*', method='fd')
+        self._cached_inputs = None
+        self._cached_fs0 = None
+        self._cached_case = None
 
-    def compute(self, inputs, outputs):
-        design  = self.options['inlet_design']
-        alpha   = self.options['alpha_deg']
-        iso_pt  = self.options['isolator_pt_recovery']
-        Ps_back = float(inputs['Ps_back'][0])
-        M0      = float(inputs['M0'][0])
-        alt_m   = float(inputs['alt_m'][0])
-        fs0     = _inlet2.freestream_state(M0, alt_m)
-        Pt0     = float(fs0['pt0'])
+    def _evaluate_case(self, M0, alt_m, Ps_back):
+        cached_inputs = self._cached_inputs
+        if cached_inputs is not None:
+            if (
+                cached_inputs[0] == M0
+                and cached_inputs[1] == alt_m
+                and cached_inputs[2] == Ps_back
+            ):
+                return self._cached_fs0, self._cached_case
 
+        design = self.options['inlet_design']
+        alpha = self.options['alpha_deg']
+        fs0 = _inlet2.freestream_state(M0, alt_m)
         case = _inlet2.evaluate_fixed_geometry_at_condition(
             design, M0=M0, altitude_m=alt_m, alpha_deg=alpha,
             p_back=Ps_back,
         )
+        self._cached_inputs = (M0, alt_m, Ps_back)
+        self._cached_fs0 = fs0
+        self._cached_case = case
+        return fs0, case
+
+    def compute(self, inputs, outputs):
+        iso_pt  = self.options['isolator_pt_recovery']
+        Ps_back = float(inputs['Ps_back'][0])
+        M0      = float(inputs['M0'][0])
+        alt_m   = float(inputs['alt_m'][0])
+        fs0, case = self._evaluate_case(M0, alt_m, Ps_back)
+        Pt0     = float(fs0['pt0'])
+        Tt0     = float(fs0['Tt0'])
+        outputs['Tt_after_cowl'] = Tt0
 
         if not case.get('success', False):
             status = case.get('status', 'unknown')
             term   = case.get('terminal', {})
             Pt_ac  = case.get('Pt_after_cowl',
                               term.get('Pt_after_shock', 1.0))
+            outputs['Pt_after_cowl_Pa'] = Pt_ac
+            outputs['M_after_cowl'] = float(case.get('M_after_cowl_shock', np.nan))
             if status == 'expelled':
                 # Inlet unstart: the terminal shock cannot be contained in the
                 # diffuser, so a bow shock stands ahead of the cowl at the
@@ -276,7 +325,6 @@ class DiffuserTerminalShock(om.ExplicitComponent):
                 outputs['MN_exit']      = 0.3
                 outputs['unstart_flag'] = +1.0
                 outputs['x_shock']       = 0.0
-            outputs['Pt_after_cowl_Pa'] = Pt_ac
             return
 
         pt_frac_total = case['pt_frac_after_terminal_shock'] * iso_pt
@@ -286,6 +334,7 @@ class DiffuserTerminalShock(om.ExplicitComponent):
         outputs['ram_recovery']     = float(pt_frac_total)
         outputs['MN_exit']          = MN_exit
         outputs['Pt_after_cowl_Pa'] = float(case['Pt_after_cowl'])
+        outputs['M_after_cowl']     = float(case['M_after_cowl_shock'])
         outputs['x_shock']          = float(case['x_terminal_shock'])
         outputs['unstart_flag']     = 0.0
 
@@ -303,27 +352,10 @@ class RamCycle(pyc.Cycle):
         self.add_subsystem('nozz',  pyc.Nozzle(nozzType='CD', lossCoef='Cv'))
         self.add_subsystem('perf',  pyc.Performance(num_nozzles=1, num_burners=1))
 
-        # Terminal-shock diffuser coupled to combustor inlet static pressure.
-        # Lazy import to avoid circularity: pyc_run imports RamCycle.
-        from pyc_run import _get_inlet_design
-        self.add_subsystem(
-            'diff',
-            DiffuserTerminalShock(
-                inlet_design=_get_inlet_design(),
-                isolator_pt_recovery=ISOLATOR_PT_RECOVERY,
-                alpha_deg=INLET_DESIGN_ALPHA_DEG,
-            ),
-        )
-
         # Flow connections
         self.pyc_connect_flow('fc.Fl_O',     'inlet.Fl_I')
         self.pyc_connect_flow('inlet.Fl_O',  'burner.Fl_I')
         self.pyc_connect_flow('burner.Fl_O', 'nozz.Fl_I')
-
-        # Close the Ps_back <-> ram_recovery loop.
-        self.connect('inlet.Fl_O:stat:P', 'diff.Ps_back')
-        self.connect('diff.ram_recovery',  'inlet.ram_recovery')
-        self.connect('diff.MN_exit',       'inlet.MN')
 
         # Scalar connections for Performance
         self.connect('fc.Fl_O:tot:P',     'perf.Pt2')
@@ -335,5 +367,5 @@ class RamCycle(pyc.Cycle):
         # Ambient static pressure drives nozzle perfect expansion
         self.connect('fc.Fl_O:stat:P', 'nozz.Ps_exhaust')
 
-        self.set_order(['fc', 'inlet', 'diff', 'burner', 'nozz', 'perf'])
+        self.set_order(['fc', 'inlet', 'burner', 'nozz', 'perf'])
         super().setup()

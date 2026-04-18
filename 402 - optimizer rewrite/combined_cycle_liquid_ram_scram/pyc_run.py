@@ -116,7 +116,7 @@ _scram_prob = None
 
 def _make_problem(CycleClass):
     """Build and set up one pyCycle Problem."""
-    prob = om.Problem()
+    prob = om.Problem(reports=False)
     prob.model = CycleClass(design=True)
 
     # Newton with solve_subsystems=True lets each pyCycle element's own
@@ -212,9 +212,8 @@ def compute_precowl_state(M0, alt_m, alpha_deg=0.0):
 
 def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
     """
-    RAM mode: returns (None, None). ram_recovery and MN_exit are driven by
-    DiffuserTerminalShock inside RamCycle's Newton loop; analyze() sets
-    diff.M0 / diff.alt_m instead.
+    RAM mode: returns (None, None). analyze() closes the inlet/back-pressure
+    consistency with a bracketed scalar solve outside the pyCycle model.
 
     SCRAM mode: explicit (shock is swallowed past the throat).
     """
@@ -240,6 +239,181 @@ def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
     Pt_ratio = float(case['pt_frac_after_reflection_cascade'])
     exit_MN  = float(case['M_after_reflection_cascade'])
     return Pt_ratio, exit_MN
+
+
+def _ram_inlet_case_to_cycle_inputs(case, M0, Pt0, iso_pt=ISOLATOR_PT_RECOVERY):
+    """
+    Map a frozen-geometry inlet evaluation to the pyCycle inlet inputs used by
+    the RAM outer closure.
+    """
+    if case.get('success', False):
+        return {
+            'ram_recovery': float(case['pt_frac_after_terminal_shock']) * iso_pt,
+            'MN_exit': float(np.clip(case['M_at_combustor_face'], 0.05, 0.95)),
+            'Pt_after_cowl': float(case['Pt_after_cowl']),
+            'M_after_cowl': float(case['M_after_cowl_shock']),
+            'Tt_after_cowl': float(case['Tt0']),
+            'x_shock': float(case['x_terminal_shock']),
+            'unstart_flag': 0.0,
+            'status': str(case.get('status', 'normal')),
+            'terminal': case.get('terminal'),
+        }
+
+    status = case.get('status', 'unknown')
+    term = case.get('terminal', {})
+    Pt_ac = float(case.get('Pt_after_cowl', term.get('Pt_after_shock', 1.0)))
+
+    if status == 'expelled':
+        _, _, _, _, pt_ratio_bow = _inlet2.normal_shock(M0)
+        ram_recovery = float(pt_ratio_bow) * iso_pt
+        inlet_mn = float(np.clip(term.get('M_exit', term.get('M_sub', 0.05)), 0.05, 0.95))
+        unstart_flag = +1.0
+        x_shock = float(term.get('x_s', 0.0))
+    elif status == 'swallowed':
+        Pt_after_shock = float(term.get('Pt_after_shock', Pt_ac))
+        ram_recovery = (Pt_after_shock / max(Pt0, 1.0e-12)) * iso_pt
+        inlet_mn = float(np.clip(term.get('M_exit', term.get('M_sub', 0.95)), 0.05, 0.95))
+        unstart_flag = -1.0
+        x_shock = float(term.get('x_s', 0.0))
+    else:
+        ram_recovery = 0.05 * iso_pt
+        inlet_mn = 0.3
+        unstart_flag = +1.0
+        x_shock = 0.0
+
+    return {
+        'ram_recovery': float(ram_recovery),
+        'MN_exit': float(inlet_mn),
+        'Pt_after_cowl': Pt_ac,
+        'M_after_cowl': float(case.get('M_after_cowl_shock', np.nan)),
+        'Tt_after_cowl': float(term.get('Tt0', np.nan)),
+        'x_shock': x_shock,
+        'unstart_flag': unstart_flag,
+        'status': str(status),
+        'terminal': term,
+    }
+
+
+def _evaluate_ram_outer_residual(prob, design, M0, altitude_m, p_back):
+    """
+    Run one RAM trial at a specified combustor-face back pressure.
+    """
+    case = _inlet2.evaluate_fixed_geometry_at_condition(
+        design,
+        M0=M0,
+        altitude_m=altitude_m,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG,
+        p_back=float(p_back),
+    )
+
+    flight = _inlet2.freestream_state(M0, altitude_m)
+    inlet_inputs = _ram_inlet_case_to_cycle_inputs(case, M0, float(flight['pt0']))
+    inlet_inputs['Tt_after_cowl'] = float(flight['Tt0'])
+
+    prob.set_val('inlet.ram_recovery', inlet_inputs['ram_recovery'])
+    prob.set_val('inlet.MN', inlet_inputs['MN_exit'])
+    prob.run_model()
+
+    cycle_ps_back = float(prob.get_val('inlet.Fl_O:stat:P', units='Pa')[0])
+    return {
+        'residual': cycle_ps_back - float(p_back),
+        'cycle_ps_back': cycle_ps_back,
+        'case': case,
+        'inlet_inputs': inlet_inputs,
+    }
+
+
+def _solve_ram_outer_closure(prob, design, M0, altitude_m,
+                             rel_tol=1.0e-5, abs_tol_pa=50.0, max_iter=30):
+    """
+    Close the RAM inlet/back-pressure consistency with a bracketed scalar solve
+    on combustor-face static pressure.
+    """
+    seed_case = _inlet2.evaluate_fixed_geometry_at_condition(
+        design,
+        M0=M0,
+        altitude_m=altitude_m,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG,
+        p_back=1.0,
+    )
+    terminal = seed_case.get('terminal', {})
+    p_min = float(terminal.get('Ps_min', np.nan))
+    p_max = float(terminal.get('Ps_max', np.nan))
+
+    if not np.isfinite(p_min) or not np.isfinite(p_max) or p_max <= p_min:
+        raise RuntimeError('Could not determine a valid RAM back-pressure bracket.')
+
+    span = max(p_max - p_min, 1.0)
+    p_lo = p_min + 1.0e-4 * span
+    p_hi = p_max - 1.0e-4 * span
+    if p_hi <= p_lo:
+        p_lo = p_min
+        p_hi = p_max
+
+    lo_eval = _evaluate_ram_outer_residual(prob, design, M0, altitude_m, p_lo)
+    hi_eval = _evaluate_ram_outer_residual(prob, design, M0, altitude_m, p_hi)
+
+    best = min((lo_eval, hi_eval), key=lambda item: abs(item['residual']))
+    if abs(best['residual']) <= max(abs_tol_pa, rel_tol * max(best['cycle_ps_back'], 1.0)):
+        return best
+
+    if lo_eval['residual'] == 0.0:
+        return lo_eval
+    if hi_eval['residual'] == 0.0:
+        return hi_eval
+
+    if np.sign(lo_eval['residual']) == np.sign(hi_eval['residual']):
+        return best
+
+    for _ in range(max_iter):
+        p_mid = 0.5 * (p_lo + p_hi)
+        mid_eval = _evaluate_ram_outer_residual(prob, design, M0, altitude_m, p_mid)
+        if abs(mid_eval['residual']) < abs(best['residual']):
+            best = mid_eval
+
+        if abs(mid_eval['residual']) <= max(abs_tol_pa, rel_tol * max(mid_eval['cycle_ps_back'], 1.0)):
+            return mid_eval
+
+        if np.sign(mid_eval['residual']) == np.sign(lo_eval['residual']):
+            p_lo = p_mid
+            lo_eval = mid_eval
+        else:
+            p_hi = p_mid
+            hi_eval = mid_eval
+
+    return best
+
+
+def _build_air_state_from_totals(M, Tt, Pt, thermo=None):
+    """
+    Reconstruct an air FlowState from total conditions and Mach.
+
+    Used for reporting pre-combustor diagnostics at stations not represented
+    by an explicit pyCycle flow port, such as the diffuser entrance.
+    """
+    if thermo is None:
+        thermo = get_thermo()
+
+    gamma = AIR_GAM
+    gas_r = AIR_R
+    T = float(Tt)
+    P = float(Pt)
+
+    for _ in range(3):
+        T = isentropic_T(Tt, M, gamma)
+        P = isentropic_P(Pt, M, gamma)
+        gamma = thermo.gamma(T, 0.0, P)
+        gas_r = thermo.R(T, 0.0, P)
+
+    return FlowState(
+        M=float(M),
+        T=float(T),
+        P=float(P),
+        Pt=float(Pt),
+        Tt=float(Tt),
+        gamma=float(gamma),
+        R=float(gas_r),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -443,9 +617,15 @@ def analyze(
     )
 
     # Inlet shock recovery + exit Mach
+    diffuser_entry_case = None
+    ram_closure = None
     ram_recovery, inlet_MN = compute_inlet_conditions(
         M0, altitude_m, mode, ramp_angles
     )
+    if mode != 'ram':
+        _, diffuser_entry_case = compute_precowl_state(
+            M0, altitude_m, alpha_deg=0.0
+        )
 
     prob = _get_problem(mode)
 
@@ -459,25 +639,22 @@ def analyze(
     prob.set_val('fc.alt', altitude_m * M2FT, units='ft')
     prob.set_val('fc.MN',  M0)
     prob.set_val('fc.W',   W_lbms, units='lbm/s')
+    prob.set_val("burner.Fl_I:FAR", FAR)
+    if mode == "ram":
+        prob.set_val("burner.area_ratio", combustor_area_ratio)
 
     # ── Inlet ────────────────────────────────────────────────────────────────
     if mode == 'ram':
-        # ram_recovery and inlet.MN are driven by DiffuserTerminalShock via
-        # the Newton loop in RamCycle. Feed it M0 / altitude so it can rerun
-        # the frozen shock chain at the current flight condition.
-        prob.set_val('diff.M0',    M0)
-        prob.set_val('diff.alt_m', altitude_m, units='m')
+        ram_closure = _solve_ram_outer_closure(prob, design, M0, altitude_m)
     else:
         prob.set_val('inlet.ram_recovery', ram_recovery)
         prob.set_val('inlet.MN',           inlet_MN)
 
     # ── Combustor ────────────────────────────────────────────────────────────
-    prob.set_val('burner.Fl_I:FAR', FAR)
-    if mode == 'ram':
-        prob.set_val('burner.area_ratio', combustor_area_ratio)
 
     # ── Solve ────────────────────────────────────────────────────────────────
-    prob.run_model()
+    if mode != 'ram':
+        prob.run_model()
 
     def _K(p):  return float(prob.get_val(p, units='degK')[0])
     def _Pa(p): return float(prob.get_val(p, units='Pa')[0])
@@ -583,6 +760,23 @@ def analyze(
         F_sp = Fn_N / max(W_kgs, 1e-12)
         Isp  = Fn_N / max(Wfuel * G0, 1e-12)
 
+    diffuser_entry_station = None
+    if mode == 'ram':
+        try:
+            diffuser_entry_station = _build_air_state_from_totals(
+                M=ram_closure['inlet_inputs']['M_after_cowl'],
+                Tt=ram_closure['inlet_inputs']['Tt_after_cowl'],
+                Pt=ram_closure['inlet_inputs']['Pt_after_cowl'],
+            )
+        except Exception:
+            diffuser_entry_station = None
+    elif diffuser_entry_case and diffuser_entry_case.get('success', False):
+        diffuser_entry_station = _build_air_state_from_totals(
+            M=diffuser_entry_case['M_after_cowl_shock'],
+            Tt=diffuser_entry_case['Tt0'],
+            Pt=diffuser_entry_case['Pt_after_cowl'],
+        )
+
     choked = False
     if mode == 'ram':
         try:
@@ -630,35 +824,47 @@ def analyze(
         mode=mode, M0=M0, altitude=altitude_m, phi=phi, M_trans=M_trans,
         Isp=Isp, F_sp=F_sp, thrust=Fn_N,
         mdot_air=W_kgs, mdot_fuel=Wfuel,
-        eta_pt=(float(prob.get_val('diff.ram_recovery')[0])
+        eta_pt=(ram_closure['inlet_inputs']['ram_recovery']
                 if mode == 'ram' else ram_recovery),
         choked=choked,
+        x_shock=(ram_closure['inlet_inputs']['x_shock'] if mode == 'ram' else np.nan),
+        unstart_flag=(ram_closure['inlet_inputs']['unstart_flag'] if mode == 'ram' else np.nan),
         T_stations={
             0: _K('fc.Fl_O:stat:T'),
+            2: (float(diffuser_entry_station.T)
+                if diffuser_entry_station is not None else np.nan),
             3: _K('inlet.Fl_O:stat:T'),
             4: _K('burner.Fl_O:stat:T'),
             9: float(nozzle_exit['T']),
         },
         Tt_stations={
             0: _K('fc.Fl_O:tot:T'),
+            2: (float(diffuser_entry_station.Tt)
+                if diffuser_entry_station is not None else np.nan),
             3: _K('inlet.Fl_O:tot:T'),
             4: _K('burner.Fl_O:tot:T'),
             9: float(nozzle_exit['Tt']),
         },
         P_stations={
             0: _Pa('fc.Fl_O:stat:P'),
+            2: (float(diffuser_entry_station.P)
+                if diffuser_entry_station is not None else np.nan),
             3: _Pa('inlet.Fl_O:stat:P'),
             4: _Pa('burner.Fl_O:stat:P'),
             9: float(nozzle_exit['P']),
         },
         M_stations={
             0: M0,
+            2: (float(diffuser_entry_station.M)
+                if diffuser_entry_station is not None else np.nan),
             3: _mn('inlet.Fl_O:stat:MN'),
             4: _mn('burner.Fl_O:stat:MN'),
             9: float(nozzle_exit['M']),
         },
         Pt_stations={
             0: _Pa('fc.Fl_O:tot:P'),
+            2: (float(diffuser_entry_station.Pt)
+                if diffuser_entry_station is not None else np.nan),
             3: _Pa('inlet.Fl_O:tot:P'),
             4: _Pa('burner.Fl_O:tot:P'),
             9: float(nozzle_exit['Pt']),
@@ -719,8 +925,8 @@ def _print_cycle(r):
     print(f"  {'Stn':>8}  {'M':>7}  {'Ts [K]':>8}  {'Tt [K]':>8}  "
           f"{'Ps [kPa]':>10}  {'Pt [kPa]':>10}")
     print(f"  {'-'*64}")
-    lbl = {0: 'Free', 3: 'Comb.in', 4: 'Comb.out', 9: 'Nozzle'}
-    for s in (0, 3, 4, 9):
+    lbl = {0: 'Free', 2: 'Post-cowl', 3: 'Comb.in', 4: 'Comb.out', 9: 'Nozzle'}
+    for s in (0, 2, 3, 4, 9):
         print(f"  {lbl[s]:>8}  {r['M_stations'][s]:>7.3f}  "
               f"{r['T_stations'][s]:>8.1f}  {r['Tt_stations'][s]:>8.1f}  "
               f"{r['P_stations'][s]/1e3:>10.2f}  "
@@ -773,12 +979,15 @@ def _print_cycle(r):
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
+
+
+    from pyc_config import PHI_DEFAULT
     print("=" * 60)
     print("  pyCycle Dual-Mode Ram/Scramjet")
     print("=" * 60)
 
-    print("\n--- Design point, phi=0.8 ---")
-    analyze(M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=0.8, M_transition=5.2, verbose=True)
+    print("\n--- Design Point Performance")
+    analyze(M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT, M_transition=5.2, verbose=True)
 
 
 

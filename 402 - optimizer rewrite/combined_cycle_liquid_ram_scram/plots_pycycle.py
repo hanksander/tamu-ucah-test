@@ -14,6 +14,7 @@ Figures saved to ./figures_pycycle/.
 import os
 import sys
 import argparse
+import time
 import warnings
 
 import math
@@ -29,7 +30,7 @@ sys.path.insert(0, _HERE)
 import pyc_run
 from pyc_config import (
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M, INLET_DESIGN_ALPHA_DEG,
-    INLET_DESIGN_WIDTH_M,
+    INLET_DESIGN_WIDTH_M, COMBUSTOR_L_STAR_DEFAULT,
     M_TRANSITION, M_MIN, M_MAX,
 )
 import nozzle_design
@@ -51,9 +52,8 @@ plt.rcParams.update({
     'lines.linewidth':  1.8,
 })
 
-PHI_DEFAULT = 0.8
-ALT_DEFAULT = 18_000.0
-COMBUSTOR_L_STAR_DEFAULT = 1.5
+from pyc_config import PHI_DEFAULT, INLET_DESIGN_ALT_M
+ALT_DEFAULT = INLET_DESIGN_ALT_M #18_000.0
 NOZZLE_CONVERGING_LENGTH_DEFAULT = None
 NOZZLE_DIVERGING_LENGTH_DEFAULT = None
 NOZZLE_THROAT_ANGLE_DEFAULT = 25.0
@@ -79,11 +79,17 @@ def _save(fig, name):
 
 def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT):
     results = []
-    for M in mach_range:
+    total = len(mach_range)
+    for idx, M in enumerate(mach_range, start=1):
+        t0 = time.perf_counter()
         try:
             r = pyc_run.analyze(M0=float(M), altitude_m=altitude, phi=phi)
+            dt = time.perf_counter() - t0
+            mode = r.get('mode', '?') if isinstance(r, dict) else '?'
+            print(f'    [{idx:02d}/{total:02d}] M={M:.2f} ({mode}) in {dt:.1f}s')
         except Exception as e:
-            print(f'  [warn] M={M:.2f} failed: {e}')
+            dt = time.perf_counter() - t0
+            print(f'  [warn] [{idx:02d}/{total:02d}] M={M:.2f} failed after {dt:.1f}s: {e}')
             r = None
         results.append(r)
     return results
@@ -250,20 +256,34 @@ def _flowpath_layout(
 
     throat_h  = float(abs(t_up[1] - t_lo[1]))
     throat_x0 = max(t_up[0], t_lo[0])
-    y_center  = 0.5 * (t_up[1] + t_lo[1])
+    inlet_center_y  = 0.5 * (t_up[1] + t_lo[1])
 
     # Subsonic diffuser contour between inlet throat and combustor face.
     diff = design.get('diffuser')
     if diff is None:
         diff_len    = 0.0
         diff_h_exit = throat_h
-        diff_upper  = np.array([[throat_x0, y_center + 0.5 * throat_h]])
-        diff_lower  = np.array([[throat_x0, y_center - 0.5 * throat_h]])
+        diff_upper_raw = np.array([[throat_x0, inlet_center_y + 0.5 * throat_h]])
+        diff_lower_raw = np.array([[throat_x0, inlet_center_y - 0.5 * throat_h]])
+        diff_h_stations = np.array([throat_h], dtype=float)
     else:
         diff_len    = float(diff['length_m'])
         diff_h_exit = float(diff['h_exit'])
-        diff_upper  = np.asarray(diff['upper_wall_xy'], dtype=float)
-        diff_lower  = np.asarray(diff['lower_wall_xy'], dtype=float)
+        diff_upper_raw = np.asarray(diff['upper_wall_xy'], dtype=float)
+        diff_lower_raw = np.asarray(diff['lower_wall_xy'], dtype=float)
+        diff_h_stations = np.asarray(diff['h_stations'], dtype=float)
+
+    # Keep the inlet geometry fixed, then anchor the diffuser/combustor/nozzle
+    # roof to the cowl-ending height so the upper wall stays flush downstream.
+    flowpath_top_y = float(diff_upper_raw[0, 1])
+    diff_upper = np.column_stack([
+        diff_upper_raw[:, 0],
+        np.full(diff_upper_raw.shape[0], flowpath_top_y, dtype=float),
+    ])
+    diff_lower = np.column_stack([
+        diff_lower_raw[:, 0],
+        flowpath_top_y - diff_h_stations,
+    ])
 
     inlet_floor = _build_inlet_floor_curve(brk2, foot, diff_lower)
     inlet_roof = _build_inlet_roof_curve(cowl, t_up, diff_upper)
@@ -291,6 +311,7 @@ def _flowpath_layout(
     duct_x1 = duct_x0 + duct_len
     duct_area = float(combustor['cross_section_area_m2'])
     duct_radius = float(combustor['radius_m'])
+    duct_center_y = flowpath_top_y - duct_radius
 
     A_exit = float(design_cycle['nozzle_exit_area'])
     A_inlet = duct_area
@@ -324,10 +345,12 @@ def _flowpath_layout(
         'throat_x0': throat_x0,
         'diff_upper': diff_upper,
         'diff_lower': diff_lower,
+        'diff_h_stations': diff_h_stations,
         'diff_len':   diff_len,
         'diff_h_exit': diff_h_exit,
         'duct_area': duct_area,
         'duct_radius': duct_radius,
+        'duct_center_y': duct_center_y,
         'duct_x0': duct_x0,
         'duct_len': duct_len,
         'duct_x1': duct_x1,
@@ -337,7 +360,8 @@ def _flowpath_layout(
         'A_exit': A_exit,
         'bell': bell,
         'bx': bx,
-        'y_center': y_center,
+        'flowpath_top_y': flowpath_top_y,
+        'inlet_center_y': inlet_center_y,
         'station_x': {
             0: float(fore[0]),
             2: float(throat_x0),
@@ -347,7 +371,7 @@ def _flowpath_layout(
         },
         'station_labels': {
             0: 'Freestream',
-            2: 'Throat',
+            2: 'Post-cowl',
             3: 'Combustor face',
             4: 'Combustor exit',
             9: 'Nozzle exit',
@@ -392,7 +416,7 @@ def fig_inlet_pt_vs_mach(design):
     cases = _inlet2.sweep_fixed_geometry_vs_mach(
         design, INLET_DESIGN_ALT_M, mach_vals, INLET_DESIGN_ALPHA_DEG,
         _design_back_pressure(design))
-    _inlet2.plot_pt_vs_mach(cases, use_immediate_normal=True)
+    _inlet2.plot_pt_vs_mach(cases, use_terminal_shock=True)
     fig = plt.gcf()
     _save(fig, 'fig03_inlet_pt_vs_mach')
 
@@ -403,7 +427,7 @@ def fig_inlet_pt_vs_alpha(design):
     cases = _inlet2.sweep_fixed_geometry_vs_alpha(
         design, INLET_DESIGN_ALT_M, alpha_vals, INLET_DESIGN_M0,
         _design_back_pressure(design))
-    _inlet2.plot_pt_vs_alpha(cases, use_immediate_normal=True)
+    _inlet2.plot_pt_vs_alpha(cases, use_terminal_shock=True)
     fig = plt.gcf()
     _save(fig, 'fig04_inlet_pt_vs_alpha')
 
@@ -462,13 +486,13 @@ def fig_flowpath(
     A_inlet   = layout['A_inlet']
     bell      = layout['bell']
     bx        = layout['bx']
-    y_center  = layout['y_center']
+    duct_center_y = layout['duct_center_y']
     r_nozz    = bell['radius']
     duct_h    = 2.0 * duct_radius
-    duct_y_lo = y_center - duct_radius
+    duct_y_lo = duct_center_y - duct_radius
     h_nozz    = 2.0 * r_nozz
-    y_nozz_up = y_center + r_nozz
-    y_nozz_lo = y_center - r_nozz
+    y_nozz_up = duct_center_y + r_nozz
+    y_nozz_lo = duct_center_y - r_nozz
 
     fig, ax = plt.subplots(figsize=(16, 5.5))
 
@@ -507,59 +531,6 @@ def fig_flowpath(
     cowl_shock_end = foot
     ax.plot([cowl[0], cowl_shock_end[0]], [cowl[1], cowl_shock_end[1]],
             '-.', color='darkred', lw=1.3, label='Cowl shock')
-
-    # ── R2 reflection cascade rays (isolator) ───────────────────────────────
-    # The cowl shock hits the floor at `cowl_shock_end`. From there, the
-    # reflection cascade begins: each reflection is a wall-anchored oblique
-    # shock whose angle relative to the incoming flow is beta_rel. We
-    # ray-march wall to wall to obtain true bounce geometry.
-    refls = design.get('reflection_list', []) or []
-    if refls:
-        phi_floor = math.radians(design.get('reflection_phi_floor_deg', 0.0))
-        phi_roof  = math.radians(design.get('reflection_phi_roof_deg', 0.0))
-        # Floor line anchor = foot F (ramp-2 end); roof line anchor = cowl C
-        def _ray_wall_intersect(P, dir_rad, Q, wall_rad):
-            d = np.array([math.cos(dir_rad), math.sin(dir_rad)])
-            w = np.array([math.cos(wall_rad), math.sin(wall_rad)])
-            M_mat = np.array([[d[0], -w[0]], [d[1], -w[1]]])
-            rhs = np.array([Q[0] - P[0], Q[1] - P[1]])
-            try:
-                t, _ = np.linalg.solve(M_mat, rhs)
-            except np.linalg.LinAlgError:
-                return None
-            if t <= 0:
-                return None
-            return P + t * d
-
-        current = np.asarray(cowl_shock_end, dtype=float).copy()
-        ray_label_used = False
-        for r in refls:
-            if r.get('wall') == 'terminal':
-                # Terminal normal shock: draw vertical-ish line across duct
-                ax.plot([current[0], current[0]], [t_lo[1], t_up[1]],
-                        '-', color='darkmagenta', lw=1.6,
-                        label='Terminal normal'
-                        if not ray_label_used else None)
-                ray_label_used = True
-                break
-            flow_in = math.radians(r.get('flow_dir_in_deg', 0.0))
-            beta    = math.radians(r.get('beta_rel_deg', 0.0))
-            if r.get('wall') == 'floor':
-                # Shock emanates upward from floor into the flow:
-                # absolute direction = flow_in + beta
-                ray_dir = flow_in + beta
-                hit = _ray_wall_intersect(current, ray_dir, cowl,  phi_roof)
-            else:
-                # Shock emanates downward from roof:
-                ray_dir = flow_in - beta
-                hit = _ray_wall_intersect(current, ray_dir, foot, phi_floor)
-            if hit is None:
-                break
-            ax.plot([current[0], hit[0]], [current[1], hit[1]],
-                    ':', color='darkmagenta', lw=1.1,
-                    label='Reflected shocks' if not ray_label_used else None)
-            ray_label_used = True
-            current = hit
 
     # ── Subsonic diffuser walls (throat -> combustor face) ─────────────────
     ax.plot(inlet_floor[:, 0], inlet_floor[:, 1],
@@ -654,7 +625,8 @@ def fig_cad_model(
         n_points=n_points,
     )
 
-    y_center = layout['y_center']
+    flowpath_top_y = layout['flowpath_top_y']
+    duct_center_y = layout['duct_center_y']
     fore = layout['fore']
     cowl = layout['cowl']
     inlet_lower = layout['inlet_lower']
@@ -671,8 +643,8 @@ def fig_cad_model(
     diffuser_exit_radius = float(diff['exit_radius_m']) if diff is not None else float(duct_radius)
     half_width = 0.5 * throat_w
 
-    def _ring_to_xyz(x_val, ring_zy):
-        y = ring_zy[:, 1] + y_center
+    def _ring_to_xyz(x_val, ring_zy, center_y):
+        y = ring_zy[:, 1] + center_y
         z = ring_zy[:, 0]
         x = np.full_like(y, x_val, dtype=float)
         return np.column_stack([x, y, z])
@@ -785,10 +757,12 @@ def fig_cad_model(
     if diff is not None:
         xs = np.asarray(diff['x_stations'], dtype=float)
         areas = np.asarray(diff['A_stations'], dtype=float)
+        heights = np.asarray(layout['diff_h_stations'], dtype=float)
         blends = np.asarray(diff['section_blend_stations'], dtype=float)
         throat_x = float(xs[0])
-        inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=False)))
-        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True)))
+        throat_center_y = flowpath_top_y - 0.5 * throat_h
+        inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=False), throat_center_y))
+        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True), throat_center_y))
         diffuser_idx = np.linspace(0, len(xs) - 1, diffuser_section_count, dtype=int).tolist()
         diffuser_idx = sorted(set(diffuser_idx))
         if diffuser_idx[-1] != len(xs) - 1:
@@ -796,23 +770,24 @@ def fig_cad_model(
         for idx in diffuser_idx:
             if idx == 0:
                 continue
-            inner_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=False)))
-            outer_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=True)))
+            section_center_y = flowpath_top_y - 0.5 * float(heights[idx])
+            inner_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=False), section_center_y))
+            outer_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=True), section_center_y))
     else:
         throat_area = float(design['throat_area_actual_m2'])
-        inner_sections.append(_ring_to_xyz(duct_x0, _morph_ring(throat_area, 0.0, outer=False)))
-        outer_sections.append(_ring_to_xyz(duct_x0, _morph_ring(throat_area, 0.0, outer=True)))
+        inner_sections.append(_ring_to_xyz(duct_x0, _morph_ring(throat_area, 0.0, outer=False), duct_center_y))
+        outer_sections.append(_ring_to_xyz(duct_x0, _morph_ring(throat_area, 0.0, outer=True), duct_center_y))
 
-    inner_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius, ring_points)))
-    outer_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius + t, ring_points)))
+    inner_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius, ring_points), duct_center_y))
+    outer_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius + t, ring_points), duct_center_y))
 
     nozzle_idx = np.linspace(0, len(bx) - 1, nozzle_section_count, dtype=int).tolist()
     nozzle_idx = sorted(set(nozzle_idx))
     if nozzle_idx[-1] != len(bx) - 1:
         nozzle_idx.append(len(bx) - 1)
     for idx in nozzle_idx[1:]:
-        inner_sections.append(_ring_to_xyz(float(bx[idx]), _circle_ring(float(nozzle_r[idx]), ring_points)))
-        outer_sections.append(_ring_to_xyz(float(bx[idx]), _circle_ring(float(nozzle_r[idx]) + t, ring_points)))
+        inner_sections.append(_ring_to_xyz(float(bx[idx]), _circle_ring(float(nozzle_r[idx]), ring_points), duct_center_y))
+        outer_sections.append(_ring_to_xyz(float(bx[idx]), _circle_ring(float(nozzle_r[idx]) + t, ring_points), duct_center_y))
 
     meshes = []
     for ring_a, ring_b in zip(outer_sections[:-1], outer_sections[1:]):
@@ -902,11 +877,12 @@ def fig_mass_flows(results, mach_range):
 
 
 def fig_station_T(results, mach_range):
-    """Static and total temperatures at stations 0, 3, 4, 9."""
+    """Static and total temperatures at stations 0, 2, 3, 4, 9."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.0))
-    stations = [(0, 'Freestream'), (3, 'Inlet exit'),
-                (4, 'Burner exit'), (9, 'Nozzle exit')]
-    colors = ['navy', 'teal', 'firebrick', 'darkorange']
+    stations = [(0, 'Freestream'), (2, 'Post-cowl'),
+                (3, 'Combustor face'), (4, 'Burner exit'),
+                (9, 'Nozzle exit')]
+    colors = ['navy', 'slateblue', 'teal', 'firebrick', 'darkorange']
     for (s, lbl), c in zip(stations, colors):
         ax1.plot(mach_range, _arr(results, 'T_stations',  s),
                  'o-', color=c, label=f'{s}: {lbl}')
@@ -922,9 +898,10 @@ def fig_station_T(results, mach_range):
 
 def fig_station_Pt(results, mach_range):
     fig, ax = plt.subplots(figsize=(10, 5.0))
-    stations = [(0, 'Freestream'), (3, 'Inlet exit'),
-                (4, 'Burner exit'), (9, 'Nozzle exit')]
-    colors = ['navy', 'teal', 'firebrick', 'darkorange']
+    stations = [(0, 'Freestream'), (2, 'Post-cowl'),
+                (3, 'Combustor face'), (4, 'Burner exit'),
+                (9, 'Nozzle exit')]
+    colors = ['navy', 'slateblue', 'teal', 'firebrick', 'darkorange']
     for (s, lbl), c in zip(stations, colors):
         ax.semilogy(mach_range, _arr(results, 'Pt_stations', s) / 1e3,
                     'o-', color=c, label=f'{s}: {lbl}')
@@ -946,6 +923,47 @@ def fig_inlet_recovery_cycle(results, mach_range):
     ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     ax.set_ylim(bottom=0)
     _save(fig, 'inlet_recovery_vs_mach')
+
+
+def fig_ram_diagnostics(results, mach_range):
+    """Combustor choke state and terminal shock position through the RAM sweep."""
+    choked = _arr(results, 'choked')
+    x_shock = _arr(results, 'x_shock')
+    unstart = _arr(results, 'unstart_flag')
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.0))
+
+    ax1.plot(mach_range, choked, 'o-', color='firebrick')
+    ax1.set_xlabel('M0')
+    ax1.set_ylabel('Choked flag')
+    ax1.set_title('Combustor Choked vs Mach')
+    ax1.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.set_yticks([0.0, 1.0])
+
+    ax2.plot(mach_range, x_shock, 'o-', color='slateblue', label='x_shock')
+    ax2.set_xlabel('M0')
+    ax2.set_ylabel('Shock position x [m]')
+    ax2.set_title('Terminal Shock Position vs Mach')
+    ax2.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
+
+    valid = np.isfinite(unstart)
+    if np.any(valid):
+        expelled = valid & (unstart > 0.5)
+        swallowed = valid & (unstart < -0.5)
+        contained = valid & ~(expelled | swallowed)
+        if np.any(contained):
+            ax2.scatter(mach_range[contained], x_shock[contained],
+                        color='slateblue', s=28, zorder=3, label='contained')
+        if np.any(expelled):
+            ax2.scatter(mach_range[expelled], x_shock[expelled],
+                        color='darkred', marker='x', s=50, zorder=4, label='expelled')
+        if np.any(swallowed):
+            ax2.scatter(mach_range[swallowed], x_shock[swallowed],
+                        color='darkorange', marker='s', s=32, zorder=4, label='swallowed')
+    ax2.legend(fontsize=8)
+
+    _save(fig, 'ram_diagnostics_vs_mach')
 
 
 def fig_nozzle_geom_vs_mach(results, mach_range):
@@ -995,7 +1013,7 @@ def _plot_engine_profile(
         n_points=NOZZLE_BELL_POINTS_DEFAULT,
     )
 
-    stations = (0, 3, 4, 9)
+    stations = (0, 2, 3, 4, 9)
     x = np.array([layout['station_x'][s] for s in stations], dtype=float)
     y_static = np.array([design_cycle[quantity_key][s] for s in stations], dtype=float)
     y_total = np.array([design_cycle[total_key][s] for s in stations], dtype=float)
@@ -1082,10 +1100,11 @@ def main():
     )
 
     # Mach sweep
-    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.5), 10)
+    sweep_altitude_m = 24_000.0
+    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 8)
     print(f'  Mach sweep over {len(mach_range)} points '
-          f'at alt={ALT_DEFAULT/1e3:.0f} km, φ={PHI_DEFAULT}')
-    results = mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT)
+          f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
+    results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT)
 
     print('\n  writing figures:')
     fig_flowpath(
@@ -1102,6 +1121,7 @@ def main():
     fig_mass_flows(results, mach_range)
     fig_station_T(results, mach_range)
     fig_station_Pt(results, mach_range)
+    fig_ram_diagnostics(results, mach_range)
     fig_engine_pressure_profile(design, design_cycle)
     fig_engine_temperature_profile(design, design_cycle)
 
