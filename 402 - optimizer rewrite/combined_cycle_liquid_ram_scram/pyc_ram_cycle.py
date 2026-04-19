@@ -187,7 +187,6 @@ class RayleighCombustorCalcs(om.ExplicitComponent):
             phi,
             thermo,
             area_ratio=area_ratio,
-            mode='ram',
         )
 
         Wfuel = W_air * far

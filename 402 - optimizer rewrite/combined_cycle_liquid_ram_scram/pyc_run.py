@@ -1,17 +1,12 @@
 """
 pyc_run.py
 ==========
-Analysis runner for the pyCycle dual-mode ram/scramjet.
-
-Mode selection
---------------
-    M0 < M_transition  ->  RAM   (RayleighCombustor, subsonic Rayleigh)
-    M0 >= M_transition ->  SCRAM (ScramCombustor, Rayleigh)
+Analysis runner for the pyCycle ramjet.
 
 User-visible functions
 ----------------------
-    analyze(M0, altitude_m, phi, M_transition, ramp_angles, verbose)
-    mach_sweep(mach_range, altitude_m, phi, M_transition)
+    analyze(M0, altitude_m, phi, ramp_angles, verbose)
+    mach_sweep(mach_range, altitude_m, phi)
 
 Unit conventions
 ----------------
@@ -40,12 +35,11 @@ import numpy as np
 import openmdao.api as om
 from ambiance import Atmosphere
 
-from gas_dynamics import FlowState, isentropic_P, isentropic_T, pi_milspec
+from gas_dynamics import FlowState, isentropic_P, isentropic_T
 from nozzle import compute_nozzle
 from pyc_config import (
     F_STOICH_JP10, ETA_COMBUSTOR,
     ETA_NOZZLE_CV, ISOLATOR_PT_RECOVERY,
-    M_TRANSITION,
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M,
     INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
     INLET_DESIGN_MDOT_KGS, INLET_DESIGN_WIDTH_M,
@@ -54,7 +48,6 @@ from pyc_config import (
     NOZZLE_TYPE,
 )
 from pyc_ram_cycle   import RamCycle
-from pyc_scram_cycle import ScramCycle
 import nozzle_design
 from thermo import get_thermo
 
@@ -107,11 +100,10 @@ def _seed_fc_initial_guess(prob, M0, T0_K, P0_Pa):
 
 
 # ---------------------------------------------------------------------------
-# Problem singletons  (built once, reused across the Mach sweep)
+# Problem singleton  (built once, reused across the Mach sweep)
 # ---------------------------------------------------------------------------
 
-_ram_prob   = None
-_scram_prob = None
+_ram_prob = None
 
 
 def _make_problem(CycleClass):
@@ -147,17 +139,12 @@ def _make_problem(CycleClass):
     return prob
 
 
-def _get_problem(mode):
-    """Lazily build and return the singleton Problem for the given mode."""
-    global _ram_prob, _scram_prob
-    if mode == 'ram':
-        if _ram_prob is None:
-            _ram_prob = _make_problem(RamCycle)
-        return _ram_prob
-    else:
-        if _scram_prob is None:
-            _scram_prob = _make_problem(ScramCycle)
-        return _scram_prob
+def _get_problem():
+    """Lazily build and return the singleton RAM Problem."""
+    global _ram_prob
+    if _ram_prob is None:
+        _ram_prob = _make_problem(RamCycle)
+    return _ram_prob
 
 
 # ---------------------------------------------------------------------------
@@ -195,50 +182,14 @@ def _get_inlet_design():
     return _inlet_design
 
 
-def compute_precowl_state(M0, alt_m, alpha_deg=0.0):
+def compute_inlet_conditions(M0, alt_m, ramp_angles=None, alpha_deg=0.0):
     """
-    Explicit, non-iterative: run the frozen oblique-shock chain up to the
-    cowl-shock exit and return Pt_after_cowl, Tt0, M3, plus a success flag.
-    Separated so it can be called once per design point and its outputs
-    fed into the Newton-looped DiffuserTerminalShock component.
+    analyze() closes the inlet/back-pressure consistency with a bracketed
+    scalar solve outside the pyCycle model, so no per-call evaluation is
+    performed here.
     """
-    design = _get_inlet_design()
-    case = _inlet2.evaluate_fixed_geometry_at_condition(
-        design, M0=M0, altitude_m=alt_m, alpha_deg=alpha_deg,
-        p_back=1.0,
-    )
-    return design, case
-
-
-def compute_inlet_conditions(M0, alt_m, mode, ramp_angles=None, alpha_deg=0.0):
-    """
-    RAM mode: returns (None, None). analyze() closes the inlet/back-pressure
-    consistency with a bracketed scalar solve outside the pyCycle model.
-
-    SCRAM mode: explicit (shock is swallowed past the throat).
-    """
-    del ramp_angles
-
-    if mode == 'ram':
-        return None, None
-
-    design = _get_inlet_design()
-    case = _inlet2.evaluate_fixed_geometry_at_condition(
-        design, M0=M0, altitude_m=alt_m, alpha_deg=alpha_deg,
-        p_back=1.0,
-    )
-    if not case.get('success', False):
-        Pt_ratio = pi_milspec(M0) * ISOLATOR_PT_RECOVERY
-        exit_MN  = max(M0 * 0.75, 1.05)
-        return float(Pt_ratio), float(exit_MN)
-
-    # R2 reflection cascade is now the canonical isolator pt-loss model.
-    # It already includes all oblique reflections and a terminating normal
-    # shock to subsonic, so no additional ISOLATOR_PT_RECOVERY factor is
-    # applied here.
-    Pt_ratio = float(case['pt_frac_after_reflection_cascade'])
-    exit_MN  = float(case['M_after_reflection_cascade'])
-    return Pt_ratio, exit_MN
+    del ramp_angles, M0, alt_m, alpha_deg
+    return None, None
 
 
 def _ram_inlet_case_to_cycle_inputs(case, M0, Pt0, iso_pt=ISOLATOR_PT_RECOVERY):
@@ -556,35 +507,31 @@ def analyze(
     M0:           float,
     altitude_m:   float,
     phi:          float,
-    M_transition: float | None = None,
     ramp_angles:  list  | None = None,
     combustor_L_star: float | None = None,
     verbose:      bool         = False,
 ) -> dict:
     """
-    Run the dual-mode cycle at a single flight condition.
+    Run the ramjet cycle at a single flight condition.
 
     Parameters
     ----------
     M0           : Freestream Mach number
     altitude_m   : Geometric altitude [m]
     phi          : Equivalence ratio
-    M_transition : RAM->SCRAM switch Mach (None -> pyc_config.M_TRANSITION)
     ramp_angles  : Ramp deflection angles [deg] (None -> config default)
     verbose      : Print cycle table
 
     Returns
     -------
     dict with keys:
-        mode, M0, altitude, phi, M_trans,
+        M0, altitude, phi,
         Isp [s], F_sp [N*s/kg_air], thrust [N],
         mdot_air [kg/s], mdot_fuel [kg/s],
         eta_pt, choked,
         T_stations, Tt_stations, M_stations, Pt_stations
     """
-    M_trans = float(M_transition) if M_transition is not None else M_TRANSITION
-    mode    = 'scram' if M0 >= M_trans else 'ram'
-    design  = _get_inlet_design()
+    design = _get_inlet_design()
 
     # Freestream conditions
     atm  = Atmosphere(altitude_m)
@@ -616,18 +563,9 @@ def analyze(
         combustor_geometry["cross_section_area_m2"] / design["throat_area_actual_m2"]
     )
 
-    # Inlet shock recovery + exit Mach
-    diffuser_entry_case = None
     ram_closure = None
-    ram_recovery, inlet_MN = compute_inlet_conditions(
-        M0, altitude_m, mode, ramp_angles
-    )
-    if mode != 'ram':
-        _, diffuser_entry_case = compute_precowl_state(
-            M0, altitude_m, alpha_deg=0.0
-        )
 
-    prob = _get_problem(mode)
+    prob = _get_problem()
 
     # ── Seed FlightConditions balance with isentropic initial guess ──────────
     # This is the critical fix for the FloatingPointError / log(0) in CEA.
@@ -640,21 +578,10 @@ def analyze(
     prob.set_val('fc.MN',  M0)
     prob.set_val('fc.W',   W_lbms, units='lbm/s')
     prob.set_val("burner.Fl_I:FAR", FAR)
-    if mode == "ram":
-        prob.set_val("burner.area_ratio", combustor_area_ratio)
+    prob.set_val("burner.area_ratio", combustor_area_ratio)
 
     # ── Inlet ────────────────────────────────────────────────────────────────
-    if mode == 'ram':
-        ram_closure = _solve_ram_outer_closure(prob, design, M0, altitude_m)
-    else:
-        prob.set_val('inlet.ram_recovery', ram_recovery)
-        prob.set_val('inlet.MN',           inlet_MN)
-
-    # ── Combustor ────────────────────────────────────────────────────────────
-
-    # ── Solve ────────────────────────────────────────────────────────────────
-    if mode != 'ram':
-        prob.run_model()
+    ram_closure = _solve_ram_outer_closure(prob, design, M0, altitude_m)
 
     def _K(p):  return float(prob.get_val(p, units='degK')[0])
     def _Pa(p): return float(prob.get_val(p, units='Pa')[0])
@@ -679,115 +606,53 @@ def analyze(
         R=float(prob.get_val('burner.Fl_O:stat:R', units='J/(kg*K)')[0]),
     )
 
-    if mode == 'ram':
-        thermo = get_thermo()
-        state0 = FlowState(
-            M=M0,
-            T=T0,
-            P=P0,
-            Pt=_Pa('fc.Fl_O:tot:P'),
-            Tt=_K('fc.Fl_O:tot:T'),
-            gamma=AIR_GAM,
-            R=AIR_R,
-        )
-        F_sp, Isp, state9 = compute_nozzle(
-            state4=state4,
-            state0=state0,
-            P0=P0,
-            phi=phi,
-            thermo=thermo,
-            eta_n=ETA_NOZZLE_CV,
-        )
-        nozzle_throat, nozzle_exit, nozzle_perf = _reconstruct_ram_nozzle_geometry(
-            state4=state4,
-            state9=state9,
-            mass_flow=W4_kgs,
-            phi=phi,
-            thermo=thermo,
-            eta_n=ETA_NOZZLE_CV,
-        )
-        Fn_N = F_sp * W_kgs
-    else:
-        burner_exit_flowstation = {
-            'Fl_O:tot:h': prob.get_val('burner.Fl_O:tot:h'),
-            'Fl_O:tot:T': prob.get_val('burner.Fl_O:tot:T'),
-            'Fl_O:tot:P': prob.get_val('burner.Fl_O:tot:P'),
-            'Fl_O:tot:S': prob.get_val('burner.Fl_O:tot:S'),
-            'Fl_O:tot:rho': prob.get_val('burner.Fl_O:tot:rho'),
-            'Fl_O:tot:gamma': prob.get_val('burner.Fl_O:tot:gamma'),
-            'Fl_O:tot:Cp': prob.get_val('burner.Fl_O:tot:Cp'),
-            'Fl_O:tot:Cv': prob.get_val('burner.Fl_O:tot:Cv'),
-            'Fl_O:tot:R': prob.get_val('burner.Fl_O:tot:R'),
-            'Fl_O:tot:composition': prob.get_val('burner.Fl_O:tot:composition'),
-            'Fl_O:stat:h': prob.get_val('burner.Fl_O:stat:h'),
-            'Fl_O:stat:T': prob.get_val('burner.Fl_O:stat:T'),
-            'Fl_O:stat:P': prob.get_val('burner.Fl_O:stat:P'),
-            'Fl_O:stat:S': prob.get_val('burner.Fl_O:stat:S'),
-            'Fl_O:stat:rho': prob.get_val('burner.Fl_O:stat:rho'),
-            'Fl_O:stat:gamma': prob.get_val('burner.Fl_O:stat:gamma'),
-            'Fl_O:stat:Cp': prob.get_val('burner.Fl_O:stat:Cp'),
-            'Fl_O:stat:Cv': prob.get_val('burner.Fl_O:stat:Cv'),
-            'Fl_O:stat:R': prob.get_val('burner.Fl_O:stat:R'),
-            'Fl_O:stat:V': prob.get_val('burner.Fl_O:stat:V'),
-            'Fl_O:stat:Vsonic': prob.get_val('burner.Fl_O:stat:Vsonic'),
-            'Fl_O:stat:MN': prob.get_val('burner.Fl_O:stat:MN'),
-            'Fl_O:stat:area': prob.get_val('burner.Fl_O:stat:area'),
-            'Fl_O:stat:W': prob.get_val('burner.Fl_O:stat:W'),
-        }
-        burner_exit_flow_port_data = prob.model._get_subsystem('burner').Fl_O_data['Fl_O']
-
-        noz = nozzle_design.run_pycycle_nozzle(
-            m_inlet=MN4,
-            pt_inlet=Pt4_Pa,
-            tt_inlet=Tt4_K,
-            ps_exhaust=P0,
-            cv=ETA_NOZZLE_CV,
-            nozzle_type=NOZZLE_TYPE,
-            mass_flow=W4_kgs,
-            flowstation=burner_exit_flowstation,
-            flow_port_data=burner_exit_flow_port_data,
-            ambient_pressure=P0,
-        )
-        nozzle_exit   = noz['exit']
-        nozzle_throat = noz['throat']
-        nozzle_perf   = noz['performance']
-        Fn_N  = float(nozzle_perf['F_cruise']) - W_kgs * V0
+    thermo = get_thermo()
+    state0 = FlowState(
+        M=M0,
+        T=T0,
+        P=P0,
+        Pt=_Pa('fc.Fl_O:tot:P'),
+        Tt=_K('fc.Fl_O:tot:T'),
+        gamma=AIR_GAM,
+        R=AIR_R,
+    )
+    F_sp, Isp, state9 = compute_nozzle(
+        state4=state4,
+        state0=state0,
+        P0=P0,
+        phi=phi,
+        thermo=thermo,
+        eta_n=ETA_NOZZLE_CV,
+    )
+    nozzle_throat, nozzle_exit, nozzle_perf = _reconstruct_ram_nozzle_geometry(
+        state4=state4,
+        state9=state9,
+        mass_flow=W4_kgs,
+        phi=phi,
+        thermo=thermo,
+        eta_n=ETA_NOZZLE_CV,
+    )
+    Fn_N = F_sp * W_kgs
     # F_cruise = momentum + pressure thrust at ambient (gross thrust).
     # Net thrust for a ramjet subtracts ram drag on the captured air stream:
     #     Fn = F_cruise - mdot_air * V0
     Wfuel = float(W_kgs * FAR)
-    if mode != 'ram':
-        F_sp = Fn_N / max(W_kgs, 1e-12)
-        Isp  = Fn_N / max(Wfuel * G0, 1e-12)
 
     diffuser_entry_station = None
-    if mode == 'ram':
-        try:
-            diffuser_entry_station = _build_air_state_from_totals(
-                M=ram_closure['inlet_inputs']['M_after_cowl'],
-                Tt=ram_closure['inlet_inputs']['Tt_after_cowl'],
-                Pt=ram_closure['inlet_inputs']['Pt_after_cowl'],
-            )
-        except Exception:
-            diffuser_entry_station = None
-    elif diffuser_entry_case and diffuser_entry_case.get('success', False):
+    try:
         diffuser_entry_station = _build_air_state_from_totals(
-            M=diffuser_entry_case['M_after_cowl_shock'],
-            Tt=diffuser_entry_case['Tt0'],
-            Pt=diffuser_entry_case['Pt_after_cowl'],
+            M=ram_closure['inlet_inputs']['M_after_cowl'],
+            Tt=ram_closure['inlet_inputs']['Tt_after_cowl'],
+            Pt=ram_closure['inlet_inputs']['Pt_after_cowl'],
         )
+    except Exception:
+        diffuser_entry_station = None
 
     choked = False
-    if mode == 'ram':
-        try:
-            choked = bool(_mn('burner.choked') > 0.5)
-        except Exception:
-            pass
-    else:
-        try:
-            choked = bool(_mn('burner.rayleigh.choked') > 0.5)
-        except Exception:
-            pass
+    try:
+        choked = bool(_mn('burner.choked') > 0.5)
+    except Exception:
+        pass
 
     combustor_section = {
         "shape": str(combustor_geometry["cross_section_shape"]),
@@ -821,14 +686,13 @@ def analyze(
     }
 
     result = dict(
-        mode=mode, M0=M0, altitude=altitude_m, phi=phi, M_trans=M_trans,
+        M0=M0, altitude=altitude_m, phi=phi,
         Isp=Isp, F_sp=F_sp, thrust=Fn_N,
         mdot_air=W_kgs, mdot_fuel=Wfuel,
-        eta_pt=(ram_closure['inlet_inputs']['ram_recovery']
-                if mode == 'ram' else ram_recovery),
+        eta_pt=ram_closure['inlet_inputs']['ram_recovery'],
         choked=choked,
-        x_shock=(ram_closure['inlet_inputs']['x_shock'] if mode == 'ram' else np.nan),
-        unstart_flag=(ram_closure['inlet_inputs']['unstart_flag'] if mode == 'ram' else np.nan),
+        x_shock=ram_closure['inlet_inputs']['x_shock'],
+        unstart_flag=ram_closure['inlet_inputs']['unstart_flag'],
         T_stations={
             0: _K('fc.Fl_O:stat:T'),
             2: (float(diffuser_entry_station.T)
@@ -889,16 +753,14 @@ def analyze(
 # Mach sweep
 # ---------------------------------------------------------------------------
 
-def mach_sweep(mach_range, altitude_m, phi,
-               M_transition=None, **kwargs):
+def mach_sweep(mach_range, altitude_m, phi, **kwargs):
     """
     Run analyze() over a Mach array.  Returns None for failed points.
     """
     results = []
     for M in mach_range:
         try:
-            results.append(analyze(M, altitude_m, phi,
-                                   M_transition=M_transition, **kwargs))
+            results.append(analyze(M, altitude_m, phi, **kwargs))
         except Exception as e:
             print(f'  [warn] M={M:.2f} failed: {e}')
             results.append(None)
@@ -916,10 +778,9 @@ def _print_cycle(r):
     nozzle_geom = r.get('nozzle_geometry', {})
 
     print(f"\n{'='*70}")
-    print(f"  {r['mode'].upper():6s}  |  M0={r['M0']:.2f}  "
+    print(f"  RAM  |  M0={r['M0']:.2f}  "
           f"|  alt={r['altitude']/1e3:.1f} km  "
-          f"|  phi={r['phi']:.2f}  "
-          f"|  M_trans={r['M_trans']:.1f}")
+          f"|  phi={r['phi']:.2f}")
     print(f"{'='*70}")
     print("  Station states")
     print(f"  {'Stn':>8}  {'M':>7}  {'Ts [K]':>8}  {'Tt [K]':>8}  "
@@ -983,11 +844,11 @@ if __name__ == '__main__':
 
     from pyc_config import PHI_DEFAULT
     print("=" * 60)
-    print("  pyCycle Dual-Mode Ram/Scramjet")
+    print("  pyCycle Ramjet")
     print("=" * 60)
 
     print("\n--- Design Point Performance")
-    analyze(M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT, M_transition=5.2, verbose=True)
+    analyze(M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT, verbose=True)
 
 
 

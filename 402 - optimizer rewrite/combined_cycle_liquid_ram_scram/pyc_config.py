@@ -1,7 +1,7 @@
 """
 pyc_config.py
 =============
-Constants for the pyCycle dual-mode ram/scramjet.
+Constants for the pyCycle ramjet.
 
 Fuel note
 ---------
@@ -123,13 +123,13 @@ INLET_DESIGN_MDOT_KGS              = 10.0     # design-point air mass flow [kg/s
 INLET_DESIGN_WIDTH_M               = 0.25    # inlet spanwise width [m]
 INLET_FOREBODY_SEP_MARGIN          = 0.25
 INLET_RAMP_SEP_MARGIN              = 0.25
-INLET_KANTROWITZ_MARGIN            = 0.85
-INLET_SHOCK_FOCUS_FACTOR           = 1.18
+INLET_KANTROWITZ_MARGIN            = 0.80
+INLET_SHOCK_FOCUS_FACTOR           = 1.1
 
-DIFFUSER_AREA_RATIO = 1.5
+DIFFUSER_AREA_RATIO = 2
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 2.5
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4.0
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 3.0
 
 
 COMBUSTOR_L_STAR_DEFAULT = 1.25
@@ -141,9 +141,6 @@ NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV'
 ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
 
 PHI_DEFAULT = 0.5
-
-# Mode transition (default; overridable per-call in pyc_run.analyze)
-M_TRANSITION = 5.2
 
 # RAM combustor exit Mach for pyCycle design mode
 # Fixed-geometry approximation used across the Mach sweep.

@@ -31,7 +31,7 @@ import pyc_run
 from pyc_config import (
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M, INLET_DESIGN_ALPHA_DEG,
     INLET_DESIGN_WIDTH_M, COMBUSTOR_L_STAR_DEFAULT,
-    M_TRANSITION, M_MIN, M_MAX,
+    M_MIN, M_MAX,
 )
 import nozzle_design
 
@@ -85,8 +85,7 @@ def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT):
         try:
             r = pyc_run.analyze(M0=float(M), altitude_m=altitude, phi=phi)
             dt = time.perf_counter() - t0
-            mode = r.get('mode', '?') if isinstance(r, dict) else '?'
-            print(f'    [{idx:02d}/{total:02d}] M={M:.2f} ({mode}) in {dt:.1f}s')
+            print(f'    [{idx:02d}/{total:02d}] M={M:.2f} in {dt:.1f}s')
         except Exception as e:
             dt = time.perf_counter() - t0
             print(f'  [warn] [{idx:02d}/{total:02d}] M={M:.2f} failed after {dt:.1f}s: {e}')
@@ -854,8 +853,6 @@ def fig_performance(results, mach_range):
     axes[2].set_title('Net thrust')
 
     for ax in axes:
-        ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.6,
-                   label=f'RAM→SCRAM  M={M_TRANSITION}')
         ax.legend(loc='best', fontsize=8)
     fig.suptitle(f'pyc_run sweep  (alt={ALT_DEFAULT/1e3:.0f} km, φ={PHI_DEFAULT})')
     _save(fig, 'performance_vs_mach')
@@ -871,7 +868,6 @@ def fig_mass_flows(results, mach_range):
             label='ṁ_fuel × 1000')
     ax.set_xlabel('M0'); ax.set_ylabel('Mass flow [kg/s]')
     ax.set_title('Captured / fuel mass flow vs Mach')
-    ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.6)
     ax.legend()
     _save(fig, 'mass_flows')
 
@@ -891,7 +887,6 @@ def fig_station_T(results, mach_range):
     for ax, ttl, yl in [(ax1, 'Static T', 'T [K]'),
                         (ax2, 'Total Tt', 'Tt [K]')]:
         ax.set_xlabel('M0'); ax.set_ylabel(yl); ax.set_title(ttl)
-        ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
         ax.legend(fontsize=8)
     _save(fig, 'station_temperatures')
 
@@ -907,7 +902,6 @@ def fig_station_Pt(results, mach_range):
                     'o-', color=c, label=f'{s}: {lbl}')
     ax.set_xlabel('M0'); ax.set_ylabel('Pt [kPa]')
     ax.set_title('Total pressure through the flowpath')
-    ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     ax.legend(fontsize=8)
     _save(fig, 'station_total_pressures')
 
@@ -920,7 +914,6 @@ def fig_inlet_recovery_cycle(results, mach_range):
     ax.set_xlabel('M0'); ax.set_ylabel('Pt_inlet_exit / Pt_freestream')
     ax.set_title('Inlet total-pressure recovery '
                  '(frozen 2-ramp geometry + isolator)')
-    ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     ax.set_ylim(bottom=0)
     _save(fig, 'inlet_recovery_vs_mach')
 
@@ -937,7 +930,6 @@ def fig_ram_diagnostics(results, mach_range):
     ax1.set_xlabel('M0')
     ax1.set_ylabel('Choked flag')
     ax1.set_title('Combustor Choked vs Mach')
-    ax1.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     ax1.set_ylim(-0.05, 1.05)
     ax1.set_yticks([0.0, 1.0])
 
@@ -945,7 +937,6 @@ def fig_ram_diagnostics(results, mach_range):
     ax2.set_xlabel('M0')
     ax2.set_ylabel('Shock position x [m]')
     ax2.set_title('Terminal Shock Position vs Mach')
-    ax2.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
 
     valid = np.isfinite(unstart)
     if np.any(valid):
@@ -987,8 +978,6 @@ def fig_nozzle_geom_vs_mach(results, mach_range):
     ax2b.set_ylabel('Exit Mach  M9', color='firebrick')
     ax2.set_title('Area ratio and exit Mach')
     ax2.legend(handles=[l1, l2], loc='best')
-    for ax in (axes[0], ax2):
-        ax.axvline(M_TRANSITION, color='gray', ls='--', alpha=0.5)
     _save(fig, 'nozzle_geometry_vs_mach')
 
 

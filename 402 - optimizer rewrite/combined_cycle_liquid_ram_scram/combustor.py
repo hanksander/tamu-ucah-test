@@ -42,10 +42,9 @@ def compute_combustor(
     thermo,
     eta_c: float = ETA_COMBUSTOR,
     area_ratio: float = 1.0,
-    mode: str = 'scram',
 ) -> tuple[FlowState, bool]:
     """
-    Constant-area combustor with Rayleigh heat addition.
+    Constant-area combustor with Rayleigh heat addition (subsonic branch).
 
     Parameters
     ----------
@@ -54,7 +53,6 @@ def compute_combustor(
     thermo : JP10Thermo  Thermodynamic model
     eta_c  : float       Combustion efficiency
     area_ratio : float   Exit/inlet area ratio
-    mode   : 'ram' | 'scram'
 
     Returns
     -------
@@ -111,9 +109,8 @@ def compute_combustor(
     # A two-pass scheme is used: first pass with γ_inlet to get a first-guess
     # T4/P4, then look up γ_exit from Cantera and redo Rayleigh with
     # γ_avg = (γ_inlet + γ_exit) / 2 for a consistent choking check.
-    supersonic = (mode == 'scram')
     M4, Pt4_Pt3, choked = rayleigh_exit(state3.M, Tt4 / Tt3,
-                                         state3.gamma, supersonic=supersonic)
+                                         state3.gamma, supersonic=False)
 
     # First-pass exit static conditions using inlet γ
     Pt4 = state3.Pt * Pt4_Pt3
@@ -127,7 +124,7 @@ def compute_combustor(
     # ── Rayleigh flow: refined pass with average γ ────────────────────────
     gamma_avg = 0.5 * (state3.gamma + gamma4)
     M4, Pt4_Pt3, choked = rayleigh_exit(state3.M, Tt4 / Tt3,
-                                         gamma_avg, supersonic=supersonic)
+                                         gamma_avg, supersonic=False)
 
     # Recompute exit static conditions with refined M4 and exit γ
     Pt4 = state3.Pt * Pt4_Pt3
