@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from trajectory_opt.engine_interface import Design, PerfResult, Status, EngineModel; d=Design\\(\\); print\\('Design digest:', d.digest\\(\\)\\); print\\('Design fields:', d\\); print\\('Infeasible result:', PerfResult.infeasible\\(\\)\\)\")",
+      "Bash(python -c \"from trajectory_opt.engine_adapter import PyCycleRamAdapter; print\\('Adapter import OK'\\); a = PyCycleRamAdapter\\(\\); print\\('Instance OK'\\)\")",
+      "Bash(pip show *)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

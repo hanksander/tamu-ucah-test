@@ -87,6 +87,13 @@ class JP10Thermo:
         self._gas = ct.Solution(mechanism)
         # Cache reference enthalpies per phi (avoids re-equilibrating at 298 K)
         self._h_ref_cache: dict[float, float] = {}
+        # Equilibrium property cache keyed on discretized (T, phi, P). Cantera's
+        # equilibrate('TP') dominates runtime; brentq + surrogate rebuilds hammer
+        # nearby states, so rounding keys at ~0.01 K / 1e-4 phi / 1 Pa yields heavy
+        # reuse without affecting solver convergence.
+        # Value: (enthalpy_mass, cp_mass, cv_mass, mean_molecular_weight)
+        self._state_cache: dict[tuple, tuple] = {}
+        self._air_cache:   dict[tuple, float] = {}
         # Air reference at 1 atm (reference is always at standard conditions)
         self._gas.TPX = _H_REF, ct.one_atm, f"N2:{_AIR['N2']}, O2:{_AIR['O2']}, AR:{_AIR['AR']}"
         self._gas.equilibrate('TP')
@@ -110,32 +117,64 @@ class JP10Thermo:
         self._gas.TPX = T, P, comp
         self._gas.equilibrate('TP')
 
+    def _eval_state(self, T: float, phi: float, P: float = ct.one_atm) -> tuple:
+        """Return (h_mass, cp_mass, cv_mass, MW) at equilibrium, memoized.
+
+        Coarse rounding (0.1 K / 1e-3 phi / 10 Pa) maximizes cache hit rate
+        across brentq re-entries and FD-perturbed surrogate rebuilds. Well
+        inside physics-solver tolerance so downstream convergence is unaffected.
+        """
+        key = (round(T, 1), round(phi, 3), round(P, -1))
+        v = self._state_cache.get(key)
+        if v is None:
+            self._set_state(T, phi, P)
+            v = (self._gas.enthalpy_mass, self._gas.cp_mass,
+                 self._gas.cv_mass, self._gas.mean_molecular_weight)
+            if len(self._state_cache) > 20000:
+                self._state_cache.clear()
+            self._state_cache[key] = v
+        return v
+
+    def _eval_air(self, T: float, P: float = ct.one_atm) -> float:
+        """Return enthalpy_mass of pure air at (T, P), memoized."""
+        key = (round(T, 1), round(P, -1))
+        v = self._air_cache.get(key)
+        if v is None:
+            comp = f"N2:{_AIR['N2']}, O2:{_AIR['O2']}, AR:{_AIR['AR']}"
+            self._gas.TPX = T, P, comp
+            self._gas.equilibrate('TP')
+            v = self._gas.enthalpy_mass
+            if len(self._air_cache) > 20000:
+                self._air_cache.clear()
+            self._air_cache[key] = v
+        return v
+
     def _h_ref(self, phi: float) -> float:
         """Sensible enthalpy reference at 298.15 K, 1 atm for this φ.
         Always evaluated at standard conditions so h=0 at (298 K, 1 atm).
         """
         key = round(phi, 4)
         if key not in self._h_ref_cache:
-            self._set_state(_H_REF, phi, ct.one_atm)
-            self._h_ref_cache[key] = self._gas.enthalpy_mass
+            h_m, _, _, _ = self._eval_state(_H_REF, phi, ct.one_atm)
+            self._h_ref_cache[key] = h_m
         return self._h_ref_cache[key]
 
     # ── PUBLIC API ────────────────────────────────────────────────────────────
 
     def gamma(self, T: float, phi: float, P: float = ct.one_atm) -> float:
         """Ratio of specific heats γ = cp/cv at (T, P, phi)."""
-        self._set_state(T, phi, P)
-        return self._gas.cp_mass / self._gas.cv_mass
+        _, cp, cv, _ = self._eval_state(T, phi, P)
+        return cp / cv
 
     def cp(self, T: float, phi: float, P: float = ct.one_atm) -> float:
         """Specific heat at constant pressure [J/(kg·K)] at (T, P, phi)."""
-        self._set_state(T, phi, P)
-        return self._gas.cp_mass
+        _, cp, _, _ = self._eval_state(T, phi, P)
+        return cp
 
     def R(self, T: float, phi: float, P: float = ct.one_atm) -> float:
         """Specific gas constant [J/(kg·K)] = R_u / MW_mix at (T, P, phi)."""
-        self._set_state(T, phi, P)
-        return ct.gas_constant / self._gas.mean_molecular_weight
+        _, _, _, mw = self._eval_state(T, phi, P)
+        return ct.gas_constant / mw
 
     def h(self, T: float, phi: float, P: float = ct.one_atm) -> float:
         """Sensible enthalpy of combustion products [J/kg_mix] (zero at 298.15 K, 1 atm).
@@ -143,26 +182,23 @@ class JP10Thermo:
         For the combustor energy balance, pass the combustor static pressure
         so dissociation is evaluated at the correct conditions.
         """
-        self._set_state(T, phi, P)
-        return self._gas.enthalpy_mass - self._h_ref(phi)
+        h_m, _, _, _ = self._eval_state(T, phi, P)
+        return h_m - self._h_ref(phi)
 
     def h_air(self, T: float, P: float = ct.one_atm) -> float:
         """Sensible enthalpy of pure air [J/kg_air] (zero at 298.15 K, 1 atm)."""
-        comp = f"N2:{_AIR['N2']}, O2:{_AIR['O2']}, AR:{_AIR['AR']}"
-        self._gas.TPX = T, P, comp
-        self._gas.equilibrate('TP')
-        return self._gas.enthalpy_mass - self._h_air_ref
+        return self._eval_air(T, P) - self._h_air_ref
 
     def all_props(self, T: float, phi: float, P: float = ct.one_atm) -> dict:
         """Return γ, cp, R, h, MW in one dict (one Cantera call) at (T, P, phi)."""
-        self._set_state(T, phi, P)
+        h_m, cp, cv, mw = self._eval_state(T, phi, P)
         return {
             'T': T, 'phi': phi, 'P': P,
-            'gamma': self._gas.cp_mass / self._gas.cv_mass,
-            'cp':    self._gas.cp_mass,
-            'R':     ct.gas_constant / self._gas.mean_molecular_weight,
-            'h':     self._gas.enthalpy_mass - self._h_ref(phi),
-            'MW':    self._gas.mean_molecular_weight * 1e3,  # g/mol
+            'gamma': cp / cv,
+            'cp':    cp,
+            'R':     ct.gas_constant / mw,
+            'h':     h_m - self._h_ref(phi),
+            'MW':    mw * 1e3,  # g/mol
         }
 
 

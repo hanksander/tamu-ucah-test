@@ -5,6 +5,8 @@ import sys
 packages = [
     "numpy",
     "scipy",
+    "cython",
+    "sqlitedict",
     "matplotlib",
     "openmdao",
     "dymos",

@@ -66,6 +66,46 @@ M2FT    = 3.28084
 KG2LBM  = 2.20462
 
 
+# --- New: parameterized design builder ---
+def build_design(
+    M0=None, altitude_m=None, alpha_deg=None,
+    leading_edge_angle_deg=None, mdot_required=None, width_m=None,
+    forebody_separation_margin=None, ramp_separation_margin=None,
+    kantrowitz_margin=None, shock_focus_factor=None,
+    diffuser_area_ratio=None, combustor_L_star=None, nozzle_AR=None,
+):
+    """Build an inlet+geometry design dict. Any arg left as None falls
+    back to the pyc_config default."""
+    from pyc_config import (
+        INLET_DESIGN_M0, INLET_DESIGN_ALT_M, INLET_DESIGN_ALPHA_DEG,
+        INLET_DESIGN_LEADING_EDGE_ANGLE_DEG, INLET_DESIGN_MDOT_KGS,
+        INLET_DESIGN_WIDTH_M, INLET_FOREBODY_SEP_MARGIN,
+        INLET_RAMP_SEP_MARGIN, INLET_KANTROWITZ_MARGIN,
+        INLET_SHOCK_FOCUS_FACTOR,
+    )
+    def pick(x, d): return d if x is None else x
+    design = _inlet2.design_2ramp_shock_matched_inlet(
+        M0=pick(M0, INLET_DESIGN_M0),
+        altitude_m=pick(altitude_m, INLET_DESIGN_ALT_M),
+        alpha_deg=pick(alpha_deg, INLET_DESIGN_ALPHA_DEG),
+        leading_edge_angle_deg=pick(leading_edge_angle_deg,
+                                    INLET_DESIGN_LEADING_EDGE_ANGLE_DEG),
+        mdot_required=pick(mdot_required, INLET_DESIGN_MDOT_KGS),
+        width_m=pick(width_m, INLET_DESIGN_WIDTH_M),
+        forebody_separation_margin=pick(forebody_separation_margin,
+                                        INLET_FOREBODY_SEP_MARGIN),
+        ramp_separation_margin=pick(ramp_separation_margin,
+                                    INLET_RAMP_SEP_MARGIN),
+        kantrowitz_margin=pick(kantrowitz_margin, INLET_KANTROWITZ_MARGIN),
+        shock_focus_factor=pick(shock_focus_factor, INLET_SHOCK_FOCUS_FACTOR),
+    )
+    # attach the extras not consumed by the 2-ramp solver
+    design['diffuser_area_ratio'] = pick(diffuser_area_ratio, 2.0)
+    design['combustor_L_star']    = pick(combustor_L_star, 1.25)
+    design['nozzle_AR']           = pick(nozzle_AR, 5.0)
+    return design
+
+
 # ---------------------------------------------------------------------------
 # Isentropic initial-guess seeding
 # ---------------------------------------------------------------------------
@@ -117,9 +157,9 @@ def _make_problem(CycleClass):
     # The props_calcs.py n_moles[0] patch (applied to the installed package)
     # is required for compute_partials to work without a ValueError.
     nlsolver = om.NewtonSolver(solve_subsystems=True)
-    nlsolver.options['maxiter']             = 30
-    nlsolver.options['atol']               = 1e-8
-    nlsolver.options['rtol']               = 1e-8
+    nlsolver.options['maxiter']             = 12
+    nlsolver.options['atol']               = 1e-5
+    nlsolver.options['rtol']               = 1e-5
     nlsolver.options['iprint']             = -1
     nlsolver.options['err_on_non_converge'] = False
     nlsolver.linesearch = om.BoundsEnforceLS()
@@ -275,7 +315,7 @@ def _evaluate_ram_outer_residual(prob, design, M0, altitude_m, p_back):
 
 
 def _solve_ram_outer_closure(prob, design, M0, altitude_m,
-                             rel_tol=1.0e-5, abs_tol_pa=50.0, max_iter=30):
+                             rel_tol=1.0e-3, abs_tol_pa=500.0, max_iter=12):
     """
     Close the RAM inlet/back-pressure consistency with a bracketed scalar solve
     on combustor-face static pressure.
@@ -509,6 +549,7 @@ def analyze(
     phi:          float,
     ramp_angles:  list  | None = None,
     combustor_L_star: float | None = None,
+    design = None,
     verbose:      bool         = False,
 ) -> dict:
     """
@@ -531,7 +572,8 @@ def analyze(
         eta_pt, choked,
         T_stations, Tt_stations, M_stations, Pt_stations
     """
-    design = _get_inlet_design()
+    if design is None:
+        design = _get_inlet_design()  # baseline fallback
 
     # Freestream conditions
     atm  = Atmosphere(altitude_m)
@@ -685,6 +727,20 @@ def analyze(
         "expansion_state": nozzle_perf["expansion_state"],
     }
 
+    total_length_m = (
+        float(design['forebody_length_m'])
+        + float(design['ramp1_length_m'])
+        + float(design['shock2_distance_from_break2_to_lip_m'])
+        + float(design.get('diffuser', {}).get('length_m', 0.3))
+        + float(combustor_geometry['length_m'])
+        + float(nozzle_geometry.get('length_m', 0.3))   # add fallback
+    )
+    max_diameter_m = max(
+        float(combustor_geometry.get('diameter_m', 0.3)),
+        float(nozzle_geometry.get('exit_diameter_m', 0.3)),
+    )
+
+
     result = dict(
         M0=M0, altitude=altitude_m, phi=phi,
         Isp=Isp, F_sp=F_sp, thrust=Fn_N,
@@ -741,6 +797,11 @@ def analyze(
         combustor_section=combustor_section,
         combustor_geometry=combustor_geometry,
         nozzle_geometry=nozzle_geometry,
+        geometry={
+            'total_length_m': total_length_m,
+            'max_diameter_m': max_diameter_m,
+        },
+
     )
 
     if verbose:

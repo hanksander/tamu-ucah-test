@@ -149,3 +149,13 @@ RAM_COMBUSTOR_EXIT_MN = 0.6
 # Operating range
 M_MIN = 2.0
 M_MAX = 5.0
+
+
+# Path-constraint thresholds for optimization
+M4_MAX         = 0.85
+TT4_MAX_K      = 3000.0
+Q_MAX_PA       = 120_000.0
+PHI_MIN        = 0.30
+PHI_MAX        = 0.90
+ENGINE_L_MAX_M = 3.0
+ENGINE_D_MAX_M = 0.34

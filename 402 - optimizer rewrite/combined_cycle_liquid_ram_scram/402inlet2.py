@@ -156,7 +156,7 @@ def oblique_shock(M1, theta_deg, gamma=GAMMA):
 
     return math.degrees(beta), M2, p2_p1, pt2_pt1
 
-def normal_shock_tpg(M1, T1, n_iter=6, tol=1e-6):
+def normal_shock_tpg(M1, T1, n_iter=6, tol=1e-3):
     """
     Thermally-perfect (frozen-chemistry, T-dependent gamma) normal shock.
 
@@ -183,7 +183,7 @@ def normal_shock_tpg(M1, T1, n_iter=6, tol=1e-6):
     return M2, p2p1, rho2rho1, T2T1, pt2pt1, T1 * T2T1, gamma
 
 
-def oblique_shock_tpg(M1, theta_deg, T1, n_iter=6, tol=1e-6):
+def oblique_shock_tpg(M1, theta_deg, T1, n_iter=6, tol=1e-3):
     """
     Thermally-perfect oblique shock. gamma is iterated at the mean static T
     across the shock (see normal_shock_tpg).
@@ -837,7 +837,7 @@ def point_in_body_frame(point_xy,leading_edge_angle_deg,):
     return np.array([x_body, y_body], dtype=float)
 
 def invert_area_mach_ratio_supersonic(target_A_over_Astar, gamma=GAMMA,
-                                      tol=1e-8, max_iter=200,):
+                                      tol=1e-4, max_iter=50,):
     if target_A_over_Astar < 1.0:
         raise ValueError("Supersonic A/A* target must be >= 1.")
 
@@ -1155,7 +1155,7 @@ def _static_over_total(M, gamma=GAMMA):
 
 
 def _subsonic_mach_from_area_ratio(A_over_Astar, gamma=GAMMA,
-                                   tol=1e-10, max_iter=200):
+                                   tol=1e-5, max_iter=50):
     """Subsonic branch of the isentropic area-Mach relation."""
     if A_over_Astar < 1.0:
         raise ValueError("A/A* must be >= 1 for a real subsonic solution.")
@@ -1172,7 +1172,7 @@ def _subsonic_mach_from_area_ratio(A_over_Astar, gamma=GAMMA,
     return 0.5 * (lo + hi)
 
 
-def _iterate_supersonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-6):
+def _iterate_supersonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-3):
     """
     Supersonic-branch Mach from A/A*, iterating gamma at the local static T
     implied by Tt and the current Mach.
@@ -1190,7 +1190,7 @@ def _iterate_supersonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-6):
     return M, gamma
 
 
-def _iterate_subsonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-6):
+def _iterate_subsonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-3):
     """
     Subsonic-branch Mach from A/A*, iterating gamma at local static T.
     """
@@ -1264,7 +1264,7 @@ def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
 
 
 def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
-                                  tol=1e-6, max_iter=100):
+                                  tol=1e-3, max_iter=30):
     """
     Find axial shock station x_s in the subsonic diffuser such that the
     predicted exit static pressure equals p_back.

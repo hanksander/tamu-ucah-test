@@ -534,9 +534,9 @@ def build_pycycle_problem(
 
         newton = cycle.nonlinear_solver = om.NewtonSolver()
         newton.options["solve_subsystems"] = True
-        newton.options["maxiter"] = 12
-        newton.options["atol"] = 1.0e-8
-        newton.options["rtol"] = 1.0e-8
+        newton.options["maxiter"] = 6
+        newton.options["atol"] = 1.0e-5
+        newton.options["rtol"] = 1.0e-5
         newton.options["iprint"] = 0
         newton.linesearch = om.BoundsEnforceLS()
         newton.linesearch.options["bound_enforcement"] = "scalar"

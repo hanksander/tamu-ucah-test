@@ -97,7 +97,7 @@ def compute_combustor(
         lambda T: thermo.h(T, phi, P3) - target,
         Tt3,
         Tt3 + 5000.0,
-        xtol=0.1,
+        xtol=5.0,
     )
 
     # ── Rayleigh flow: first pass with inlet γ ────────────────────────────

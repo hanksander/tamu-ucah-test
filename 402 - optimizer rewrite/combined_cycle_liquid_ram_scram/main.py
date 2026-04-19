@@ -63,7 +63,7 @@ def analyze(
         mode           = 'ram'
         state2, eta_pt = compute_inlet(state0, ramp_angles, mode='ram')
         state3         = compute_isolator(state2, mode='ram')
-        state4, choked = compute_combustor(state3, phi, _thermo, mode='ram')
+        state4, choked = compute_combustor(state3, phi, _thermo)
 
     # ── Nozzle ─────────────────────────────────────────────────────────────────
     F_sp, Isp, state9 = compute_nozzle(state4, state0, P0, phi, _thermo)
@@ -136,7 +136,7 @@ def _print_cycle(r: dict):
 
 
 if __name__ == '__main__':
-    '''
-    r = analyze(M0=6.0, altitude=25_000, phi=0.8, verbose=True)
-    '''
+
+    r = analyze(M0=5.0, altitude=20_000, phi=0.8, verbose=True)
+
 
