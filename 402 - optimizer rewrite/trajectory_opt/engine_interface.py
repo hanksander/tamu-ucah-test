@@ -15,6 +15,7 @@ from combined_cycle_liquid_ram_scram.pyc_config import (
     INLET_DESIGN_WIDTH_M, INLET_FOREBODY_SEP_MARGIN,
     INLET_RAMP_SEP_MARGIN, INLET_KANTROWITZ_MARGIN,
     INLET_SHOCK_FOCUS_FACTOR, DIFFUSER_AREA_RATIO,
+    DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
     COMBUSTOR_L_STAR_DEFAULT, NOZZLE_AR_DEFAULT,
 )
 
@@ -39,6 +40,7 @@ class Design:
     forebody_sep_margin: float = float(INLET_FOREBODY_SEP_MARGIN)
     inlet_width_m:       float = float(INLET_DESIGN_WIDTH_M)
     shock_focus_factor:  float = float(INLET_SHOCK_FOCUS_FACTOR)
+    diffuser_min_shock_accommodation_dh: float = float(DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH)
     # design-point anchor (sizing condition, not an operating point)
     design_M0:           float = float(INLET_DESIGN_M0)
     design_alt_m:        float = float(INLET_DESIGN_ALT_M)

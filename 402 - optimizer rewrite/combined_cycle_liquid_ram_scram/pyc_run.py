@@ -49,7 +49,7 @@ from pyc_config import (
     INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
     NOZZLE_TYPE,
     TT4_MAX_K, M4_MAX, PS3_BIAS, COMBUSTOR_L_STAR_DEFAULT,
-    DIFFUSER_AREA_RATIO, NOZZLE_AR_DEFAULT,
+    DIFFUSER_AREA_RATIO, NOZZLE_AR_DEFAULT, DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
 )
 from pyc_ram_cycle   import RamCycle
 import nozzle_design
@@ -76,7 +76,8 @@ def build_design(
     leading_edge_angle_deg=None, mdot_required=None, width_m=None,
     forebody_separation_margin=None, ramp_separation_margin=None,
     kantrowitz_margin=None, shock_focus_factor=None,
-    diffuser_area_ratio=None, combustor_L_star=None, nozzle_AR=None,
+    diffuser_area_ratio=None, diffuser_min_shock_accommodation_dh=None,
+    combustor_L_star=None, nozzle_AR=None,
 ):
     """Build an inlet+geometry design dict. Any arg left as None falls
     back to the pyc_config default."""
@@ -97,10 +98,28 @@ def build_design(
         kantrowitz_margin=pick(kantrowitz_margin, INLET_KANTROWITZ_MARGIN),
         shock_focus_factor=pick(shock_focus_factor, INLET_SHOCK_FOCUS_FACTOR),
     )
+    diffuser_area_ratio_eff = pick(diffuser_area_ratio, DIFFUSER_AREA_RATIO)
+    diffuser_min_shock_accommodation_dh_eff = pick(
+        diffuser_min_shock_accommodation_dh,
+        DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
+    )
+    diffuser = _inlet2.build_subsonic_diffuser(
+        T_upper=np.asarray(design["throat_upper_xy"], dtype=float),
+        T_lower=np.asarray(design["throat_lower_xy"], dtype=float),
+        h_throat=float(design["throat_height_m"]),
+        width_m=pick(width_m, INLET_DESIGN_WIDTH_M),
+        area_ratio_exit_to_throat=diffuser_area_ratio_eff,
+        min_shock_accommodation_dh=diffuser_min_shock_accommodation_dh_eff,
+    )
     # attach the extras not consumed by the 2-ramp solver. alpha_deg is stored
     # here so the RAM closure evaluates at the same α used to design geometry.
     design['alpha_deg']           = float(alpha_deg_eff)
-    design['diffuser_area_ratio'] = pick(diffuser_area_ratio, DIFFUSER_AREA_RATIO)
+    design['diffuser']            = diffuser
+    design['combustor_face_xy_upper'] = diffuser["exit_upper_xy"]
+    design['combustor_face_xy_lower'] = diffuser["exit_lower_xy"]
+    design['A_combustor_face']        = diffuser["A_exit"]
+    design['diffuser_area_ratio'] = diffuser_area_ratio_eff
+    design['diffuser_min_shock_accommodation_dh'] = diffuser_min_shock_accommodation_dh_eff
     design['combustor_L_star']    = pick(combustor_L_star, COMBUSTOR_L_STAR_DEFAULT)
     design['nozzle_AR']           = pick(nozzle_AR, NOZZLE_AR_DEFAULT)
     return design
@@ -358,6 +377,7 @@ def _design_digest(design: dict) -> tuple:
         round(float(design.get('A_capture_required_m2', 0.0)), 6),
         round(float(design.get('throat_area_actual_m2', 0.0)), 6),
         round(float(design.get('diffuser_area_ratio', 0.0)), 4),
+        round(float(design.get('diffuser_min_shock_accommodation_dh', 0.0)), 4),
     )
 
 

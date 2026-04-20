@@ -1056,6 +1056,7 @@ def build_d2r_result(fs,A_capture_required,h_req_normal,
 def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
                             area_ratio_exit_to_throat,
                             half_angle_deg=None, length_m=None,
+                            min_shock_accommodation_dh=None,
                             n_stations=201):
     """
     Build a straight-walled symmetric subsonic diffuser downstream of the
@@ -1078,6 +1079,11 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
             A_exit=A_exit,
             throat_width_m=width_m,
             throat_height_m=h_throat,
+            min_shock_accommodation_dh=(
+                DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH
+                if min_shock_accommodation_dh is None
+                else min_shock_accommodation_dh
+            ),
         )
         length_m = length_sizing["length_m"]
     elif length_m is None:

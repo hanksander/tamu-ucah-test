@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from typing import Iterable
+import numpy as np
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -52,7 +53,7 @@ class EnvelopeSpec:
     max_height_m: float = 0.38
     max_diameter_m: float = 0.38
     min_combustor_volume_m3: float = 0.08
-    min_thrust_N: float = 3_000.0
+    min_thrust_N: float = 6_000.0
     phi_for_thrust: float = 1.0
     reject_if_phi_clipped: bool = False
 
@@ -79,14 +80,15 @@ def _build_baseline_design(spec: EnvelopeSpec) -> Design:
     return Design(
         kantrowitz_margin=0.80,
         diffuser_AR=2.0,
-        combustor_L_star=1.0,
-        nozzle_AR=5.0,
+        combustor_L_star=1.5,
+        nozzle_AR=4.0,
         LE_angle_deg=4.5,
         ramp_sep_margin=0.25,
         forebody_sep_margin=0.25,
         inlet_width_m=spec.max_width_m,
-        shock_focus_factor=1.10,
-        design_M0=0.5 * (spec.mach_min + spec.mach_max),
+        shock_focus_factor=1.075,
+        diffuser_min_shock_accommodation_dh=3.0,
+        design_M0=5.0,
         design_alt_m=0.5 * (spec.alt_min_m + spec.alt_max_m),
         design_alpha_deg=spec.nominal_aoa_deg,
         design_mdot_kgs=8.0,
@@ -105,6 +107,7 @@ def _build_design_dict(design: Design) -> dict:
         ramp_separation_margin=design.ramp_sep_margin,
         kantrowitz_margin=design.kantrowitz_margin,
         shock_focus_factor=design.shock_focus_factor,
+        diffuser_min_shock_accommodation_dh=design.diffuser_min_shock_accommodation_dh,
         diffuser_area_ratio=min(design.diffuser_AR, 2.5),
         combustor_L_star=design.combustor_L_star,
         nozzle_AR=design.nozzle_AR,
@@ -189,10 +192,13 @@ def _analysis_max_height_m(analysis: dict, design_dict: dict) -> float:
 
 def _candidate_grid(base: Design, spec: EnvelopeSpec) -> Iterable[Design]:
     mach_mid = 0.5 * (spec.mach_min + spec.mach_max)
-    alt_mid = 0.5 * (spec.alt_min_m + spec.alt_max_m)
     knobs = {
+        "diffuser_AR": (1.75, 2.0, 2.25, 2.5),
         "LE_angle_deg": (4.0, 4.5, 5.0),
-        "design_alt_m": (spec.alt_min_m, alt_mid, spec.alt_max_m),
+        "diffuser_min_shock_accommodation_dh": (2.0, 3.0, 4.0),
+        "design_M0": (4.0, 4.5, 5.0),
+        "kantrowitz_margin": (0.80, 0.85, 0.90),
+        "design_alt_m": tuple(np.linspace(spec.alt_min_m, spec.alt_max_m, 6)),
         "design_mdot_kgs": (6.0, 8.0, 10.0),
     }
     names = tuple(knobs.keys())
@@ -206,7 +212,11 @@ def _refined_grid(seed: Design, spec: EnvelopeSpec) -> Iterable[Design]:
         return tuple(vals)
 
     knobs = {
+        "diffuser_AR": around(seed.diffuser_AR, 0.25, 1.5, 2.5),
         "LE_angle_deg": around(seed.LE_angle_deg, 0.25, 3.75, 5.25),
+        "diffuser_min_shock_accommodation_dh": around(seed.diffuser_min_shock_accommodation_dh, 0.5, 2.0, 4.0),
+        "design_M0": around(seed.design_M0, 0.25, 4.0, 5.0),
+        "kantrowitz_margin": around(seed.kantrowitz_margin, 0.025, 0.80, 0.90),
         "design_alt_m": around(seed.design_alt_m, 1000.0, spec.alt_min_m, spec.alt_max_m),
         "design_mdot_kgs": around(seed.design_mdot_kgs, 0.5, 5.0, 11.0),
     }
@@ -487,7 +497,7 @@ def _progress_heartbeat(
     )
 
 
-def search_envelope(spec: EnvelopeSpec, top_n: int = 2) -> tuple[CandidateResult | None, list[CandidateResult]]:
+def search_envelope(spec: EnvelopeSpec, top_n: int = 1) -> tuple[CandidateResult | None, list[CandidateResult]]:
     adapter = PyCycleRamAdapter()
     baseline = _build_baseline_design(spec)
     timer_state: dict[str, float] = {}
@@ -644,3 +654,149 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# Parallelization implementation checklist
+#
+# 1. Add a `max_workers` control near `search_envelope(...)` or in `EnvelopeSpec`.
+#    Use an integer, default something conservative like `6`.
+#
+# 2. Add a top-level worker input format.
+#    Simplest choice: a tuple or dict containing:
+#    - `Design`
+#    - `EnvelopeSpec`
+#
+# 3. Add a top-level worker function in `engine_envelope_test.py`.
+#    Example role:
+#    - create a fresh `PyCycleRamAdapter`
+#    - call `evaluate_candidate(design, spec, adapter)`
+#    - catch exceptions and return an infeasible `CandidateResult`
+#
+# 4. Do not reuse the parent’s adapter inside workers.
+#    Adapter creation must happen inside the worker.
+#
+# 5. Keep `evaluate_candidate(...)` itself mostly unchanged.
+#    It should remain the single source of candidate-evaluation logic.
+#
+# 6. Add a top-level helper to evaluate a batch of candidates in parallel.
+#    Responsibilities:
+#    - accept a list of `Design` candidates
+#    - accept `EnvelopeSpec`
+#    - accept `stage_name`
+#    - accept `max_workers`
+#    - submit tasks to `ProcessPoolExecutor`
+#    - collect results with `as_completed(...)`
+#    - print progress in the parent
+#
+# 7. Use `concurrent.futures.ProcessPoolExecutor`.
+#    Do not use threads.
+#
+# 8. In the batch helper, submit one candidate per future.
+#    Keep it simple first.
+#    Do not do chunking yet.
+#
+# 9. In the batch helper, catch worker exceptions at future collection time.
+#    If a future fails unexpectedly:
+#    - log it
+#    - convert it into an infeasible result if needed
+#    - continue the run
+#
+# 10. Keep the existing 0.5-second progress heartbeat, but move it to parent-side aggregation.
+#     Progress should reflect:
+#     - completed / total
+#     - feasible count
+#     - current best score
+#
+# 11. Replace the serial coarse loop in `search_envelope(...)`.
+#     Instead of:
+#     - iterating directly over candidates and calling `evaluate_candidate(...)`
+#     Use:
+#     - build `coarse_candidates`
+#     - pass them to the new parallel batch helper
+#
+# 12. Keep the coarse-result sorting logic unchanged after collection.
+#     Sort by `score`, then select `top_n`.
+#
+# 13. Keep seed selection in the parent process only.
+#     Do not let workers decide refinement seeds.
+#
+# 14. Replace the serial refinement loop in `search_envelope(...)`.
+#     Instead of:
+#     - iterating locally over refined candidates and evaluating them
+#     Use:
+#     - generate all refined candidates in parent
+#     - deduplicate in parent
+#     - pass them to the parallel batch helper
+#
+# 15. Preserve the `seen` deduplication logic in the parent.
+#     Do this before submitting refined jobs.
+#
+# 16. Ensure all worker-callable functions are defined at module top level.
+#     This is required for robust Windows multiprocessing.
+#
+# 17. Ensure pool creation only happens under normal runtime entry, not at import time.
+#     Keep actual execution under:
+#     - `if __name__ == "__main__":`
+#
+# 18. Do not pass `PyCycleRamAdapter` objects, OpenMDAO problems, or live caches into workers.
+#     Pass only pickle-safe objects.
+#
+# 19. Verify `Design`, `EnvelopeSpec`, and `CandidateResult` remain pickle-safe.
+#     They should stay plain dataclasses with simple fields.
+#
+# 20. Add a serial fallback path.
+#     If `max_workers <= 1`:
+#     - run the existing logic serially through the same batch helper
+#     This makes debugging much easier.
+#
+# 21. Add a small startup log line.
+#     Print:
+#     - stage name
+#     - total candidates
+#     - number of envelope points
+#     - worker count
+#
+# 22. Add a final stage summary log.
+#     For coarse and refinement separately, print:
+#     - total evaluated
+#     - feasible found
+#     - best score
+#
+# 23. First validate with `max_workers=1`.
+#     Confirm behavior matches the current serial implementation.
+#
+# 24. Then validate with `max_workers=2`.
+#     Confirm:
+#     - same best design
+#     - same feasible/infeasible decisions
+#     - no crashes
+#
+# 25. Then test with `max_workers=6`.
+#     Compare runtime and confirm stability.
+#
+# 26. Only after that consider optional chunking.
+#     If needed later:
+#     - send batches of candidates to each worker
+#     - let each process reuse local caches across multiple candidates
+#     But do not do this in the first implementation.
+#
+# Suggested function additions
+# - `def evaluate_candidate_worker(payload) -> CandidateResult`
+# - `def evaluate_candidates_batch(candidates, spec, stage_name, max_workers) -> list[CandidateResult]`
+#
+# Suggested order of edits
+# 1. Add `max_workers`
+# 2. Add worker function
+# 3. Add batch helper
+# 4. Switch coarse stage
+# 5. Switch refinement stage
+# 6. Re-test progress logging
+# 7. Validate serial mode
+# 8. Validate multi-process mode
+#
+# Definition of done
+# - coarse and refinement both run through the batch helper
+# - serial and parallel runs produce the same best result
+# - worker crashes do not kill the full run
+# - progress remains readable
+# - Windows execution works cleanly
