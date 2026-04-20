@@ -116,23 +116,24 @@ DESIGN PARAMETERS
 """
 
 INLET_DESIGN_M0                    = 5
-INLET_DESIGN_ALT_M                 = 18_000.0
-INLET_DESIGN_ALPHA_DEG             = 4.0
-INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 4.0
-INLET_DESIGN_MDOT_KGS              = 10.0     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.25    # inlet spanwise width [m]
+INLET_DESIGN_ALT_M                 = 22_000.0
+INLET_DESIGN_ALPHA_DEG             = 2.0
+INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 2.0
+INLET_DESIGN_MDOT_KGS              = 8.0     # design-point air mass flow [kg/s]
+INLET_DESIGN_WIDTH_M               = 0.30    # inlet spanwise width [m]
 INLET_FOREBODY_SEP_MARGIN          = 0.25
 INLET_RAMP_SEP_MARGIN              = 0.25
 INLET_KANTROWITZ_MARGIN            = 0.80
 INLET_SHOCK_FOCUS_FACTOR           = 1.1
 
-DIFFUSER_AREA_RATIO = 2
+DIFFUSER_AREA_RATIO = 2.5
 DIFFUSER_HALF_ANGLE_DEG = 7.0
-DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 2.5
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 3.0
+DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 4
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4
 
 
-COMBUSTOR_L_STAR_DEFAULT = 1.25
+COMBUSTOR_L_STAR_DEFAULT = 1.5
+NOZZLE_AR_DEFAULT        = 5.0   # nozzle Ae/At default (build_design fallback)
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.92   # combustion efficiency
@@ -140,7 +141,7 @@ ETA_NOZZLE_CV        = 0.97   # nozzle velocity coefficient (Cv)
 NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV', or 'CD_CV'
 ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
 
-PHI_DEFAULT = 0.5
+PHI_DEFAULT = 0.7
 
 # RAM combustor exit Mach for pyCycle design mode
 # Fixed-geometry approximation used across the Mach sweep.
@@ -152,10 +153,22 @@ M_MAX = 5.0
 
 
 # Path-constraint thresholds for optimization
-M4_MAX         = 0.85
+M4_MAX         = 0.90
 TT4_MAX_K      = 3000.0
 Q_MAX_PA       = 120_000.0
 PHI_MIN        = 0.30
 PHI_MAX        = 0.90
-ENGINE_L_MAX_M = 3.0
-ENGINE_D_MAX_M = 0.34
+ENGINE_L_MAX_M = 3.75
+ENGINE_D_MAX_M = 0.4
+
+# v2 φ-envelope closure: where to place the terminal shock along the
+# diffuser capability range [Ps_min, Ps_max].
+#   Ps3 = Ps_min + PS3_BIAS · (Ps_max − Ps_min)
+# 0.0 → shock at exit (strong, max diffusion, tight margin to unstart).
+# 1.0 → shock at throat (weak, least diffusion, safest start margin).
+# 0.7 is a conservative design-intent default — weak shock near throat,
+# mimicking typical started-mode operation.
+PS3_BIAS = 0.5
+
+
+#0.14 m^3

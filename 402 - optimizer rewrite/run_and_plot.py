@@ -16,8 +16,8 @@ from powered_flight_trajectory_code_v4 import atmosphere, M0 as M0_MASS
 from combined_cycle_liquid_ram_scram.pyc_config import M4_MAX, TT4_MAX_K, Q_MAX_PA
 
 OUT = "plots_opt"
-PHASES = ("cruise", "descent")
-PHASE_COLORS = {"cruise": "#d62728", "descent": "#2ca02c"}
+PHASES = ("cruise",)
+PHASE_COLORS = {"cruise": "#d62728"}
 
 
 def ts(p, phase, name):

@@ -139,3 +139,59 @@ def compute_combustor(
 
     return FlowState(M=M4, T=T4, P=P4, Pt=Pt4, Tt=Tt4,
                      gamma=gamma4, R=R4), choked
+
+
+# ---------------------------------------------------------------------------
+# Standalone wrapper for the inlet-limited RAM closure (Phase 1).
+#
+# The φ-envelope solver (Stage B of the new closure) needs to evaluate the
+# combustor-face response at many trial φ values while sweeping for the
+# inlet's Ps_max, the thermal-choke limit, and the Tt4 material limit. It
+# cannot afford to go through pyCycle. This wrapper takes station-3 total
+# conditions + Mach (which is all the envelope solver has) and returns the
+# station-4 numbers the solver needs, with zero OpenMDAO/pyCycle coupling.
+# ---------------------------------------------------------------------------
+
+_AIR_GAMMA_STATION3 = 1.40   # cold-air γ for building state3 from (Pt, Tt, M).
+_AIR_R_STATION3     = 287.05 # Rayleigh flow inside compute_combustor runs a
+                              # two-pass scheme that refines with product-γ, so
+                              # the inlet-γ used here only seeds the first pass.
+
+
+def combustor_face_response(
+    Pt3: float,
+    Tt3: float,
+    M3:  float,
+    phi: float,
+    thermo,
+    area_ratio: float = 1.0,
+    eta_c: float = ETA_COMBUSTOR,
+) -> dict:
+    """Standalone combustor evaluation for the φ-envelope solver.
+
+    Builds a station-3 FlowState from total conditions + Mach, runs
+    compute_combustor, and returns the station-4 observables the envelope
+    solver roots on: Ps4 (matched against the inlet's Ps_max), M4 (thermal-
+    choke limit), Tt4 (material limit), plus Pt4 for diagnostics.
+    """
+    gam = _AIR_GAMMA_STATION3
+    one_plus_half_gm1_Msq = 1.0 + 0.5 * (gam - 1.0) * M3 * M3
+    T3 = Tt3 / one_plus_half_gm1_Msq
+    P3 = Pt3 / one_plus_half_gm1_Msq ** (gam / (gam - 1.0))
+
+    state3 = FlowState(M=M3, T=T3, P=P3, Pt=Pt3, Tt=Tt3,
+                       gamma=gam, R=_AIR_R_STATION3)
+
+    state4, choked = compute_combustor(state3, phi=phi, thermo=thermo,
+                                       eta_c=eta_c, area_ratio=area_ratio)
+
+    return {
+        'Ps4':     float(state4.P),
+        'M4':      float(state4.M),
+        'Tt4':     float(state4.Tt),
+        'Pt4':     float(state4.Pt),
+        'gamma4':  float(state4.gamma),
+        'R4':      float(state4.R),
+        'choked':  bool(choked),
+        'f_ratio': float(phi * F_STOICH),
+    }

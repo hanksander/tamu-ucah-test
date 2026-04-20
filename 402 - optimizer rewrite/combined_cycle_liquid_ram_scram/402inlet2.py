@@ -1,7 +1,7 @@
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, PchipInterpolator
 
 GAMMA = 1.4        # reference cold-air ratio; kept only for freestream-level
                    # isentropic relations where T ~ 220 K and gamma_air(T)~1.400
@@ -1881,6 +1881,202 @@ def print_d2r_sweep_summary(summary,):
     print(f"Failed cases                    = {fail_count}")
     print()
 
+def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
+    """Run forebody → ramp1 → ramp2 → cowl → reflection cascade ONCE for a
+    frozen geometry at (M0, alt, α). Factored out of
+    evaluate_fixed_geometry_at_condition so the new inlet-limited RAM closure
+    can reuse the upstream state across many trial p_back / φ values without
+    redundant shock evaluation.
+    """
+    T0, p0, rho0, a0 = std_atmosphere_1976(altitude_m)
+    V0 = M0 * a0
+
+    theta_fore = result["theta_fore_deg"]
+    theta1     = result["theta1_deg"]
+    theta2     = result["theta2_deg"]
+    theta_cowl = result["theta_cowl_deg"]
+
+    # ---- Forebody shock
+    dtheta_fore_eff = theta_fore + alpha_deg
+    if dtheta_fore_eff <= 0.0:
+        return {"ok": False, "reason": "Non-positive forebody effective turn"}
+    # Thermally-perfect shock train: gamma(T) propagates stage-by-stage.
+    shf = oblique_shock_tpg(M0, dtheta_fore_eff, T0)
+    if shf is None:
+        return {"ok": False, "reason": "Forebody shock unattached"}
+    beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio, _, T_fore, _ = shf
+
+    # ---- Ramp 1
+    dtheta1 = theta1 - theta_fore
+    if dtheta1 <= 0.0:
+        return {"ok": False, "reason": "Invalid ramp 1 turn from frozen geometry"}
+    sh1 = oblique_shock_tpg(M_fore, dtheta1, T_fore)
+    if sh1 is None:
+        return {"ok": False, "reason": "Ramp 1 shock unattached"}
+    beta1_rel, M1, p21, pt21, _, T1_s, _ = sh1
+
+    # ---- Ramp 2
+    dtheta2 = theta2 - theta1
+    if dtheta2 <= 0.0:
+        return {"ok": False, "reason": "Invalid ramp 2 turn from frozen geometry"}
+    sh2 = oblique_shock_tpg(M1, dtheta2, T1_s)
+    if sh2 is None:
+        return {"ok": False, "reason": "Ramp 2 shock unattached"}
+    beta2_rel, M2, p32, pt32, _, T2_s, _ = sh2
+
+    # ---- Cowl shock
+    cowl_turn_mag = theta2 - theta_cowl
+    if cowl_turn_mag <= 0.0:
+        return {"ok": False, "reason": "Non-positive cowl turn"}
+    shc = oblique_shock_tpg(M2, cowl_turn_mag, T2_s)
+    if shc is None:
+        return {"ok": False, "reason": "Cowl shock unattached"}
+    beta_cowl_rel, M3, p43, pt43, _, T3_s, _ = shc
+
+    pt_frac_after_forebody = pt_fore_ratio
+    pt_frac_after_shock1   = pt_fore_ratio * pt21
+    pt_frac_after_shock2   = pt_fore_ratio * pt21 * pt32
+    pt_frac_after_cowl     = pt_fore_ratio * pt21 * pt32 * pt43
+
+    # R2 reflection cascade through the isolator (canonical pt loss model).
+    cascade = solve_reflection_cascade(
+        M3=M3, T3=T3_s, pt_frac_before=pt_frac_after_cowl,
+        C=result["cowl_lip_xy"],
+        F=result["ramp2_normal_foot_xy"],
+        T_upper=result["throat_upper_xy"],
+        T_lower=result["throat_lower_xy"],
+        theta_cowl_deg=theta_cowl,
+    )
+
+    # Freestream totals use cold-air gamma (T0~220K, gamma_air~1.400); the
+    # difference from constant GAMMA=1.4 is <0.1% so we leave it.
+    Tt0 = total_temperature(T0, M0)
+    Pt0 = p0 * (1.0 + 0.5 * (GAMMA - 1.0) * M0 * M0) ** (GAMMA / (GAMMA - 1.0))
+    Pt_after_cowl = Pt0 * pt_frac_after_cowl
+
+    return {
+        "ok":             True,
+        "T0":             T0,        "p0": p0,      "rho0": rho0, "a0": a0,
+        "V0":             V0,        "Tt0": Tt0,    "Pt0": Pt0,
+        "M_fore":         M_fore,    "T_fore": T_fore,
+        "M1":             M1,        "T1_s": T1_s,
+        "M2":             M2,        "T2_s": T2_s,
+        "M3":             M3,        "T3_s": T3_s,
+        "p_fore_ratio":   p_fore_ratio,
+        "p21": p21, "p32": p32, "p43": p43,
+        "pt_fore_ratio":  pt_fore_ratio,
+        "pt21": pt21, "pt32": pt32, "pt43": pt43,
+        "pt_frac_after_forebody": pt_frac_after_forebody,
+        "pt_frac_after_shock1":   pt_frac_after_shock1,
+        "pt_frac_after_shock2":   pt_frac_after_shock2,
+        "pt_frac_after_cowl":     pt_frac_after_cowl,
+        "Pt_after_cowl":          Pt_after_cowl,
+        # Absolute shock angles for plotting consumers
+        "shock_fore_abs_deg": beta_fore_rel,
+        "shock1_abs_deg":     theta_fore + beta1_rel,
+        "shock2_abs_deg":     theta1 + beta2_rel,
+        "cowl_shock_abs_deg": theta2 - beta_cowl_rel,
+        "cascade":            cascade,
+    }
+
+
+def compute_inlet_capability(result, M0, altitude_m, alpha_deg, n_stations=25):
+    """Tabulate the inlet's (p_back ↔ terminal-shock response) curve.
+
+    For the inlet-limited RAM closure, the combustor side sweeps φ while this
+    capability is fixed. Precomputing it once per (M0, alt, α, design) and
+    handing back monotonic inverse splines lets Stage B look up the inlet's
+    response to any demanded p_back in O(1) instead of rerunning the
+    bracketed bisection inside solve_terminal_shock_position.
+
+    Returns
+    -------
+    dict with keys:
+        ok : bool
+        reason : str (if not ok)
+        Ps_max, Ps_min : extremes of p_back the diffuser can sustain with a
+                         terminal shock inside it. Ps_max = shock just inside
+                         the throat (weak shock, small Pt loss). Ps_min =
+                         shock at diffuser exit (strong shock, large Pt loss).
+        Pt_after_cowl, Tt0, M3, T3 : upstream state delivered to the combustor.
+        pt_frac_after_cowl : Pt fraction lost through the oblique-shock train.
+        x_s_of_Ps, Pt_frac_of_Ps, M_exit_of_Ps : monotonic PCHIP inverse
+            splines. Evaluate at any p_back ∈ [Ps_min, Ps_max] to get the
+            terminal-shock station, the post-terminal-shock Pt fraction
+            (relative to Pt_after_cowl), and the combustor-face Mach.
+    """
+    up = _upstream_shock_chain(result, M0, altitude_m, alpha_deg)
+    if not up["ok"]:
+        return {"ok": False, "reason": up["reason"]}
+
+    if "diffuser" not in result:
+        return {"ok": False,
+                "reason": "Frozen geometry has no diffuser block. Rebuild "
+                          "with build_subsonic_diffuser first."}
+
+    diffuser = result["diffuser"]
+    xs_diff  = diffuser["x_stations"]
+    eps      = 1e-4 * (xs_diff[-1] - xs_diff[0])
+    x_lo     = xs_diff[0] + eps
+    x_hi     = xs_diff[-1] - eps
+
+    # One spline of diffuser area — reused across every station evaluation.
+    area_spline = CubicSpline(xs_diff, diffuser["A_stations"], bc_type='natural')
+
+    x_grid       = np.linspace(x_lo, x_hi, n_stations)
+    Ps_arr       = np.empty(n_stations)
+    Pt_frac_arr  = np.empty(n_stations)
+    M_exit_arr   = np.empty(n_stations)
+    Pt_after_cowl = up["Pt_after_cowl"]
+
+    for i, x_s in enumerate(x_grid):
+        state = _exit_static_pressure_for_shock_at(
+            x_s, diffuser, Pt_after_cowl, up["Tt0"],
+            area_spline=area_spline,
+        )
+        Ps_arr[i]      = state["Ps_exit"]
+        Pt_frac_arr[i] = state["Pt_after_shock"] / Pt_after_cowl
+        M_exit_arr[i]  = state["M_exit"]
+
+    # Ps_exit decreases as x_s moves downstream (stronger supersonic Mach →
+    # stronger normal shock → bigger Pt loss → lower exit Ps). Sort by Ps so
+    # the inverse splines have a strictly-increasing independent variable.
+    order          = np.argsort(Ps_arr)
+    Ps_sorted      = Ps_arr[order]
+    x_sorted       = x_grid[order]
+    Pt_frac_sorted = Pt_frac_arr[order]
+    M_exit_sorted  = M_exit_arr[order]
+
+    # Drop duplicate Ps values (can happen at the endpoints due to rounding).
+    keep = np.concatenate(([True], np.diff(Ps_sorted) > 0.0))
+    Ps_sorted      = Ps_sorted[keep]
+    x_sorted       = x_sorted[keep]
+    Pt_frac_sorted = Pt_frac_sorted[keep]
+    M_exit_sorted  = M_exit_sorted[keep]
+
+    if Ps_sorted.size < 2:
+        return {"ok": False,
+                "reason": "Diffuser sweep collapsed to a single Ps value."}
+
+    x_s_of_Ps     = PchipInterpolator(Ps_sorted, x_sorted,       extrapolate=False)
+    Pt_frac_of_Ps = PchipInterpolator(Ps_sorted, Pt_frac_sorted, extrapolate=False)
+    M_exit_of_Ps  = PchipInterpolator(Ps_sorted, M_exit_sorted,  extrapolate=False)
+
+    return {
+        "ok":                 True,
+        "Ps_max":             float(Ps_sorted[-1]),
+        "Ps_min":             float(Ps_sorted[0]),
+        "Pt_after_cowl":      float(Pt_after_cowl),
+        "Tt0":                float(up["Tt0"]),
+        "M3":                 float(up["M3"]),
+        "T3":                 float(up["T3_s"]),
+        "pt_frac_after_cowl": float(up["pt_frac_after_cowl"]),
+        "x_s_of_Ps":          x_s_of_Ps,
+        "Pt_frac_of_Ps":      Pt_frac_of_Ps,
+        "M_exit_of_Ps":       M_exit_of_Ps,
+    }
+
+
 def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
                                          p_back):
     """
@@ -1891,92 +2087,10 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
     The terminal normal shock is no longer pinned to the cowl lip. Its axial
     station is solved from p_back via solve_terminal_shock_position.
     """
-    T0, p0, rho0, a0 = std_atmosphere_1976(altitude_m)
-    V0 = M0 * a0
-
-    theta_fore = result["theta_fore_deg"]
-    theta1     = result["theta1_deg"]
-    theta2     = result["theta2_deg"]
-    theta_cowl = result["theta_cowl_deg"]
-
-    P_fore  = result["forebody_xy"]
-    P0_xy   = result["nose_xy"]
-    P1      = result["break2_xy"]
-    C       = result["cowl_lip_xy"]
-    F       = result["ramp2_normal_foot_xy"]
-    T_lower = result["throat_lower_xy"]
-    T_upper = result["throat_upper_xy"]
-    focus   = result["shock_focus_xy"]
-
-    # ---- Forebody shock
-    dtheta_fore_eff = theta_fore + alpha_deg
-    if dtheta_fore_eff <= 0.0:
-        return {"success": False,
-                "reason": "Non-positive forebody effective turn",
+    up = _upstream_shock_chain(result, M0, altitude_m, alpha_deg)
+    if not up["ok"]:
+        return {"success": False, "reason": up["reason"],
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    # Thermally-perfect shock train: gamma(T) propagates stage-by-stage.
-    shf = oblique_shock_tpg(M0, dtheta_fore_eff, T0)
-    if shf is None:
-        return {"success": False, "reason": "Forebody shock unattached",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio, _, T_fore, _ = shf
-    shock_fore_abs = beta_fore_rel
-
-    # ---- Ramp 1
-    dtheta1 = theta1 - theta_fore
-    if dtheta1 <= 0.0:
-        return {"success": False,
-                "reason": "Invalid ramp 1 turn from frozen geometry",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    sh1 = oblique_shock_tpg(M_fore, dtheta1, T_fore)
-    if sh1 is None:
-        return {"success": False, "reason": "Ramp 1 shock unattached",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta1_rel, M1, p21, pt21, _, T1_s, _ = sh1
-    shock1_abs = theta_fore + beta1_rel
-
-    # ---- Ramp 2
-    dtheta2 = theta2 - theta1
-    if dtheta2 <= 0.0:
-        return {"success": False,
-                "reason": "Invalid ramp 2 turn from frozen geometry",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    sh2 = oblique_shock_tpg(M1, dtheta2, T1_s)
-    if sh2 is None:
-        return {"success": False, "reason": "Ramp 2 shock unattached",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta2_rel, M2, p32, pt32, _, T2_s, _ = sh2
-    shock2_abs = theta1 + beta2_rel
-
-    # ---- Cowl shock
-    cowl_turn_mag = theta2 - theta_cowl
-    if cowl_turn_mag <= 0.0:
-        return {"success": False, "reason": "Non-positive cowl turn",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    shc = oblique_shock_tpg(M2, cowl_turn_mag, T2_s)
-    if shc is None:
-        return {"success": False, "reason": "Cowl shock unattached",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
-    beta_cowl_rel, M3, p43, pt43, _, T3_s, _ = shc
-    cowl_shock_abs = theta2 - beta_cowl_rel
-
-    pt_frac_after_forebody = pt_fore_ratio
-    pt_frac_after_shock1   = pt_fore_ratio * pt21
-    pt_frac_after_shock2   = pt_fore_ratio * pt21 * pt32
-    pt_frac_after_cowl     = pt_fore_ratio * pt21 * pt32 * pt43
-
-    # R2 reflection cascade through the isolator (canonical pt loss model).
-    cascade = solve_reflection_cascade(
-        M3=M3, T3=T3_s, pt_frac_before=pt_frac_after_cowl,
-        C=C, F=F, T_upper=T_upper, T_lower=T_lower,
-        theta_cowl_deg=theta_cowl,
-    )
-
-    # Freestream totals use cold-air gamma (T0~220K, gamma_air~1.400); the
-    # difference from constant GAMMA=1.4 is <0.1% so we leave it.
-    Tt0 = total_temperature(T0, M0)
-    Pt0 = p0 * (1.0 + 0.5 * (GAMMA - 1.0) * M0 * M0) ** (GAMMA / (GAMMA - 1.0))
-    Pt_after_cowl = Pt0 * pt_frac_after_cowl
 
     # ---- Terminal shock: driven by back pressure inside the diffuser.
     if "diffuser" not in result:
@@ -1984,6 +2098,9 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
                 "reason": "Frozen geometry has no diffuser block. Rebuild "
                           "with build_subsonic_diffuser first.",
                 "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
+
+    Pt_after_cowl = up["Pt_after_cowl"]
+    Tt0           = up["Tt0"]
 
     terminal = solve_terminal_shock_position(result, p_back,
                                              Pt_after_cowl, Tt0)
@@ -2003,7 +2120,9 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
             "terminal":       terminal,
         }
 
-    pt_frac_after_terminal = (pt_frac_after_cowl
+    cascade = up["cascade"]
+    pt_frac_after_cowl_val = up["pt_frac_after_cowl"]
+    pt_frac_after_terminal = (pt_frac_after_cowl_val
                               * terminal["pt_frac_after_terminal_shock"])
 
     return {
@@ -2012,22 +2131,22 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         "M0":             M0,
         "alpha_deg":      alpha_deg,
         "p_back":         p_back,
-        "V0_ms":          V0,
+        "V0_ms":          up["V0"],
 
-        "theta_fore_deg":  theta_fore,
-        "theta1_deg":      theta1,
-        "theta2_deg":      theta2,
-        "theta_cowl_deg":  theta_cowl,
+        "theta_fore_deg":  result["theta_fore_deg"],
+        "theta1_deg":      result["theta1_deg"],
+        "theta2_deg":      result["theta2_deg"],
+        "theta_cowl_deg":  result["theta_cowl_deg"],
 
-        "shock_fore_abs_deg": shock_fore_abs,
-        "shock1_abs_deg":     shock1_abs,
-        "shock2_abs_deg":     shock2_abs,
-        "cowl_shock_abs_deg": cowl_shock_abs,
+        "shock_fore_abs_deg": up["shock_fore_abs_deg"],
+        "shock1_abs_deg":     up["shock1_abs_deg"],
+        "shock2_abs_deg":     up["shock2_abs_deg"],
+        "cowl_shock_abs_deg": up["cowl_shock_abs_deg"],
 
-        "M_after_forebody_shock":  M_fore,
-        "M_after_shock1":          M1,
-        "M_after_shock2":          M2,
-        "M_after_cowl_shock":      M3,
+        "M_after_forebody_shock":  up["M_fore"],
+        "M_after_shock1":          up["M1"],
+        "M_after_shock2":          up["M2"],
+        "M_after_cowl_shock":      up["M3"],
 
         "x_terminal_shock":            terminal["x_s"],
         "A_at_terminal_shock":         terminal["A_s"],
@@ -2037,10 +2156,10 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         "Ps_at_combustor_face":        terminal["Ps_exit"],
         "V_at_combustor_face_ms":      terminal["V_exit"],
 
-        "pt_frac_after_forebody_shock":   pt_frac_after_forebody,
-        "pt_frac_after_shock1":           pt_frac_after_shock1,
-        "pt_frac_after_shock2":           pt_frac_after_shock2,
-        "pt_frac_after_cowl_shock":       pt_frac_after_cowl,
+        "pt_frac_after_forebody_shock":   up["pt_frac_after_forebody"],
+        "pt_frac_after_shock1":           up["pt_frac_after_shock1"],
+        "pt_frac_after_shock2":           up["pt_frac_after_shock2"],
+        "pt_frac_after_cowl_shock":       pt_frac_after_cowl_val,
         "pt_frac_after_terminal_shock":   pt_frac_after_terminal,
 
         "pt_frac_after_immediate_normal_shock": pt_frac_after_terminal,
@@ -2056,14 +2175,14 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         "reflection_phi_roof_deg":          cascade["phi_roof_deg"],
         "n_reflections":                    cascade["n_reflections"],
 
-        "forebody_xy":         P_fore,
-        "nose_xy":             P0_xy,
-        "break2_xy":           P1,
-        "cowl_lip_xy":         C,
-        "ramp2_normal_foot_xy": F,
-        "throat_lower_xy":     T_lower,
-        "throat_upper_xy":     T_upper,
-        "shock_focus_xy":      focus,
+        "forebody_xy":          result["forebody_xy"],
+        "nose_xy":              result["nose_xy"],
+        "break2_xy":            result["break2_xy"],
+        "cowl_lip_xy":          result["cowl_lip_xy"],
+        "ramp2_normal_foot_xy": result["ramp2_normal_foot_xy"],
+        "throat_lower_xy":      result["throat_lower_xy"],
+        "throat_upper_xy":      result["throat_upper_xy"],
+        "shock_focus_xy":       result["shock_focus_xy"],
 
         "diffuser":            result["diffuser"],
         "Pt_after_cowl":       Pt_after_cowl,

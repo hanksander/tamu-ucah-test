@@ -35,8 +35,8 @@ except ImportError:
 # Reduced to the three geometry/sizing DVs the user cares about.
 DV_NAMES  = ('diffuser_AR', 'design_mdot_kgs', 'design_M0')
 DV_BOUNDS = {
-    'diffuser_AR':     (1.5, 3.0),
-    'design_mdot_kgs': (5.0, 15.0),
+    'diffuser_AR':     (1.5, 2.5),
+    'design_mdot_kgs': (7.0, 12.0),
     'design_M0':       (4.0, 5.0),
 }
 
@@ -106,3 +106,43 @@ def run(baseline: Design | None = None, maxiter: int = 30) -> tuple[Design, obje
 
 if __name__ == "__main__":
     run()
+
+
+
+    """
+     1. Create the conda env (Anaconda Prompt or any terminal):
+
+  conda create -n ramjet -c conda-forge python=3.11 -y
+  conda activate ramjet
+  conda install -c conda-forge pyoptsparse openmdao dymos numpy scipy matplotlib cantera ambiance -y
+  pip install openmdao-pycycle
+
+  Verify IPOPT is present:
+  python -c "from pyoptsparse import IPOPT; print(IPOPT().name)"
+
+  2. Point PyCharm at the conda env:
+
+  - File → Settings → Project: ... → Python Interpreter → Add Interpreter → Conda Environment → Existing environment
+  - Set "Conda executable" to your conda install (e.g., C:\Users\hanks\miniconda3\Scripts\conda.exe) and pick ramjet
+  from the "Use existing environment" dropdown.
+  - Apply. The interpreter at the bottom-right of the editor should now read "Python 3.11 (ramjet)".
+  - Verify: open the PyCharm terminal — the prompt should say (ramjet). If not, add conda activate ramjet to your
+  terminal startup or use PyCharm's "Start with conda" option under Settings → Tools → Terminal.
+
+  3. Activate IPOPT in the code:
+
+  In trajectory_opt/trajectory_problem.py you already have the IPOPT block commented at lines 83-91. Swap which block is
+   live:
+  - Comment out lines 79-81 (ScipyOptimizeDriver / SLSQP).
+  - Uncomment lines 84-89 (pyOptSparseDriver / IPOPT + declare_coloring()).
+
+  The declare_coloring() call is the biggest speed lever — it detects sparsity once per setup and reuses it.
+
+  4. Run once to seed the PerfTable cache:
+
+  python run_and_plot.py
+
+  First run rebuilds the surrogate pickle (one pyCycle call per grid node). Second run and beyond skip this entirely for
+   the same design.digest().
+    
+    """

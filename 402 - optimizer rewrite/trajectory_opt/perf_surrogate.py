@@ -20,8 +20,9 @@ CACHE_DIR = Path(__file__).resolve().parent / ".perf_cache"
 class PerfTable:
     """M × h × phi interpolator for a fixed Design. Cached on disk."""
 
-    GRID_M   = np.linspace(3.5, 5.0, 3)
-    GRID_H   = np.linspace(18_000., 22_000., 2)
+    # Cruise-only envelope: M=4-5, alt=15-24 km (user-specified design window).
+    GRID_M   = np.linspace(4.0, 5.0, 3)
+    GRID_H   = np.linspace(15_000., 24_000., 4)
     GRID_PHI = np.array([0.7, 0.9])
     _FIELDS = ('thrust','isp','mdot_a','mdot_f','M4','Tt4',
                 'unstart','Pc','L','D')
@@ -33,7 +34,11 @@ class PerfTable:
         self._geom    = None
 
     def _cache_path(self) -> Path:
-        return CACHE_DIR / f"table_{self.design.digest()}.pkl"
+        # Include the grid signature so a grid-bound change (e.g. widening
+        # the altitude range) doesn't collide with an older pickle of the
+        # same design.
+        grid_tag = f"{len(self.GRID_M)}x{len(self.GRID_H)}x{len(self.GRID_PHI)}"
+        return CACHE_DIR / f"table_{self.design.digest()}_{grid_tag}.pkl"
 
     def build(self, force: bool=False) -> "PerfTable":
         p = self._cache_path()

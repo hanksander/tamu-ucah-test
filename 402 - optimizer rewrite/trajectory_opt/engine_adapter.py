@@ -35,7 +35,8 @@ class PyCycleRamAdapter:
     """Wraps pyc_run.analyze() in the stable PerfResult contract."""
 
     def __init__(self):
-        self._design_cache = {}  # digest -> pyc_run design dict
+        self._design_cache = {}    # digest -> pyc_run design dict
+        self._geometry_cache = {}  # digest -> enriched geometry summary
 
     def _get_design_dict(self, d: Design) -> dict:
         key = d.digest()
@@ -44,6 +45,14 @@ class PyCycleRamAdapter:
                 **_design_to_overrides(d)
             )
         return self._design_cache[key]
+
+    def _get_geometry_summary(self, d: Design) -> dict:
+        key = d.digest()
+        if key not in self._geometry_cache:
+            self._geometry_cache[key] = pyc_run.build_geometry_summary(
+                self._get_design_dict(d)
+            )
+        return self._geometry_cache[key]
 
     def evaluate(self, M, h_m, phi, design: Design) -> PerfResult:
         try:
@@ -77,4 +86,4 @@ class PyCycleRamAdapter:
         )
 
     def geometry(self, design: Design) -> dict:
-        return self._get_design_dict(design)
+        return self._get_geometry_summary(design)

@@ -4,7 +4,16 @@
       "Bash(python -c \"from trajectory_opt.engine_interface import Design, PerfResult, Status, EngineModel; d=Design\\(\\); print\\('Design digest:', d.digest\\(\\)\\); print\\('Design fields:', d\\); print\\('Infeasible result:', PerfResult.infeasible\\(\\)\\)\")",
       "Bash(python -c \"from trajectory_opt.engine_adapter import PyCycleRamAdapter; print\\('Adapter import OK'\\); a = PyCycleRamAdapter\\(\\); print\\('Instance OK'\\)\")",
       "Bash(pip show *)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('402inlet2.py'\\).read\\(\\)\\); print\\('402inlet2.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('combustor.py'\\).read\\(\\)\\); print\\('combustor.py OK'\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(python -m pip list)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pyc_run.py'\\).read\\(\\)\\); print\\('pyc_run.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pyc_run.py', encoding='utf-8'\\).read\\(\\)\\); print\\('pyc_run.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pyc_run.py'\\).read\\(\\)\\); print\\('pyc_run.py OK'\\); ast.parse\\(open\\('pyc_config.py'\\).read\\(\\)\\); print\\('pyc_config.py OK'\\)\")",
+      "Bash(python -c 'import ast *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('trajectory_opt/perf_surrogate.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }
