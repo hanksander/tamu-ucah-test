@@ -22,6 +22,14 @@ FUEL_TYPE      = 'JP-10'
 F_STOICH_JP10  = 0.0667    # stoichiometric fuel-air mass ratio
 F_STOICH = 0.0667
 LHV_JP10       = 43.4e6    # lower heating value [J/kg]
+MW_JP10        = 136.23    # molecular weight [g/mol]
+
+# Legacy (non-pyCycle) stack defaults.  Kept here so config.py can be removed
+# and every constant has one canonical source.
+A_CAPTURE                  = 0.1                 # legacy capture area [m^2]
+INLET_RAMPS_DEG            = [7.0, 10.0, 13.0]   # legacy 3-ramp deflections
+M_TRANSITION               = 5.5                 # ram <-> scram mode boundary
+ISOLATOR_PT_RECOVERY_SCRAM = 0.97                # scram isolator Pt ratio
 
 
 
@@ -115,31 +123,55 @@ DESIGN PARAMETERS
   - Lower: shorter diffuser, less shock travel room, earlier expelled/swallowed transitions.
 """
 
-INLET_DESIGN_M0                    = 5
-INLET_DESIGN_ALT_M                 = 22_000.0
-INLET_DESIGN_ALPHA_DEG             = 2.0
-INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 2.0
-INLET_DESIGN_MDOT_KGS              = 8.0     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.30    # inlet spanwise width [m]
-INLET_FOREBODY_SEP_MARGIN          = 0.25
-INLET_RAMP_SEP_MARGIN              = 0.25
-INLET_KANTROWITZ_MARGIN            = 0.80
-INLET_SHOCK_FOCUS_FACTOR           = 1.1
+INLET_DESIGN_M0                    = 5.0
+INLET_DESIGN_ALT_M                 = 20_000.0   # mid of 19–21 km envelope
+INLET_DESIGN_ALPHA_DEG             = 3.0        # worst-α design anchor
+INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 4.5
+INLET_DESIGN_MDOT_KGS              = 5.0     # design-point air mass flow [kg/s]
+INLET_DESIGN_WIDTH_M               = 0.275   # inlet spanwise width [m] (hard req)
+INLET_FOREBODY_SEP_MARGIN          = 0.30
+INLET_RAMP_SEP_MARGIN              = 0.30
+INLET_KANTROWITZ_MARGIN            = 0.85
+INLET_SHOCK_FOCUS_FACTOR           = 1.10
 
-DIFFUSER_AREA_RATIO = 2.5
+# Air properties used by 402inlet2's cold-air oblique/normal-shock solver
+# (freestream-temperature relations). The thermally-perfect path uses
+# gamma_air(T) from NASA-7 polynomials for N2/O2 at the mole fractions below.
+AIR_GAMMA_REF = 1.4       # reference cold-air ratio of specific heats
+AIR_R         = 287.05    # dry-air specific gas constant [J/(kg·K)]
+AIR_X_N2      = 0.79      # air mole fraction N2 (frozen-chemistry shock)
+AIR_X_O2      = 0.21      # air mole fraction O2 (frozen-chemistry shock)
+
+# 402inlet2 legacy function-default factors (used by __main__ sweep harness;
+# runtime callers override via the INLET_*_MARGIN / SHOCK_FOCUS_FACTOR knobs
+# above).
+INLET_LEGACY_FOREBODY_SEP_MARGIN = 0.95
+INLET_LEGACY_RAMP_SEP_MARGIN     = 0.95
+INLET_LEGACY_KANTROWITZ_MARGIN   = 0.95
+INLET_LEGACY_SHOCK_FOCUS_FACTOR  = 1.25
+
+# 402inlet2 plotting knobs (visual only — do not affect flow solution)
+INLET_SHOCK_EXTENSION_FACTOR = 1.20   # how far shocks are drawn past the inlet
+INLET_COWL_EXTENSION_FACTOR  = 1.35   # cowl length scale in plots
+INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
+
+DIFFUSER_AREA_RATIO = 1.75
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 4
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 2
 
 
 COMBUSTOR_L_STAR_DEFAULT = 1.5
-NOZZLE_AR_DEFAULT        = 5.0   # nozzle Ae/At default (build_design fallback)
+NOZZLE_AR                = 15.0   # nozzle Ae/At committed design knob
+NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.92   # combustion efficiency
 ETA_NOZZLE_CV        = 0.97   # nozzle velocity coefficient (Cv)
+ETA_NOZZLE           = ETA_NOZZLE_CV   # legacy alias
 NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV', or 'CD_CV'
 ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
+ETA_DIFFUSER         = 0.98   # subsonic diffuser total-pressure recovery (friction)
 
 PHI_DEFAULT = 0.7
 
@@ -158,8 +190,11 @@ TT4_MAX_K      = 3000.0
 Q_MAX_PA       = 120_000.0
 PHI_MIN        = 0.30
 PHI_MAX        = 0.90
-ENGINE_L_MAX_M = 3.75
-ENGINE_D_MAX_M = 0.4
+ENGINE_L_MAX_M = 3.8       # hard geometry budget (user requirement)
+ENGINE_D_MAX_M = 0.38      # overall frontal cap; combustor chamber is stricter (0.35)
+ENGINE_COMBUSTOR_D_MAX_M    = 0.35   # combustion-chamber diameter cap
+ENGINE_NOZZLE_EXIT_D_MAX_M  = 0.38   # nozzle exit diameter cap
+ENGINE_MIN_THRUST_N         = 6_000.0
 
 # v2 φ-envelope closure: where to place the terminal shock along the
 # diffuser capability range [Ps_min, Ps_max].
@@ -168,7 +203,7 @@ ENGINE_D_MAX_M = 0.4
 # 1.0 → shock at throat (weak, least diffusion, safest start margin).
 # 0.7 is a conservative design-intent default — weak shock near throat,
 # mimicking typical started-mode operation.
-PS3_BIAS = 0.5
+PS3_BIAS = 0.75
 
 
 #0.14 m^3

@@ -1,11 +1,20 @@
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.interpolate import CubicSpline, PchipInterpolator
 
-GAMMA = 1.4        # reference cold-air ratio; kept only for freestream-level
-                   # isentropic relations where T ~ 220 K and gamma_air(T)~1.400
-R = 287.05
+from pyc_config import (
+    AIR_GAMMA_REF as GAMMA,
+    AIR_R as R,
+    AIR_X_N2 as _X_N2_AIR,
+    AIR_X_O2 as _X_O2_AIR,
+    INLET_LEGACY_FOREBODY_SEP_MARGIN as _LEG_FB_MARGIN,
+    INLET_LEGACY_RAMP_SEP_MARGIN as _LEG_RP_MARGIN,
+    INLET_LEGACY_KANTROWITZ_MARGIN as _LEG_KZ_MARGIN,
+    INLET_LEGACY_SHOCK_FOCUS_FACTOR as _LEG_FOCUS_FACTOR,
+    INLET_SHOCK_EXTENSION_FACTOR as _SHOCK_EXT_FACTOR,
+    INLET_COWL_EXTENSION_FACTOR as _COWL_EXT_FACTOR,
+    INLET_COWL_MIN_LENGTH_M as _COWL_MIN_LEN_M,
+)
 
 # ----------------------------------------------------------------------------
 # Thermally-perfect frozen-air specific heat ratio, gamma(T)
@@ -23,8 +32,6 @@ _NASA7_N2_LO = (3.53100528, -1.23660987e-4, -5.02999437e-7,  2.43530612e-9,  -1.
 _NASA7_N2_HI = (2.95257626,  1.39690057e-3, -4.92631691e-7,  7.86010190e-11, -4.60755348e-15)
 _NASA7_O2_LO = (3.78245636, -2.99673415e-3,  9.84730200e-6, -9.68129508e-9,   3.24372836e-12)
 _NASA7_O2_HI = (3.66096083,  6.56365523e-4, -1.41149485e-7,  2.05797658e-11, -1.29913248e-15)
-_X_N2_AIR = 0.79
-_X_O2_AIR = 0.21
 
 
 def _cp_over_R_nasa7(T, lo, hi):
@@ -51,7 +58,8 @@ def gamma_air(T):
 
 # Subsonic-diffuser (throat -> combustor face) geometry defaults.
 from pyc_config import (DIFFUSER_AREA_RATIO, DIFFUSER_HALF_ANGLE_DEG,
-                        DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG, DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH)
+                        DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG, DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
+                        ETA_DIFFUSER)
 
 
 def std_atmosphere_1976(h_m):
@@ -864,7 +872,7 @@ def invert_area_mach_ratio_supersonic(target_A_over_Astar, gamma=GAMMA,
 
     return 0.5 * (lo + hi)
 
-def size_throat_from_kantrowitz(M2,width_m,h_req_normal,kantrowitz_margin=0.95,):
+def size_throat_from_kantrowitz(M2,width_m,h_req_normal,kantrowitz_margin=_LEG_KZ_MARGIN,):
     A_capture_k = width_m * h_req_normal
 
     CR_k_raw = kantrowitz_contraction_ratio(M2)
@@ -1213,146 +1221,59 @@ def _iterate_subsonic_mach_tpg(A_over_Astar, Tt, n_iter=8, tol=1e-3):
     return M, gamma
 
 
-def _exit_static_pressure_for_shock_at(x_s, diffuser, Pt_after_cowl,
-                                       Tt0, area_spline=None, M_throat=1.0):
+def _diffuser_subsonic_exit_state(diffuser, M_in, T_in, Pt_in, Tt0,
+                                  eta_diffuser=ETA_DIFFUSER):
     """
-    Given a trial shock axial station x_s in the diverging (supersonic)
-    region, propagate to the diffuser exit and return predicted exit static
-    pressure plus intermediate state.
+    Subsonic diffuser exit state (station 3, combustor face) for the
+    cascade-only model: the reflection cascade has already made the flow
+    subsonic (or sonic after its terminal normal shock), so the diffuser is
+    a pure area-ruled subsonic diffusion with a small friction Pt loss.
 
-    Uses temperature-dependent gamma via gamma_air(T) throughout:
-      - supersonic Mach from A/A* is iterated on gamma(T_sup)
-      - the normal shock is solved via normal_shock_tpg at T_sup
-      - subsonic A/A* inversion and p/pt use gamma(T_sub), gamma(T_exit).
+    Parameters
+    ----------
+    diffuser      : result["diffuser"] block (has A_throat, A_exit).
+    M_in, T_in    : cascade exit Mach, static T (subsonic by construction).
+    Pt_in         : cascade exit total pressure [Pa].
+    Tt0           : freestream total temperature [K].
+    eta_diffuser  : subsonic diffuser Pt-recovery factor (friction).
+
+    Returns
+    -------
+    dict with:
+        Pt3, M3, T3, Ps3, gamma3, A_throat, A_exit
     """
-    A_throat = diffuser["A_throat"]
-    A_exit   = diffuser["A_exit"]
-    xs       = diffuser["x_stations"]
+    A_throat = float(diffuser["A_throat"])
+    A_exit   = float(diffuser["A_exit"])
 
-    if x_s <= xs[0] or x_s >= xs[-1]:
-        raise ValueError("Trial shock station outside diffuser.")
+    # Pin M_in to the subsonic branch. The cascade's terminal normal-shock
+    # clamp guarantees M_exit <= 1, but protect against the M==1 edge case.
+    M_in = min(float(M_in), 1.0 - 1e-6)
 
-    if area_spline is None:
-        area_spline = CubicSpline(xs, diffuser["A_stations"], bc_type='natural')
+    # Sonic reference area for this streamtube (same on both sides of a
+    # frictionless diverging duct). With friction we bump Pt afterwards.
+    gamma_in = gamma_air(float(T_in))
+    Astar    = A_throat / area_mach_ratio(M_in, gamma=gamma_in)
 
-    A_s = float(area_spline(x_s))
-
-    # Supersonic branch upstream of the terminal shock. gamma iterated on
-    # T_sup = Tt0 / (1 + (gamma-1)/2 M_sup^2).
-    M_sup, gamma_sup = _iterate_supersonic_mach_tpg(A_s / A_throat, Tt0)
-    T_sup = Tt0 / (1.0 + 0.5 * (gamma_sup - 1.0) * M_sup * M_sup)
-
-    # Normal shock with T-dependent gamma.
-    M_sub, p2_p1, _, _, pt2_pt1, T_sub, gamma_shock = normal_shock_tpg(M_sup, T_sup)
-    Pt_after_shock = Pt_after_cowl * pt2_pt1
-
-    # Subsonic area-Mach with gamma at local T_sub. Note: Tt is (approx)
-    # conserved through the shock since h_t is conserved (thermally perfect).
-    Astar_sub = A_s / area_mach_ratio(M_sub, gamma=gamma_shock)
-    M_exit, gamma_exit = _iterate_subsonic_mach_tpg(A_exit / Astar_sub, Tt0)
-
-    Ps_exit = Pt_after_shock * _static_over_total(M_exit, gamma=gamma_exit)
+    # Subsonic branch: diverging duct -> lower Mach at larger area.
+    M3, gamma3 = _iterate_subsonic_mach_tpg(A_exit / Astar, Tt0)
+    T3  = Tt0 / (1.0 + 0.5 * (gamma3 - 1.0) * M3 * M3)
+    Pt3 = float(Pt_in) * eta_diffuser
+    Ps3 = Pt3 * _static_over_total(M3, gamma=gamma3)
     return {
-        "x_s":            x_s,
-        "A_s":            A_s,
-        "M_sup":          M_sup,
-        "M_sub":          M_sub,
-        "pt_ratio_shock": pt2_pt1,
-        "Pt_after_shock": Pt_after_shock,
-        "M_exit":         M_exit,
-        "Ps_exit":        Ps_exit,
-        "gamma_sup":      gamma_sup,
-        "gamma_shock":    gamma_shock,
-        "gamma_exit":     gamma_exit,
-        "T_sup":          T_sup,
-        "T_sub":          T_sub,
-    }
-
-
-def solve_terminal_shock_position(result, p_back, Pt_after_cowl, Tt0,
-                                  tol=1e-3, max_iter=30):
-    """
-    Find axial shock station x_s in the subsonic diffuser such that the
-    predicted exit static pressure equals p_back.
-    """
-    diffuser = result["diffuser"]
-    xs = diffuser["x_stations"]
-    area_spline = CubicSpline(xs, diffuser["A_stations"], bc_type='natural')
-
-    eps = 1e-4 * (xs[-1] - xs[0])
-    x_lo = xs[0] + eps
-    x_hi = xs[-1] - eps
-
-    hi_state = _exit_static_pressure_for_shock_at(
-        x_hi, diffuser, Pt_after_cowl, Tt0, area_spline=area_spline)
-    lo_state = _exit_static_pressure_for_shock_at(
-        x_lo, diffuser, Pt_after_cowl, Tt0, area_spline=area_spline)
-
-    Ps_max = lo_state["Ps_exit"]
-    Ps_min = hi_state["Ps_exit"]
-
-    if p_back > Ps_max:
-        # Back pressure exceeds what the diffuser can contain with a shock
-        # anywhere inside it -> inlet unstart. The correct physics is a bow
-        # shock at freestream Mach, which the caller applies separately.
-        # Report pt_frac from the weakest (throat) in-diffuser shock here so
-        # this field reflects a real Pt loss instead of an impossible 1.0.
-        return {"status": "expelled", "p_back": p_back,
-                "Ps_max": Ps_max, "Ps_min": Ps_min,
-                "pt_frac_after_terminal_shock":
-                    lo_state["pt_ratio_shock"],
-                **lo_state}
-    if p_back < Ps_min:
-        return {"status": "swallowed", "p_back": p_back,
-                "Ps_max": Ps_max, "Ps_min": Ps_min,
-                "pt_frac_after_terminal_shock":
-                    hi_state["Pt_after_shock"] / Pt_after_cowl,
-                **hi_state}
-
-    lo, hi = x_lo, x_hi
-    state = None
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        state = _exit_static_pressure_for_shock_at(
-            mid, diffuser, Pt_after_cowl, Tt0, area_spline=area_spline)
-        err = state["Ps_exit"] - p_back
-        if abs(err) < tol * max(p_back, 1.0):
-            break
-        if err > 0.0:
-            lo = mid
-        else:
-            hi = mid
-
-    pt_frac_terminal = state["Pt_after_shock"] / Pt_after_cowl
-
-    gamma_exit = state.get("gamma_exit", GAMMA)
-    T_exit = Tt0 / (1.0 + 0.5 * (gamma_exit - 1.0) * state["M_exit"] ** 2)
-    a_exit = math.sqrt(gamma_exit * R * T_exit)
-    V_exit = state["M_exit"] * a_exit
-
-    return {
-        "status":                        "normal",
-        "p_back":                        p_back,
-        "Ps_max":                        Ps_max,
-        "Ps_min":                        Ps_min,
-        "x_s":                           state["x_s"],
-        "A_s":                           state["A_s"],
-        "M_sup":                         state["M_sup"],
-        "M_sub":                         state["M_sub"],
-        "M_exit":                        state["M_exit"],
-        "Ps_exit":                       state["Ps_exit"],
-        "Pt_after_terminal_shock":       state["Pt_after_shock"],
-        "pt_frac_after_terminal_shock":  pt_frac_terminal,
-        "T_exit":                        T_exit,
-        "a_exit":                        a_exit,
-        "V_exit":                        V_exit,
+        "Pt3":      Pt3,
+        "M3":       M3,
+        "T3":       T3,
+        "Ps3":      Ps3,
+        "gamma3":   gamma3,
+        "A_throat": A_throat,
+        "A_exit":   A_exit,
     }
 
 
 def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
-    mdot_required,width_m,forebody_separation_margin=0.95,
-    ramp_separation_margin=0.95,kantrowitz_margin=0.95,
-    shock_focus_factor=1.25,):
+    mdot_required,width_m,forebody_separation_margin=_LEG_FB_MARGIN,
+    ramp_separation_margin=_LEG_RP_MARGIN,kantrowitz_margin=_LEG_KZ_MARGIN,
+    shock_focus_factor=_LEG_FOCUS_FACTOR,):
 
     validate_d2r_inputs(
         M0=M0,
@@ -1687,8 +1608,8 @@ def print_d2r_report(result):
 
     print("\n==============================\n")
 
-def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=1.20,
-    cowl_extension_factor=1.35,):
+def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACTOR,
+    cowl_extension_factor=_COWL_EXT_FACTOR,):
 
     if not result.get("success", False):
         raise ValueError("Result is not successful.")
@@ -1728,7 +1649,7 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=1.20,
     lamc_end = (x_end - C[0]) / cowl_shock_dir[0]
     y_sc_end = C[1] + lamc_end * cowl_shock_dir[1]
 
-    cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], 0.2)
+    cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], _COWL_MIN_LEN_M)
     cowl_end = C + cowl_len * cowl_dir
 
     fig, ax = plt.subplots(figsize=(11, 5.5))
@@ -1796,7 +1717,7 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=1.20,
 
 def sweep_d2r_margins(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
     mdot_required,width_m,forebody_margin_values,ramp_margin_values,
-    kantrowitz_margin=0.95,shock_focus_factor=1.25,verbose=True,):
+    kantrowitz_margin=_LEG_KZ_MARGIN,shock_focus_factor=_LEG_FOCUS_FACTOR,verbose=True,):
 
     best_result = None
     best_forebody_margin = None
@@ -1889,10 +1810,8 @@ def print_d2r_sweep_summary(summary,):
 
 def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
     """Run forebody → ramp1 → ramp2 → cowl → reflection cascade ONCE for a
-    frozen geometry at (M0, alt, α). Factored out of
-    evaluate_fixed_geometry_at_condition so the new inlet-limited RAM closure
-    can reuse the upstream state across many trial p_back / φ values without
-    redundant shock evaluation.
+    frozen geometry at (M0, alt, α). Shared by compute_inlet_capability and
+    evaluate_fixed_geometry_at_condition.
     """
     T0, p0, rho0, a0 = std_atmosphere_1976(altitude_m)
     V0 = M0 * a0
@@ -1960,6 +1879,12 @@ def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
     Pt0 = p0 * (1.0 + 0.5 * (GAMMA - 1.0) * M0 * M0) ** (GAMMA / (GAMMA - 1.0))
     Pt_after_cowl = Pt0 * pt_frac_after_cowl
 
+    # Reflection cascade is the isolator Pt-loss model. Everything downstream
+    # (diffuser terminal shock, pyCycle inlet ram_recovery) references
+    # Pt_after_cascade so there is no separate lumped ISOLATOR_PT_RECOVERY.
+    pt_frac_after_cascade = float(cascade["pt_frac_after_cascade"])
+    Pt_after_cascade      = Pt0 * pt_frac_after_cascade
+
     return {
         "ok":             True,
         "T0":             T0,        "p0": p0,      "rho0": rho0, "a0": a0,
@@ -1976,7 +1901,9 @@ def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
         "pt_frac_after_shock1":   pt_frac_after_shock1,
         "pt_frac_after_shock2":   pt_frac_after_shock2,
         "pt_frac_after_cowl":     pt_frac_after_cowl,
+        "pt_frac_after_cascade":  pt_frac_after_cascade,
         "Pt_after_cowl":          Pt_after_cowl,
+        "Pt_after_cascade":       Pt_after_cascade,
         # Absolute shock angles for plotting consumers
         "shock_fore_abs_deg": beta_fore_rel,
         "shock1_abs_deg":     theta_fore + beta1_rel,
@@ -1986,30 +1913,26 @@ def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
     }
 
 
-def compute_inlet_capability(result, M0, altitude_m, alpha_deg, n_stations=25):
-    """Tabulate the inlet's (p_back ↔ terminal-shock response) curve.
+def compute_inlet_capability(result, M0, altitude_m, alpha_deg):
+    """Cascade-only inlet capability at (M0, altitude, alpha).
 
-    For the inlet-limited RAM closure, the combustor side sweeps φ while this
-    capability is fixed. Precomputing it once per (M0, alt, α, design) and
-    handing back monotonic inverse splines lets Stage B look up the inlet's
-    response to any demanded p_back in O(1) instead of rerunning the
-    bracketed bisection inside solve_terminal_shock_position.
+    Runs forebody → ramps → cowl → reflection-cascade → subsonic diffuser
+    ONCE and returns the total pressure delivered at the combustor face. No
+    terminal-shock sweep, no Ps_min/Ps_max bracket — the reflection cascade
+    is the canonical isolator Pt-loss mechanism, and the subsonic diffuser
+    applies a small friction factor ETA_DIFFUSER on top.
 
     Returns
     -------
     dict with keys:
         ok : bool
         reason : str (if not ok)
-        Ps_max, Ps_min : extremes of p_back the diffuser can sustain with a
-                         terminal shock inside it. Ps_max = shock just inside
-                         the throat (weak shock, small Pt loss). Ps_min =
-                         shock at diffuser exit (strong shock, large Pt loss).
-        Pt_after_cowl, Tt0, M3, T3 : upstream state delivered to the combustor.
-        pt_frac_after_cowl : Pt fraction lost through the oblique-shock train.
-        x_s_of_Ps, Pt_frac_of_Ps, M_exit_of_Ps : monotonic PCHIP inverse
-            splines. Evaluate at any p_back ∈ [Ps_min, Ps_max] to get the
-            terminal-shock station, the post-terminal-shock Pt fraction
-            (relative to Pt_after_cowl), and the combustor-face Mach.
+        Pt_after_cowl, Pt_after_cascade : Pt at cowl-shock and cascade exit [Pa]
+        Pt3_deliverable : Pt at diffuser exit / combustor face [Pa]
+        M3_diffuser_exit, T3_diffuser_exit, Ps3_diffuser_exit
+        M_cascade_exit, T_cascade_exit
+        pt_frac_after_cowl, pt_frac_after_cascade, pt_frac_deliverable
+        Tt0, A_throat, A_exit
     """
     up = _upstream_shock_chain(result, M0, altitude_m, alpha_deg)
     if not up["ok"]:
@@ -2020,123 +1943,86 @@ def compute_inlet_capability(result, M0, altitude_m, alpha_deg, n_stations=25):
                 "reason": "Frozen geometry has no diffuser block. Rebuild "
                           "with build_subsonic_diffuser first."}
 
-    diffuser = result["diffuser"]
-    xs_diff  = diffuser["x_stations"]
-    eps      = 1e-4 * (xs_diff[-1] - xs_diff[0])
-    x_lo     = xs_diff[0] + eps
-    x_hi     = xs_diff[-1] - eps
+    diffuser         = result["diffuser"]
+    cascade          = up["cascade"]
+    Pt_after_cowl    = up["Pt_after_cowl"]
+    Pt_after_cascade = up["Pt_after_cascade"]
+    Tt0              = up["Tt0"]
 
-    # One spline of diffuser area — reused across every station evaluation.
-    area_spline = CubicSpline(xs_diff, diffuser["A_stations"], bc_type='natural')
-
-    x_grid       = np.linspace(x_lo, x_hi, n_stations)
-    Ps_arr       = np.empty(n_stations)
-    Pt_frac_arr  = np.empty(n_stations)
-    M_exit_arr   = np.empty(n_stations)
-    Pt_after_cowl = up["Pt_after_cowl"]
-
-    for i, x_s in enumerate(x_grid):
-        state = _exit_static_pressure_for_shock_at(
-            x_s, diffuser, Pt_after_cowl, up["Tt0"],
-            area_spline=area_spline,
-        )
-        Ps_arr[i]      = state["Ps_exit"]
-        Pt_frac_arr[i] = state["Pt_after_shock"] / Pt_after_cowl
-        M_exit_arr[i]  = state["M_exit"]
-
-    # Ps_exit decreases as x_s moves downstream (stronger supersonic Mach →
-    # stronger normal shock → bigger Pt loss → lower exit Ps). Sort by Ps so
-    # the inverse splines have a strictly-increasing independent variable.
-    order          = np.argsort(Ps_arr)
-    Ps_sorted      = Ps_arr[order]
-    x_sorted       = x_grid[order]
-    Pt_frac_sorted = Pt_frac_arr[order]
-    M_exit_sorted  = M_exit_arr[order]
-
-    # Drop duplicate Ps values (can happen at the endpoints due to rounding).
-    keep = np.concatenate(([True], np.diff(Ps_sorted) > 0.0))
-    Ps_sorted      = Ps_sorted[keep]
-    x_sorted       = x_sorted[keep]
-    Pt_frac_sorted = Pt_frac_sorted[keep]
-    M_exit_sorted  = M_exit_sorted[keep]
-
-    if Ps_sorted.size < 2:
-        return {"ok": False,
-                "reason": "Diffuser sweep collapsed to a single Ps value."}
-
-    x_s_of_Ps     = PchipInterpolator(Ps_sorted, x_sorted,       extrapolate=False)
-    Pt_frac_of_Ps = PchipInterpolator(Ps_sorted, Pt_frac_sorted, extrapolate=False)
-    M_exit_of_Ps  = PchipInterpolator(Ps_sorted, M_exit_sorted,  extrapolate=False)
+    diff = _diffuser_subsonic_exit_state(
+        diffuser,
+        M_in=cascade["M_exit"],
+        T_in=cascade["T_exit"],
+        Pt_in=Pt_after_cascade,
+        Tt0=Tt0,
+    )
+    Pt0 = up["Pt0"]
+    pt_frac_deliverable = diff["Pt3"] / Pt0 if Pt0 > 0.0 else 0.0
 
     return {
-        "ok":                 True,
-        "Ps_max":             float(Ps_sorted[-1]),
-        "Ps_min":             float(Ps_sorted[0]),
-        "Pt_after_cowl":      float(Pt_after_cowl),
-        "Tt0":                float(up["Tt0"]),
-        "M3":                 float(up["M3"]),
-        "T3":                 float(up["T3_s"]),
-        "pt_frac_after_cowl": float(up["pt_frac_after_cowl"]),
-        "x_s_of_Ps":          x_s_of_Ps,
-        "Pt_frac_of_Ps":      Pt_frac_of_Ps,
-        "M_exit_of_Ps":       M_exit_of_Ps,
+        "ok":                     True,
+        "Pt_after_cowl":          float(Pt_after_cowl),
+        "Pt_after_cascade":       float(Pt_after_cascade),
+        "Pt3_deliverable":        float(diff["Pt3"]),
+        "M3_diffuser_exit":       float(diff["M3"]),
+        "T3_diffuser_exit":       float(diff["T3"]),
+        "Ps3_diffuser_exit":      float(diff["Ps3"]),
+        "gamma3_diffuser_exit":   float(diff["gamma3"]),
+        "M_cascade_exit":         float(cascade["M_exit"]),
+        "T_cascade_exit":         float(cascade["T_exit"]),
+        "Tt0":                    float(Tt0),
+        "Pt0":                    float(Pt0),
+        "M3_cascade_inlet":       float(up["M3"]),
+        "T3_cascade_inlet":       float(up["T3_s"]),
+        "pt_frac_after_cowl":     float(up["pt_frac_after_cowl"]),
+        "pt_frac_after_cascade":  float(up["pt_frac_after_cascade"]),
+        "pt_frac_deliverable":    float(pt_frac_deliverable),
+        "A_throat":               float(diff["A_throat"]),
+        "A_exit":                 float(diff["A_exit"]),
     }
 
 
-def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
-                                         p_back):
+def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg):
     """
     Re-evaluate the shock system for a fixed geometry at a new flight
-    condition AND back pressure. Geometry (including the subsonic diffuser
-    from build_subsonic_diffuser) is frozen inside `result`.
+    condition. Geometry (including the subsonic diffuser from
+    build_subsonic_diffuser) is frozen inside `result`.
 
-    The terminal normal shock is no longer pinned to the cowl lip. Its axial
-    station is solved from p_back via solve_terminal_shock_position.
+    Cascade-only Pt-loss model: forebody + ramps + cowl + reflection cascade
+    (+ friction through the subsonic diffuser). No back-pressure-driven
+    terminal shock.
     """
     up = _upstream_shock_chain(result, M0, altitude_m, alpha_deg)
     if not up["ok"]:
         return {"success": False, "reason": up["reason"],
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
+                "M0": M0, "alpha_deg": alpha_deg}
 
-    # ---- Terminal shock: driven by back pressure inside the diffuser.
     if "diffuser" not in result:
         return {"success": False,
                 "reason": "Frozen geometry has no diffuser block. Rebuild "
                           "with build_subsonic_diffuser first.",
-                "M0": M0, "alpha_deg": alpha_deg, "p_back": p_back}
+                "M0": M0, "alpha_deg": alpha_deg}
 
-    Pt_after_cowl = up["Pt_after_cowl"]
-    Tt0           = up["Tt0"]
+    Pt_after_cowl    = up["Pt_after_cowl"]
+    Pt_after_cascade = up["Pt_after_cascade"]
+    Tt0              = up["Tt0"]
+    cascade          = up["cascade"]
 
-    terminal = solve_terminal_shock_position(result, p_back,
-                                             Pt_after_cowl, Tt0)
-
-    if terminal["status"] in ("expelled", "swallowed"):
-        return {
-            "success":        False,
-            "reason":         f"Terminal shock {terminal['status']} "
-                              f"(p_back={p_back:.1f} Pa, "
-                              f"Ps range=[{terminal['Ps_min']:.1f}, "
-                              f"{terminal['Ps_max']:.1f}] Pa).",
-            "status":         terminal["status"],
-            "M0":             M0,
-            "alpha_deg":      alpha_deg,
-            "p_back":         p_back,
-            "Pt_after_cowl":  Pt_after_cowl,
-            "terminal":       terminal,
-        }
-
-    cascade = up["cascade"]
-    pt_frac_after_cowl_val = up["pt_frac_after_cowl"]
-    pt_frac_after_terminal = (pt_frac_after_cowl_val
-                              * terminal["pt_frac_after_terminal_shock"])
+    diff = _diffuser_subsonic_exit_state(
+        result["diffuser"],
+        M_in=cascade["M_exit"],
+        T_in=cascade["T_exit"],
+        Pt_in=Pt_after_cascade,
+        Tt0=Tt0,
+    )
+    Pt0 = up["Pt0"]
+    pt_frac_deliverable = diff["Pt3"] / Pt0 if Pt0 > 0.0 else 0.0
 
     return {
         "success":        True,
-        "status":         terminal["status"],
+        "status":         "cascade",
         "M0":             M0,
         "alpha_deg":      alpha_deg,
-        "p_back":         p_back,
         "V0_ms":          up["V0"],
 
         "theta_fore_deg":  result["theta_fore_deg"],
@@ -2154,23 +2040,16 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         "M_after_shock2":          up["M2"],
         "M_after_cowl_shock":      up["M3"],
 
-        "x_terminal_shock":            terminal["x_s"],
-        "A_at_terminal_shock":         terminal["A_s"],
-        "M_before_terminal_shock":     terminal["M_sup"],
-        "M_after_terminal_shock":      terminal["M_sub"],
-        "M_at_combustor_face":         terminal["M_exit"],
-        "Ps_at_combustor_face":        terminal["Ps_exit"],
-        "V_at_combustor_face_ms":      terminal["V_exit"],
+        "M_at_combustor_face":  diff["M3"],
+        "Ps_at_combustor_face": diff["Ps3"],
+        "T_at_combustor_face":  diff["T3"],
 
         "pt_frac_after_forebody_shock":   up["pt_frac_after_forebody"],
         "pt_frac_after_shock1":           up["pt_frac_after_shock1"],
         "pt_frac_after_shock2":           up["pt_frac_after_shock2"],
-        "pt_frac_after_cowl_shock":       pt_frac_after_cowl_val,
-        "pt_frac_after_terminal_shock":   pt_frac_after_terminal,
-
-        "pt_frac_after_immediate_normal_shock": pt_frac_after_terminal,
-        "M_after_immediate_normal_shock":       terminal["M_exit"],
-        "V_after_immediate_normal_shock_ms":    terminal["V_exit"],
+        "pt_frac_after_cowl_shock":       up["pt_frac_after_cowl"],
+        "pt_frac_after_cascade":          up["pt_frac_after_cascade"],
+        "pt_frac_deliverable":            pt_frac_deliverable,
 
         "pt_frac_after_reflection_cascade": cascade["pt_frac_after_cascade"],
         "M_after_reflection_cascade":       cascade["M_exit"],
@@ -2192,11 +2071,13 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
 
         "diffuser":            result["diffuser"],
         "Pt_after_cowl":       Pt_after_cowl,
+        "Pt_after_cascade":    Pt_after_cascade,
+        "Pt3_deliverable":     diff["Pt3"],
         "Tt0":                 Tt0,
     }
 
-def plot_fixed_geometry_case(ax,case,shock_extension_factor=1.20,
-    cowl_extension_factor=1.35,):
+def plot_fixed_geometry_case(ax,case,shock_extension_factor=_SHOCK_EXT_FACTOR,
+    cowl_extension_factor=_COWL_EXT_FACTOR,):
     """
     Plot one frozen-geometry case on an existing axis.
     """
@@ -2235,7 +2116,7 @@ def plot_fixed_geometry_case(ax,case,shock_extension_factor=1.20,
     lamc_end = (x_end - C[0]) / cowl_shock_dir[0]
     y_sc_end = C[1] + lamc_end * cowl_shock_dir[1]
 
-    cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], 0.2)
+    cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], _COWL_MIN_LEN_M)
     cowl_end = C + cowl_len * cowl_dir
 
     ax.plot([P_fore[0], P0[0]], [P_fore[1], P0[1]], linewidth=1.5)
@@ -2257,9 +2138,9 @@ def plot_fixed_geometry_case(ax,case,shock_extension_factor=1.20,
     ax.grid(True)
     ax.set_title(
         f"M={case['M0']:.2f}, α={case['alpha_deg']:.1f}\n"
-        f"pt/pt0={case['pt_frac_after_terminal_shock']:.3f}")
+        f"pt/pt0={case['pt_frac_deliverable']:.3f}")
 
-def plot_fixed_geometry_3x3_grid(result,altitude_m,mach_values,alpha_values,p_back,):
+def plot_fixed_geometry_3x3_grid(result,altitude_m,mach_values,alpha_values):
     """
     Plot a 3x3 grid of frozen-geometry shock systems.
 
@@ -2280,7 +2161,6 @@ def plot_fixed_geometry_3x3_grid(result,altitude_m,mach_values,alpha_values,p_ba
                 M0=M0,
                 altitude_m=altitude_m,
                 alpha_deg=alpha_deg,
-                p_back=p_back,
             )
 
             if case["success"]:
@@ -2295,7 +2175,7 @@ def plot_fixed_geometry_3x3_grid(result,altitude_m,mach_values,alpha_values,p_ba
     plt.tight_layout()
     plt.show()
 
-def sweep_fixed_geometry_vs_mach(result,altitude_m,mach_values,alpha_deg,p_back,):
+def sweep_fixed_geometry_vs_mach(result,altitude_m,mach_values,alpha_deg):
     """
     Recompute frozen-geometry performance vs Mach at fixed alpha.
     """
@@ -2307,13 +2187,12 @@ def sweep_fixed_geometry_vs_mach(result,altitude_m,mach_values,alpha_deg,p_back,
             M0=M0,
             altitude_m=altitude_m,
             alpha_deg=alpha_deg,
-            p_back=p_back,
         )
         out.append(case)
 
     return out
 
-def sweep_fixed_geometry_vs_alpha(result,altitude_m,alpha_values,M0,p_back,):
+def sweep_fixed_geometry_vs_alpha(result,altitude_m,alpha_values,M0):
     """
     Recompute frozen-geometry performance vs alpha at fixed Mach.
     """
@@ -2325,15 +2204,14 @@ def sweep_fixed_geometry_vs_alpha(result,altitude_m,alpha_values,M0,p_back,):
             M0=M0,
             altitude_m=altitude_m,
             alpha_deg=alpha_deg,
-            p_back=p_back,
         )
         out.append(case)
 
     return out
 
-def plot_pt_vs_mach(cases, use_terminal_shock=True):
+def plot_pt_vs_mach(cases):
     """
-    Plot total pressure recovery vs Mach.
+    Plot total pressure recovery vs Mach (cascade+diffuser model).
     Also plots MIL-E-5008B:
         pt/pt0 = 1 - 0.075 * (M - 1)^1.35
     """
@@ -2344,10 +2222,7 @@ def plot_pt_vs_mach(cases, use_terminal_shock=True):
         if not case["success"]:
             continue
         xs.append(case["M0"])
-        if use_terminal_shock:
-            ys.append(case["pt_frac_after_terminal_shock"])
-        else:
-            ys.append(case["pt_frac_after_cowl_shock"])
+        ys.append(case["pt_frac_deliverable"])
 
     plt.figure(figsize=(6,4))
     plt.plot(xs, ys, marker="o", label="Computed")
@@ -2360,18 +2235,13 @@ def plot_pt_vs_mach(cases, use_terminal_shock=True):
     plt.grid(True)
     plt.xlabel("Freestream Mach")
     plt.ylabel("pt/pt0")
-    title = "Total Pressure Recovery vs Mach"
-    if use_terminal_shock:
-        title += " (cowl shock + terminal diffuser shock)"
-    else:
-        title += " (cowl shock only)"
-    plt.title(title)
+    plt.title("Total Pressure Recovery vs Mach (cascade + diffuser)")
     plt.legend()
     plt.show()
 
-def plot_pt_vs_alpha(cases, use_terminal_shock=True):
+def plot_pt_vs_alpha(cases):
     """
-    Plot total pressure recovery vs alpha.
+    Plot total pressure recovery vs alpha (cascade+diffuser model).
     """
     xs = []
     ys = []
@@ -2380,22 +2250,14 @@ def plot_pt_vs_alpha(cases, use_terminal_shock=True):
         if not case["success"]:
             continue
         xs.append(case["alpha_deg"])
-        if use_terminal_shock:
-            ys.append(case["pt_frac_after_terminal_shock"])
-        else:
-            ys.append(case["pt_frac_after_cowl_shock"])
+        ys.append(case["pt_frac_deliverable"])
 
     plt.figure(figsize=(6,4))
     plt.plot(xs, ys, marker="o")
     plt.grid(True)
     plt.xlabel("Alpha [deg]")
     plt.ylabel("pt/pt0")
-    title = "Total Pressure Recovery vs Alpha"
-    if use_terminal_shock:
-        title += " (cowl shock + terminal diffuser shock)"
-    else:
-        title += " (cowl shock only)"
-    plt.title(title)
+    plt.title("Total Pressure Recovery vs Alpha (cascade + diffuser)")
     plt.show()
 
 
@@ -2449,17 +2311,12 @@ else:
         # 3x3 shock grid
         mach_grid = [4.0, 4.5, 5.0]
         alpha_grid = [2.0, 5.0, 8.0]
-        # Back pressure for off-design terminal-shock solver [Pa]. Tune as
-        # needed for the flight envelope; 50 kPa is a nominal combustor face
-        # static pressure at ~12 km.
-        p_back_sweep = 3000000.0
 
         plot_fixed_geometry_3x3_grid(
             result=result,
             altitude_m=12000.0,
             mach_values=mach_grid,
             alpha_values=alpha_grid,
-            p_back=p_back_sweep,
         )
 
         # pt vs Mach at fixed alpha
@@ -2469,9 +2326,8 @@ else:
             altitude_m=12000.0,
             mach_values=mach_sweep,
             alpha_deg=5.0,
-            p_back=p_back_sweep,
         )
-        plot_pt_vs_mach(cases_mach, use_terminal_shock=True)
+        plot_pt_vs_mach(cases_mach)
 
         # pt vs alpha at fixed Mach
         alpha_sweep = np.linspace(0.0, 10.0, 17)
@@ -2480,6 +2336,5 @@ else:
             altitude_m=12000.0,
             alpha_values=alpha_sweep,
             M0=5.0,
-            p_back=p_back_sweep,
         )
-        plot_pt_vs_alpha(cases_alpha, use_terminal_shock=True)
+        plot_pt_vs_alpha(cases_alpha)

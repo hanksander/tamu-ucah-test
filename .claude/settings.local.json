@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(/c/Users/hanks/anaconda3/python.exe -c \"import ambiance; print\\('ok'\\)\")",
+      "Bash(awk -F. '{print $1}')"
+    ]
+  }
+}

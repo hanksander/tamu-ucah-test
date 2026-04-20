@@ -10,7 +10,7 @@ Falls back to MIL-E-5007D Pt recovery if any shock detaches
 
 from gas_dynamics import FlowState, make_state, oblique_shock, normal_shock, beta_from_theta
 from gas_dynamics import isentropic_T, isentropic_P, pi_milspec
-from config import INLET_RAMPS_DEG
+from pyc_config import INLET_RAMPS_DEG
 import numpy as np
 
 

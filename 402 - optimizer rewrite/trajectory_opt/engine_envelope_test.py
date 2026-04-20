@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from typing import Iterable
 import numpy as np
@@ -18,8 +19,11 @@ _IMPORT_ERROR = None
 try:
     from combined_cycle_liquid_ram_scram import pyc_run
     from combined_cycle_liquid_ram_scram.pyc_config import (
+        ENGINE_COMBUSTOR_D_MAX_M,
         ENGINE_D_MAX_M,
         ENGINE_L_MAX_M,
+        ENGINE_MIN_THRUST_N,
+        ENGINE_NOZZLE_EXIT_D_MAX_M,
         M4_MAX,
         TT4_MAX_K,
     )
@@ -35,23 +39,34 @@ except ModuleNotFoundError as exc:
     pyc_run = None
     PyCycleRamAdapter = None
     Design = None
-    ENGINE_D_MAX_M = 0.4
-    ENGINE_L_MAX_M = 3.75
+    ENGINE_COMBUSTOR_D_MAX_M   = 0.35
+    ENGINE_D_MAX_M             = 0.38
+    ENGINE_L_MAX_M             = 3.8
+    ENGINE_MIN_THRUST_N        = 6_000.0
+    ENGINE_NOZZLE_EXIT_D_MAX_M = 0.38
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ENVELOPE + CONSTRAINTS  — edit here to change what the search must satisfy.
+# ═══════════════════════════════════════════════════════════════════════════
 @dataclass(frozen=True)
 class EnvelopeSpec:
+    # ── ENVELOPE (flight conditions the design must work at) ──
     mach_min: float = 4.0
     mach_max: float = 5.0
-    alt_min_m: float = 16_000.0
-    alt_max_m: float = 19_000.0
-    aoa_min_deg: float = -1.0
-    aoa_max_deg: float = 5.0
+    alt_min_m: float = 19_000.0
+    alt_max_m: float = 21_000.0
+    aoa_min_deg: float = 0.0
+    aoa_max_deg: float = 3.0
     nominal_aoa_deg: float = 3.0
-    max_total_length_m: float = 4.0
-    max_width_m: float = 0.28
+
+    # ── CONSTRAINTS (pass/fail limits applied to every candidate) ──
+    max_total_length_m: float = 3.8
+    max_width_m: float = 0.275
     max_height_m: float = 0.38
-    max_diameter_m: float = 0.38
+    max_diameter_m: float = 0.38             # overall frontal cap
+    max_combustor_diameter_m: float = 0.35   # combustion-chamber cap
+    max_nozzle_exit_diameter_m: float = 0.38 # nozzle exit cap
     min_combustor_volume_m3: float = 0.08
     min_thrust_N: float = 6_000.0
     phi_for_thrust: float = 1.0
@@ -76,22 +91,28 @@ class CandidateResult:
     combustor_volume_m3: float
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# FROZEN VARIABLES  — baseline design values that are NOT swept.
+# Anything listed here that doesn't appear in _candidate_grid / _refined_grid
+# below stays fixed across every candidate.  Move a knob out of the grids and
+# into here to freeze it; move it out of here and into the grids to sweep it.
+# ═══════════════════════════════════════════════════════════════════════════
 def _build_baseline_design(spec: EnvelopeSpec) -> Design:
     return Design(
-        kantrowitz_margin=0.80,
-        diffuser_AR=2.0,
+        kantrowitz_margin=0.85,
+        diffuser_AR=1.75,
         combustor_L_star=1.5,
-        nozzle_AR=4.0,
+        nozzle_AR=9.0,                       # overridden by pyc_run ideal-expansion sizing
         LE_angle_deg=4.5,
-        ramp_sep_margin=0.25,
-        forebody_sep_margin=0.25,
-        inlet_width_m=spec.max_width_m,
-        shock_focus_factor=1.075,
+        ramp_sep_margin=0.30,
+        forebody_sep_margin=0.30,
+        inlet_width_m=spec.max_width_m,      # 0.275 m hard requirement
+        shock_focus_factor=1.10,
         diffuser_min_shock_accommodation_dh=3.0,
         design_M0=5.0,
-        design_alt_m=0.5 * (spec.alt_min_m + spec.alt_max_m),
-        design_alpha_deg=spec.nominal_aoa_deg,
-        design_mdot_kgs=8.0,
+        design_alt_m=0.5 * (spec.alt_min_m + spec.alt_max_m),   # 20 000 m
+        design_alpha_deg=spec.nominal_aoa_deg,                  # 3.0 deg
+        design_mdot_kgs=5.0,
     )
 
 
@@ -115,38 +136,18 @@ def _build_design_dict(design: Design) -> dict:
 
 
 def _envelope_points(spec: EnvelopeSpec) -> list[tuple[float, float, float]]:
+    # 8 envelope corners + the nominal-α midpoint.  Sufficient for a first-pass
+    # feasibility sweep (captures all extreme combinations of M, alt, α).
     mach_mid = 0.5 * (spec.mach_min + spec.mach_max)
-    alt_mid = 0.5 * (spec.alt_min_m + spec.alt_max_m)
-    points = {
-        (spec.mach_min, spec.alt_min_m, spec.aoa_min_deg),
-        (spec.mach_min, spec.alt_min_m, spec.aoa_max_deg),
-        (spec.mach_min, alt_mid, spec.nominal_aoa_deg),
-        (spec.mach_min, alt_mid, spec.aoa_min_deg),
-        (spec.mach_min, alt_mid, spec.aoa_max_deg),
-        (spec.mach_min, spec.alt_max_m, spec.aoa_min_deg),
-        (spec.mach_min, spec.alt_max_m, spec.aoa_max_deg),
-        (mach_mid, spec.alt_min_m, spec.aoa_min_deg),
-        (mach_mid, spec.alt_min_m, spec.nominal_aoa_deg),
-        (mach_mid, spec.alt_min_m, spec.aoa_max_deg),
-        (mach_mid, alt_mid, spec.aoa_min_deg),
-        (mach_mid, alt_mid, spec.aoa_max_deg),
-        (spec.mach_max, spec.alt_min_m, spec.aoa_max_deg),
-        (spec.mach_max, spec.alt_min_m, spec.aoa_min_deg),
-        (spec.mach_max, alt_mid, spec.aoa_min_deg),
-        (spec.mach_max, alt_mid, spec.nominal_aoa_deg),
-        (spec.mach_max, alt_mid, spec.aoa_max_deg),
-        (spec.mach_max, spec.alt_max_m, spec.aoa_min_deg),
-        (
-            mach_mid,
-            alt_mid,
-            spec.nominal_aoa_deg,
-        ),
-        (mach_mid, spec.alt_max_m, spec.aoa_min_deg),
-        (mach_mid, spec.alt_max_m, spec.nominal_aoa_deg),
-        (mach_mid, spec.alt_max_m, spec.aoa_max_deg),
-        (spec.mach_max, spec.alt_max_m, spec.nominal_aoa_deg),
-        (spec.mach_max, spec.alt_max_m, spec.aoa_max_deg),
-    }
+    alt_mid  = 0.5 * (spec.alt_min_m + spec.alt_max_m)
+    points: set[tuple[float, float, float]] = set()
+    for m, a, aoa in itertools.product(
+        (spec.mach_min, spec.mach_max),
+        (spec.alt_min_m, spec.alt_max_m),
+        (spec.aoa_min_deg, spec.aoa_max_deg),
+    ):
+        points.add((m, a, aoa))
+    points.add((mach_mid, alt_mid, spec.nominal_aoa_deg))
     return sorted(points)
 
 
@@ -190,16 +191,24 @@ def _analysis_max_height_m(analysis: dict, design_dict: dict) -> float:
     return max(vals)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# FREE VARIABLES  — knobs the search actually sweeps.
+# `_candidate_grid` is the coarse pass (runs on every candidate).
+# `_refined_grid`  is the local refinement around the top-n coarse seeds.
+# Add/remove keys from the `knobs` dict to change what is swept; edit the
+# tuple values to change the discretization.  Anything NOT in these dicts
+# is inherited from _build_baseline_design above and stays frozen.
+# ═══════════════════════════════════════════════════════════════════════════
 def _candidate_grid(base: Design, spec: EnvelopeSpec) -> Iterable[Design]:
-    mach_mid = 0.5 * (spec.mach_min + spec.mach_max)
+    # Five-knob coarse grid (2·3·2·2·3 = 72 candidates) for a sub-hour sweep.
+    # Forebody/ramp margins, shock focus, Lstar, shock-accommodation D_h, and
+    # design altitude are frozen in _build_baseline_design.
     knobs = {
-        "diffuser_AR": (1.75, 2.0, 2.25, 2.5),
-        "LE_angle_deg": (4.0, 4.5, 5.0),
-        "diffuser_min_shock_accommodation_dh": (2.0, 3.0, 4.0),
-        "design_M0": (4.0, 4.5, 5.0),
-        "kantrowitz_margin": (0.80, 0.85, 0.90),
-        "design_alt_m": tuple(np.linspace(spec.alt_min_m, spec.alt_max_m, 6)),
-        "design_mdot_kgs": (6.0, 8.0, 10.0),
+        "design_M0":         (4.5, 5.0),
+        "design_mdot_kgs":   (4.0, 5.0, 6.0),
+        "kantrowitz_margin": (0.80, 0.85),
+        "LE_angle_deg":      (3.5, 4.5),
+        "diffuser_AR":       (1.5, 1.75, 2.0),
     }
     names = tuple(knobs.keys())
     for values in itertools.product(*(knobs[name] for name in names)):
@@ -212,13 +221,11 @@ def _refined_grid(seed: Design, spec: EnvelopeSpec) -> Iterable[Design]:
         return tuple(vals)
 
     knobs = {
-        "diffuser_AR": around(seed.diffuser_AR, 0.25, 1.5, 2.5),
-        "LE_angle_deg": around(seed.LE_angle_deg, 0.25, 3.75, 5.25),
-        "diffuser_min_shock_accommodation_dh": around(seed.diffuser_min_shock_accommodation_dh, 0.5, 2.0, 4.0),
-        "design_M0": around(seed.design_M0, 0.25, 4.0, 5.0),
+        "design_M0":         around(seed.design_M0,         0.25,  4.5,  5.0),
+        "design_mdot_kgs":   around(seed.design_mdot_kgs,   0.5,   3.5,  6.5),
         "kantrowitz_margin": around(seed.kantrowitz_margin, 0.025, 0.80, 0.90),
-        "design_alt_m": around(seed.design_alt_m, 1000.0, spec.alt_min_m, spec.alt_max_m),
-        "design_mdot_kgs": around(seed.design_mdot_kgs, 0.5, 5.0, 11.0),
+        "LE_angle_deg":      around(seed.LE_angle_deg,      0.25,  3.0,  5.0),
+        "diffuser_AR":       around(seed.diffuser_AR,       0.125, 1.4,  2.0),
     }
     names = tuple(knobs.keys())
     for values in itertools.product(*(knobs[name] for name in names)):
@@ -335,14 +342,12 @@ def evaluate_candidate(
             )
             break
 
-        p_back_mid = 0.5 * (float(capability["Ps_min"]) + float(capability["Ps_max"]))
         try:
             case = pyc_run._inlet2.evaluate_fixed_geometry_at_condition(
                 design_dict,
                 M0=mach,
                 altitude_m=alt_m,
                 alpha_deg=aoa_deg,
-                p_back=p_back_mid,
             )
         except Exception as exc:
             reasons.append(
@@ -358,7 +363,7 @@ def evaluate_candidate(
 
         worst_pt_recovery = min(
             worst_pt_recovery,
-            float(case.get("pt_frac_after_terminal_shock", 0.0)),
+            float(case.get("pt_frac_deliverable", 0.0)),
         )
         worst_capture_mdot_kgs = min(worst_capture_mdot_kgs, float(py_catch_mdot(mach, alt_m, geometry)))
 
@@ -384,6 +389,22 @@ def evaluate_candidate(
             reasons.append(
                 f"M={mach:.2f} h={alt_m:.0f} aoa={aoa_deg:.1f}: height {point_max_height:.3f} m "
                 f"exceeds limit {spec.max_height_m:.3f} m"
+            )
+            break
+
+        combustor_diam_m = float(analysis.get("combustor_section", {}).get("diameter_m", 0.0))
+        if combustor_diam_m > spec.max_combustor_diameter_m:
+            reasons.append(
+                f"M={mach:.2f} h={alt_m:.0f} aoa={aoa_deg:.1f}: combustor diameter {combustor_diam_m:.3f} m "
+                f"exceeds limit {spec.max_combustor_diameter_m:.3f} m"
+            )
+            break
+
+        nozzle_exit_diam_m = float(analysis.get("nozzle_geometry", {}).get("exit_diameter_m", 0.0))
+        if nozzle_exit_diam_m > spec.max_nozzle_exit_diameter_m:
+            reasons.append(
+                f"M={mach:.2f} h={alt_m:.0f} aoa={aoa_deg:.1f}: nozzle exit diameter {nozzle_exit_diam_m:.3f} m "
+                f"exceeds limit {spec.max_nozzle_exit_diameter_m:.3f} m"
             )
             break
 
@@ -497,60 +518,166 @@ def _progress_heartbeat(
     )
 
 
-def search_envelope(spec: EnvelopeSpec, top_n: int = 1) -> tuple[CandidateResult | None, list[CandidateResult]]:
-    adapter = PyCycleRamAdapter()
-    baseline = _build_baseline_design(spec)
-    timer_state: dict[str, float] = {}
-    coarse_candidates = list(_candidate_grid(baseline, spec))
-    print(
-        f"[search] coarse stage: {len(coarse_candidates)} candidates, "
-        f"{len(_envelope_points(spec))} envelope points each"
+# ── Parallel evaluation plumbing ──────────────────────────────────────────
+#
+# Workers each hold a lazy, process-local PyCycleRamAdapter (and therefore
+# their own pyCycle Problem), so the ~10–20 s setup cost is paid once per
+# worker and amortized across every candidate that worker handles.
+# Windows ProcessPoolExecutor uses spawn, so the worker entrypoint MUST be
+# defined at module top level.
+
+_WORKER_ADAPTER = None  # populated inside each worker process on first use
+
+
+def _get_worker_adapter():
+    global _WORKER_ADAPTER
+    if _WORKER_ADAPTER is None:
+        _WORKER_ADAPTER = PyCycleRamAdapter()
+    return _WORKER_ADAPTER
+
+
+def _infeasible_result(design: Design, reason: str) -> CandidateResult:
+    return CandidateResult(
+        design=design,
+        feasible=False,
+        score=1.0e9,
+        reasons=(reason,),
+        geometry={},
+        points_checked=0,
+        worst_pt_recovery=0.0,
+        worst_capture_mdot_kgs=0.0,
+        worst_thrust_N=0.0,
+        worst_M4=0.0,
+        worst_Tt4_K=0.0,
+        worst_phi_effective=0.0,
+        worst_max_height_m=0.0,
+        combustor_volume_m3=0.0,
     )
-    coarse_results = []
-    for idx, candidate in enumerate(coarse_candidates, start=1):
-        result = evaluate_candidate(candidate, spec, adapter)
-        coarse_results.append(result)
-        _progress_heartbeat(
-            timer_state,
-            stage="coarse",
-            done=idx,
-            total=len(coarse_candidates),
-            feasible_count=sum(1 for item in coarse_results if item.feasible),
-            best_score=min((item.score for item in coarse_results), default=None),
-        )
+
+
+def evaluate_candidate_worker(payload: tuple[Design, EnvelopeSpec]) -> CandidateResult:
+    """Top-level worker entrypoint for ProcessPoolExecutor.
+
+    Accepts pickle-safe (Design, EnvelopeSpec) and returns a
+    CandidateResult.  Never raises — exceptions are wrapped into an
+    infeasible result so the parent can keep collecting."""
+    design, spec = payload
+    try:
+        adapter = _get_worker_adapter()
+        return evaluate_candidate(design, spec, adapter)
+    except Exception as exc:
+        return _infeasible_result(design, f"worker exception: {exc!r}")
+
+
+def evaluate_candidates_batch(
+    candidates: list[Design],
+    spec: EnvelopeSpec,
+    stage_name: str,
+    max_workers: int,
+) -> list[CandidateResult]:
+    """Evaluate a batch of candidates serially (max_workers<=1) or in
+    parallel via ProcessPoolExecutor (max_workers>1).  Progress heartbeats
+    and per-stage summary logging happen on the parent side."""
+    if not candidates:
+        print(f"[{stage_name}] skipped: 0 candidates")
+        return []
+
+    n_pts = len(_envelope_points(spec))
+    print(
+        f"[{stage_name}] start: candidates={len(candidates)} "
+        f"envelope_points={n_pts} workers={max_workers}"
+    )
+
+    timer_state: dict[str, float] = {}
+    results: list[CandidateResult] = []
+
+    if max_workers <= 1:
+        adapter = _get_worker_adapter()
+        for idx, candidate in enumerate(candidates, start=1):
+            try:
+                result = evaluate_candidate(candidate, spec, adapter)
+            except Exception as exc:
+                result = _infeasible_result(candidate, f"serial exception: {exc!r}")
+            results.append(result)
+            _progress_heartbeat(
+                timer_state,
+                stage=stage_name,
+                done=idx,
+                total=len(candidates),
+                feasible_count=sum(1 for r in results if r.feasible),
+                best_score=min((r.score for r in results), default=None),
+            )
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            future_to_candidate = {
+                pool.submit(evaluate_candidate_worker, (cand, spec)): cand
+                for cand in candidates
+            }
+            for fut in as_completed(future_to_candidate):
+                candidate = future_to_candidate[fut]
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    result = _infeasible_result(
+                        candidate, f"future exception: {exc!r}"
+                    )
+                results.append(result)
+                _progress_heartbeat(
+                    timer_state,
+                    stage=stage_name,
+                    done=len(results),
+                    total=len(candidates),
+                    feasible_count=sum(1 for r in results if r.feasible),
+                    best_score=min((r.score for r in results), default=None),
+                )
+
+    feasible_count = sum(1 for r in results if r.feasible)
+    scores = [r.score for r in results]
+    best_score = min(scores) if scores else None
+    best_text = (
+        f"{best_score:.4f}"
+        if best_score is not None and math.isfinite(best_score)
+        else "n/a"
+    )
+    print(
+        f"[{stage_name}] summary: evaluated={len(results)} "
+        f"feasible={feasible_count} best_score={best_text}"
+    )
+    return results
+
+
+def search_envelope(
+    spec: EnvelopeSpec,
+    top_n: int = 1,
+    max_workers: int = 1,
+) -> tuple[CandidateResult | None, list[CandidateResult]]:
+    baseline = _build_baseline_design(spec)
+
+    # Stage 1: coarse grid — parent builds candidates, batch helper evaluates.
+    coarse_candidates = list(_candidate_grid(baseline, spec))
+    coarse_results = evaluate_candidates_batch(
+        coarse_candidates, spec, "coarse", max_workers
+    )
     coarse_results.sort(key=lambda item: item.score)
 
+    # Stage 2: refinement — expand each top-n seed, dedupe in parent, then
+    # evaluate the union in one parallel batch.
     seeds = coarse_results[:top_n]
-    print(f"[search] refinement stage: {len(seeds)} seed candidates")
-    refined_results: list[CandidateResult] = []
-    seen = set()
-    for seed_idx, seed in enumerate(seeds, start=1):
-        refined_candidates = list(_refined_grid(seed.design, spec))
-        print(
-            f"[search] refining seed {seed_idx}/{len(seeds)} "
-            f"with {len(refined_candidates)} local candidates"
-        )
-        local_done = 0
-        for candidate in refined_candidates:
+    refined_candidates: list[Design] = []
+    seen: set[str] = set()
+    for seed in seeds:
+        for candidate in _refined_grid(seed.design, spec):
             key = candidate.digest()
             if key in seen:
                 continue
             seen.add(key)
-            refined_results.append(evaluate_candidate(candidate, spec, adapter))
-            local_done += 1
-            _progress_heartbeat(
-                timer_state,
-                stage=f"refine-{seed_idx}",
-                done=local_done,
-                total=len(refined_candidates),
-                feasible_count=sum(1 for item in refined_results if item.feasible),
-                best_score=min((item.score for item in refined_results), default=None),
-                extra=f"seed={seed_idx}/{len(seeds)} refined_total={len(refined_results)}",
-            )
+            refined_candidates.append(candidate)
+    refined_results = evaluate_candidates_batch(
+        refined_candidates, spec, "refine", max_workers
+    )
 
     all_results = coarse_results + refined_results
     all_results.sort(key=lambda item: item.score)
-
     feasible = [item for item in all_results if item.feasible]
     best = feasible[0] if feasible else None
     return best, all_results[:top_n]
@@ -575,6 +702,107 @@ def _serialize_candidate(result: CandidateResult) -> dict:
     }
 
 
+def _format_kv(key: str, value, indent: int = 2) -> str:
+    pad = " " * indent
+    if isinstance(value, float):
+        return f"{pad}{key:<40s} {value:.6f}"
+    return f"{pad}{key:<40s} {value}"
+
+
+def _append_candidate_section(
+    lines: list[str],
+    result: CandidateResult,
+    heading: str,
+) -> None:
+    geom = result.geometry
+    lines.append(heading)
+    lines.append("-" * 78)
+    lines.append(f"feasible:        {result.feasible}")
+    lines.append(f"score:           {result.score:.4f}")
+    lines.append(f"points_checked:  {result.points_checked}")
+    lines.append("")
+    lines.append("Design knobs:")
+    for key, value in asdict(result.design).items():
+        lines.append(_format_kv(key, value))
+    lines.append("")
+    lines.append("Geometry:")
+    for key in sorted(geom.keys()):
+        value = geom[key]
+        if isinstance(value, dict):
+            lines.append(f"  {key}:")
+            for sub_key in sorted(value.keys()):
+                lines.append(_format_kv(sub_key, value[sub_key], indent=4))
+        else:
+            lines.append(_format_kv(key, value))
+    lines.append("")
+    lines.append("Worst-case performance across envelope:")
+    lines.append(f"  worst_pt_recovery:      {result.worst_pt_recovery:.4f}")
+    lines.append(f"  worst_capture_mdot:     {result.worst_capture_mdot_kgs:.3f} kg/s")
+    lines.append(f"  worst_thrust:           {result.worst_thrust_N/1000.0:.3f} kN")
+    lines.append(f"  worst_M4:               {result.worst_M4:.3f}")
+    lines.append(f"  worst_Tt4:              {result.worst_Tt4_K:.1f} K")
+    lines.append(f"  worst_phi_effective:    {result.worst_phi_effective:.3f}")
+    lines.append(f"  worst_max_height:       {result.worst_max_height_m:.3f} m")
+    lines.append(f"  combustor_volume:       {result.combustor_volume_m3:.3f} m^3")
+    if result.reasons:
+        lines.append("")
+        lines.append("Infeasibility reasons:")
+        for reason in result.reasons:
+            lines.append(f"  - {reason}")
+    lines.append("")
+
+
+def save_geometry_report(
+    path: str,
+    spec: EnvelopeSpec,
+    best: CandidateResult | None,
+    top: list[CandidateResult],
+) -> None:
+    """Write a plain-text summary of the selected geometry (if feasible) or
+    the closest near-feasible candidates (if none were feasible)."""
+    lines: list[str] = []
+    lines.append("ENGINE ENVELOPE SEARCH RESULTS")
+    lines.append("=" * 78)
+    lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+
+    lines.append("ENVELOPE SPEC")
+    lines.append("-" * 78)
+    lines.append(f"Mach range:       {spec.mach_min:.2f} - {spec.mach_max:.2f}")
+    lines.append(f"Altitude range:   {spec.alt_min_m/1000:.1f} - {spec.alt_max_m/1000:.1f} km")
+    lines.append(f"AoA range:        {spec.aoa_min_deg:.1f} - {spec.aoa_max_deg:.1f} deg")
+    lines.append(f"Nominal AoA:      {spec.nominal_aoa_deg:.1f} deg")
+    lines.append(f"Max length:       {spec.max_total_length_m:.3f} m")
+    lines.append(f"Max width:        {spec.max_width_m:.3f} m")
+    lines.append(f"Max height:       {spec.max_height_m:.3f} m")
+    lines.append(f"Max diameter:     {spec.max_diameter_m:.3f} m")
+    lines.append(f"Max combustor D:  {spec.max_combustor_diameter_m:.3f} m")
+    lines.append(f"Max nozzle exit:  {spec.max_nozzle_exit_diameter_m:.3f} m")
+    lines.append(f"Min combustor V:  {spec.min_combustor_volume_m3:.3f} m^3")
+    lines.append(
+        f"Min thrust:       {spec.min_thrust_N/1000.0:.2f} kN at phi={spec.phi_for_thrust:.2f}"
+    )
+    lines.append("")
+
+    if best is not None:
+        lines.append("RESULT: FEASIBLE GEOMETRY FOUND")
+        lines.append("=" * 78)
+        lines.append("")
+        _append_candidate_section(lines, best, "SELECTED GEOMETRY")
+    else:
+        lines.append("RESULT: NO FULLY FEASIBLE GEOMETRY FOUND")
+        lines.append("=" * 78)
+        lines.append(
+            f"Reporting closest {len(top)} near-feasible candidate(s) by score."
+        )
+        lines.append("")
+        for idx, result in enumerate(top, start=1):
+            _append_candidate_section(lines, result, f"CANDIDATE #{idx}")
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def main() -> int:
     if _IMPORT_ERROR is not None:
         print(
@@ -588,7 +816,34 @@ def main() -> int:
         return 2
 
     spec = EnvelopeSpec()
-    best, top = search_envelope(spec)
+    # ═══════════════════════════════════════════════════════════════════════
+    # WORKER COUNT  — how many parallel processes evaluate candidates.
+    # Preferred: set the ENGINE_ENVELOPE_WORKERS=N env var before running
+    # (e.g. `set ENGINE_ENVELOPE_WORKERS=6` on Windows cmd, or
+    # `$env:ENGINE_ENVELOPE_WORKERS=6` in PowerShell).
+    # Otherwise: change the "1" default on the next line to your desired
+    # worker count.  Start with 1 to confirm correctness, then scale up.
+    # ═══════════════════════════════════════════════════════════════════════
+    max_workers_env = os.environ.get("ENGINE_ENVELOPE_WORKERS", "4")
+    try:
+        max_workers = max(1, int(max_workers_env))
+    except ValueError:
+        print(f"[warn] invalid ENGINE_ENVELOPE_WORKERS={max_workers_env!r}; defaulting to 1")
+        max_workers = 1
+    print(f"[search] max_workers={max_workers} "
+          f"(set ENGINE_ENVELOPE_WORKERS=N to override)")
+    best, top = search_envelope(spec, top_n=1, max_workers=max_workers)
+
+    default_report_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "envelope_selected_geometry.txt",
+    )
+    report_path = os.environ.get("ENGINE_ENVELOPE_REPORT_PATH", default_report_path)
+    try:
+        save_geometry_report(report_path, spec, best, top)
+        print(f"[report] wrote geometry summary to {report_path}")
+    except OSError as exc:
+        print(f"[warn] failed to write geometry report to {report_path}: {exc}")
 
     print("Engine envelope search")
     print(
@@ -599,8 +854,10 @@ def main() -> int:
     print(
         f"Geometry limits: L<={spec.max_total_length_m:.2f} m, "
         f"D<={spec.max_diameter_m:.2f} m, "
-        f"W<={spec.max_width_m:.2f} m, "
+        f"W<={spec.max_width_m:.3f} m, "
         f"H<={spec.max_height_m:.2f} m, "
+        f"D_comb<={spec.max_combustor_diameter_m:.2f} m, "
+        f"D_noz_exit<={spec.max_nozzle_exit_diameter_m:.2f} m, "
         f"Vc>={spec.min_combustor_volume_m3:.2f} m^3"
     )
     print(
@@ -654,149 +911,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-# Parallelization implementation checklist
-#
-# 1. Add a `max_workers` control near `search_envelope(...)` or in `EnvelopeSpec`.
-#    Use an integer, default something conservative like `6`.
-#
-# 2. Add a top-level worker input format.
-#    Simplest choice: a tuple or dict containing:
-#    - `Design`
-#    - `EnvelopeSpec`
-#
-# 3. Add a top-level worker function in `engine_envelope_test.py`.
-#    Example role:
-#    - create a fresh `PyCycleRamAdapter`
-#    - call `evaluate_candidate(design, spec, adapter)`
-#    - catch exceptions and return an infeasible `CandidateResult`
-#
-# 4. Do not reuse the parent’s adapter inside workers.
-#    Adapter creation must happen inside the worker.
-#
-# 5. Keep `evaluate_candidate(...)` itself mostly unchanged.
-#    It should remain the single source of candidate-evaluation logic.
-#
-# 6. Add a top-level helper to evaluate a batch of candidates in parallel.
-#    Responsibilities:
-#    - accept a list of `Design` candidates
-#    - accept `EnvelopeSpec`
-#    - accept `stage_name`
-#    - accept `max_workers`
-#    - submit tasks to `ProcessPoolExecutor`
-#    - collect results with `as_completed(...)`
-#    - print progress in the parent
-#
-# 7. Use `concurrent.futures.ProcessPoolExecutor`.
-#    Do not use threads.
-#
-# 8. In the batch helper, submit one candidate per future.
-#    Keep it simple first.
-#    Do not do chunking yet.
-#
-# 9. In the batch helper, catch worker exceptions at future collection time.
-#    If a future fails unexpectedly:
-#    - log it
-#    - convert it into an infeasible result if needed
-#    - continue the run
-#
-# 10. Keep the existing 0.5-second progress heartbeat, but move it to parent-side aggregation.
-#     Progress should reflect:
-#     - completed / total
-#     - feasible count
-#     - current best score
-#
-# 11. Replace the serial coarse loop in `search_envelope(...)`.
-#     Instead of:
-#     - iterating directly over candidates and calling `evaluate_candidate(...)`
-#     Use:
-#     - build `coarse_candidates`
-#     - pass them to the new parallel batch helper
-#
-# 12. Keep the coarse-result sorting logic unchanged after collection.
-#     Sort by `score`, then select `top_n`.
-#
-# 13. Keep seed selection in the parent process only.
-#     Do not let workers decide refinement seeds.
-#
-# 14. Replace the serial refinement loop in `search_envelope(...)`.
-#     Instead of:
-#     - iterating locally over refined candidates and evaluating them
-#     Use:
-#     - generate all refined candidates in parent
-#     - deduplicate in parent
-#     - pass them to the parallel batch helper
-#
-# 15. Preserve the `seen` deduplication logic in the parent.
-#     Do this before submitting refined jobs.
-#
-# 16. Ensure all worker-callable functions are defined at module top level.
-#     This is required for robust Windows multiprocessing.
-#
-# 17. Ensure pool creation only happens under normal runtime entry, not at import time.
-#     Keep actual execution under:
-#     - `if __name__ == "__main__":`
-#
-# 18. Do not pass `PyCycleRamAdapter` objects, OpenMDAO problems, or live caches into workers.
-#     Pass only pickle-safe objects.
-#
-# 19. Verify `Design`, `EnvelopeSpec`, and `CandidateResult` remain pickle-safe.
-#     They should stay plain dataclasses with simple fields.
-#
-# 20. Add a serial fallback path.
-#     If `max_workers <= 1`:
-#     - run the existing logic serially through the same batch helper
-#     This makes debugging much easier.
-#
-# 21. Add a small startup log line.
-#     Print:
-#     - stage name
-#     - total candidates
-#     - number of envelope points
-#     - worker count
-#
-# 22. Add a final stage summary log.
-#     For coarse and refinement separately, print:
-#     - total evaluated
-#     - feasible found
-#     - best score
-#
-# 23. First validate with `max_workers=1`.
-#     Confirm behavior matches the current serial implementation.
-#
-# 24. Then validate with `max_workers=2`.
-#     Confirm:
-#     - same best design
-#     - same feasible/infeasible decisions
-#     - no crashes
-#
-# 25. Then test with `max_workers=6`.
-#     Compare runtime and confirm stability.
-#
-# 26. Only after that consider optional chunking.
-#     If needed later:
-#     - send batches of candidates to each worker
-#     - let each process reuse local caches across multiple candidates
-#     But do not do this in the first implementation.
-#
-# Suggested function additions
-# - `def evaluate_candidate_worker(payload) -> CandidateResult`
-# - `def evaluate_candidates_batch(candidates, spec, stage_name, max_workers) -> list[CandidateResult]`
-#
-# Suggested order of edits
-# 1. Add `max_workers`
-# 2. Add worker function
-# 3. Add batch helper
-# 4. Switch coarse stage
-# 5. Switch refinement stage
-# 6. Re-test progress logging
-# 7. Validate serial mode
-# 8. Validate multi-process mode
-#
-# Definition of done
-# - coarse and refinement both run through the batch helper
-# - serial and parallel runs produce the same best result
-# - worker crashes do not kill the full run
-# - progress remains readable
-# - Windows execution works cleanly

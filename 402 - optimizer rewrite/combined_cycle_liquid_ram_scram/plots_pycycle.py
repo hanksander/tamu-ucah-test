@@ -21,6 +21,7 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon, Rectangle
+from matplotlib.colors import BoundaryNorm, ListedColormap
 
 warnings.filterwarnings('ignore')
 
@@ -54,6 +55,11 @@ plt.rcParams.update({
 
 from pyc_config import PHI_DEFAULT, INLET_DESIGN_ALT_M
 ALT_DEFAULT = INLET_DESIGN_ALT_M #18_000.0
+ENVELOPE_MACH_VALUES_DEFAULT = (4.0, 4.5, 5.0)
+ENVELOPE_ALT_RANGE_DEFAULT = (19_000.0, 21_500.0)
+ENVELOPE_ALPHA_RANGE_DEFAULT = (-1.0, 5.0)
+ENVELOPE_ALT_COUNT_DEFAULT = 6
+ENVELOPE_ALPHA_COUNT_DEFAULT = 7
 NOZZLE_CONVERGING_LENGTH_DEFAULT = None
 NOZZLE_DIVERGING_LENGTH_DEFAULT = None
 NOZZLE_THROAT_ANGLE_DEFAULT = 25.0
@@ -181,7 +187,16 @@ def _polyline_slope(points, at_start=False):
     return float((p1[1] - p0[1]) / max(p1[0] - p0[0], 1.0e-12))
 
 
-def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, diffuser_lower_xy):
+def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, diffuser_lower_xy,
+                             blend_fraction_of_ramp2=0.35):
+    """Lower-surface curve from partway up ramp-2 into the diffuser entry.
+
+    The quintic blend starts at ``blend_fraction_of_ramp2`` of the way back
+    along ramp-2 from ``foot_xy``, so the ramp-2/throat corner at ``foot_xy``
+    is replaced by a smooth fillet rather than a sharp vertex.  Set
+    ``blend_fraction_of_ramp2=0`` to recover the old behavior (curve starts
+    at the foot).
+    """
     ramp2_start_xy = np.asarray(ramp2_start_xy, dtype=float)
     foot_xy = np.asarray(foot_xy, dtype=float)
     diffuser_lower_xy = np.asarray(diffuser_lower_xy, dtype=float)
@@ -197,10 +212,14 @@ def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, diffuser_lower_xy):
         start_slope = end_slope
     else:
         start_slope = float((foot_xy[1] - ramp2_start_xy[1]) / dx_ramp)
-    if end_xy[0] <= foot_xy[0] + 1.0e-9:
-        return np.array([foot_xy, end_xy], dtype=float)
+
+    t = float(np.clip(blend_fraction_of_ramp2, 0.0, 0.9))
+    blend_start_xy = foot_xy + t * (ramp2_start_xy - foot_xy)
+
+    if end_xy[0] <= blend_start_xy[0] + 1.0e-9:
+        return np.array([blend_start_xy, end_xy], dtype=float)
     return _quintic_floor_curve(
-        foot_xy,
+        blend_start_xy,
         end_xy,
         start_slope=start_slope,
         end_slope=end_slope,
@@ -286,12 +305,13 @@ def _flowpath_layout(
 
     inlet_floor = _build_inlet_floor_curve(brk2, foot, diff_lower)
     inlet_roof = _build_inlet_roof_curve(cowl, t_up, diff_upper)
+    # inlet_floor now starts partway up ramp-2 (before ``foot``) and blends
+    # smoothly into the diffuser entry, replacing the ramp-2/throat corner.
     inlet_lower = np.vstack([
         fore,
         nose,
         brk2,
-        foot,
-        inlet_floor[1:],
+        inlet_floor,
     ])
     inlet_upper = np.vstack([cowl, inlet_roof[1:]])
 
@@ -392,19 +412,12 @@ def fig_inlet_design_detail(design):
     _save(fig, 'fig01_inlet_design_detail')
 
 
-def _design_back_pressure(design):
-    """Freestream static pressure at design altitude — sweep p_back default."""
-    _, p0, _, _ = _inlet2.std_atmosphere_1976(INLET_DESIGN_ALT_M)
-    return float(p0)
-
-
 def fig_inlet_fixed_grid(design):
     """Off-design 3x3 (Mach × alpha) grid on frozen geometry."""
     mach_vals  = [3.0, 4.0, 5.0]
     alpha_vals = [-2.0, 0.0, 2.0]
     _inlet2.plot_fixed_geometry_3x3_grid(design, INLET_DESIGN_ALT_M,
-                                         mach_vals, alpha_vals,
-                                         _design_back_pressure(design))
+                                         mach_vals, alpha_vals)
     fig = plt.gcf()
     _save(fig, 'fig02_inlet_fixed_geometry_grid')
 
@@ -413,9 +426,8 @@ def fig_inlet_pt_vs_mach(design):
     """Inlet Pt recovery vs Mach (402inlet2 shock train)."""
     mach_vals = np.linspace(4.0, 5.5, 10)
     cases = _inlet2.sweep_fixed_geometry_vs_mach(
-        design, INLET_DESIGN_ALT_M, mach_vals, INLET_DESIGN_ALPHA_DEG,
-        _design_back_pressure(design))
-    _inlet2.plot_pt_vs_mach(cases, use_terminal_shock=True)
+        design, INLET_DESIGN_ALT_M, mach_vals, INLET_DESIGN_ALPHA_DEG)
+    _inlet2.plot_pt_vs_mach(cases)
     fig = plt.gcf()
     _save(fig, 'fig03_inlet_pt_vs_mach')
 
@@ -424,9 +436,8 @@ def fig_inlet_pt_vs_alpha(design):
     """Inlet Pt recovery vs angle of attack."""
     alpha_vals = np.linspace(-4.0, 6.0, 21)
     cases = _inlet2.sweep_fixed_geometry_vs_alpha(
-        design, INLET_DESIGN_ALT_M, alpha_vals, INLET_DESIGN_M0,
-        _design_back_pressure(design))
-    _inlet2.plot_pt_vs_alpha(cases, use_terminal_shock=True)
+        design, INLET_DESIGN_ALT_M, alpha_vals, INLET_DESIGN_M0)
+    _inlet2.plot_pt_vs_alpha(cases)
     fig = plt.gcf()
     _save(fig, 'fig04_inlet_pt_vs_alpha')
 
@@ -530,6 +541,30 @@ def fig_flowpath(
     cowl_shock_end = foot
     ax.plot([cowl[0], cowl_shock_end[0]], [cowl[1], cowl_shock_end[1]],
             '-.', color='darkred', lw=1.3, label='Cowl shock')
+
+    # ── Reflection cascade in the isolator ─────────────────────────────────
+    # Each reflection record stores the point on the wall where an incident
+    # shock lands; consecutive records are connected by the reflected shock
+    # segment traveling to the opposite wall.  A trailing "terminal" entry
+    # with no xy is a normal shock — drawn as a vertical across the throat.
+    refl = design.get('reflection_list') or []
+    xy_refl = [(float(r['x']), float(r['y']))
+               for r in refl if ('x' in r and 'y' in r)]
+    cascade_label_used = False
+    for (x0_r, y0_r), (x1_r, y1_r) in zip(xy_refl[:-1], xy_refl[1:]):
+        ax.plot([x0_r, x1_r], [y0_r, y1_r],
+                '-.', color='coral', lw=1.0,
+                label='Reflected shocks' if not cascade_label_used else None)
+        cascade_label_used = True
+    for (xr, yr) in xy_refl:
+        ax.plot(xr, yr, 'o', color='coral', ms=3.0, zorder=5)
+    has_terminal = any(r.get('wall') == 'terminal' for r in refl)
+    if has_terminal and xy_refl:
+        # Draw the terminal normal shock at the throat plane (short of T_up/T_lo
+        # by the half-step from the last reflection to the throat).
+        t_mid_x = 0.5 * (xy_refl[-1][0] + max(t_up[0], t_lo[0]))
+        ax.plot([t_mid_x, t_mid_x], [t_lo[1], t_up[1]],
+                '-', color='black', lw=1.4, label='Terminal normal shock')
 
     # ── Subsonic diffuser walls (throat -> combustor face) ─────────────────
     ax.plot(inlet_floor[:, 0], inlet_floor[:, 1],
@@ -919,9 +954,8 @@ def fig_inlet_recovery_cycle(results, mach_range):
 
 
 def fig_ram_diagnostics(results, mach_range):
-    """Combustor choke state and terminal shock position through the RAM sweep."""
+    """Combustor choke state and inlet-expulsion flag through the RAM sweep."""
     choked = _arr(results, 'choked')
-    x_shock = _arr(results, 'x_shock')
     unstart = _arr(results, 'unstart_flag')
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.0))
@@ -933,26 +967,12 @@ def fig_ram_diagnostics(results, mach_range):
     ax1.set_ylim(-0.05, 1.05)
     ax1.set_yticks([0.0, 1.0])
 
-    ax2.plot(mach_range, x_shock, 'o-', color='slateblue', label='x_shock')
+    ax2.plot(mach_range, unstart, 'o-', color='slateblue')
     ax2.set_xlabel('M0')
-    ax2.set_ylabel('Shock position x [m]')
-    ax2.set_title('Terminal Shock Position vs Mach')
-
-    valid = np.isfinite(unstart)
-    if np.any(valid):
-        expelled = valid & (unstart > 0.5)
-        swallowed = valid & (unstart < -0.5)
-        contained = valid & ~(expelled | swallowed)
-        if np.any(contained):
-            ax2.scatter(mach_range[contained], x_shock[contained],
-                        color='slateblue', s=28, zorder=3, label='contained')
-        if np.any(expelled):
-            ax2.scatter(mach_range[expelled], x_shock[expelled],
-                        color='darkred', marker='x', s=50, zorder=4, label='expelled')
-        if np.any(swallowed):
-            ax2.scatter(mach_range[swallowed], x_shock[swallowed],
-                        color='darkorange', marker='s', s=32, zorder=4, label='swallowed')
-    ax2.legend(fontsize=8)
+    ax2.set_ylabel('Unstart flag')
+    ax2.set_title('Inlet-expulsion flag vs Mach')
+    ax2.set_ylim(-0.1, 1.1)
+    ax2.set_yticks([0.0, 1.0])
 
     _save(fig, 'ram_diagnostics_vs_mach')
 
@@ -979,6 +999,338 @@ def fig_nozzle_geom_vs_mach(results, mach_range):
     ax2.set_title('Area ratio and exit Mach')
     ax2.legend(handles=[l1, l2], loc='best')
     _save(fig, 'nozzle_geometry_vs_mach')
+
+
+def flight_envelope_sweep(
+    mach_values,
+    altitude_values,
+    alpha_values,
+    phi=PHI_DEFAULT,
+    design=None,
+    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+):
+    """Evaluate fixed geometry over a Mach-altitude-AoA envelope."""
+    mach_values = np.asarray(mach_values, dtype=float)
+    altitude_values = np.asarray(altitude_values, dtype=float)
+    alpha_values = np.asarray(alpha_values, dtype=float)
+    if design is None:
+        design = pyc_run._get_inlet_design()
+
+    results = np.empty(
+        (len(mach_values), len(altitude_values), len(alpha_values)),
+        dtype=object,
+    )
+    total = results.size
+    counter = 0
+
+    for i_m, M0 in enumerate(mach_values):
+        for i_alt, alt_m in enumerate(altitude_values):
+            for i_alpha, alpha_deg in enumerate(alpha_values):
+                counter += 1
+                t0 = time.perf_counter()
+                try:
+                    results[i_m, i_alt, i_alpha] = pyc_run.analyze(
+                        M0=float(M0),
+                        altitude_m=float(alt_m),
+                        phi=float(phi),
+                        alpha_deg=float(alpha_deg),
+                        design=design,
+                        combustor_L_star=combustor_L_star,
+                    )
+                    dt = time.perf_counter() - t0
+                    print(
+                        f'    [{counter:03d}/{total:03d}] '
+                        f'M={M0:.2f}, alt={alt_m/1e3:.2f} km, '
+                        f'aoa={alpha_deg:.2f} deg in {dt:.1f}s'
+                    )
+                except Exception as exc:
+                    dt = time.perf_counter() - t0
+                    print(
+                        f'  [warn] [{counter:03d}/{total:03d}] '
+                        f'M={M0:.2f}, alt={alt_m/1e3:.2f} km, '
+                        f'aoa={alpha_deg:.2f} deg failed after {dt:.1f}s: {exc}'
+                    )
+                    results[i_m, i_alt, i_alpha] = None
+
+    return {
+        'mach_values': mach_values,
+        'altitude_values': altitude_values,
+        'alpha_values': alpha_values,
+        'phi': float(phi),
+        'results': results,
+    }
+
+
+def _envelope_slice(envelope, mach_index, getter):
+    alt_values = envelope['altitude_values']
+    alpha_values = envelope['alpha_values']
+    grid = np.full((len(alt_values), len(alpha_values)), np.nan, dtype=float)
+    for i_alt in range(len(alt_values)):
+        for i_alpha in range(len(alpha_values)):
+            result = envelope['results'][mach_index, i_alt, i_alpha]
+            if result is None:
+                continue
+            try:
+                grid[i_alt, i_alpha] = float(getter(result))
+            except Exception:
+                grid[i_alt, i_alpha] = np.nan
+    return grid
+
+
+def _operability_fraction(envelope, predicate):
+    results = envelope['results']
+    n_mach = results.shape[0]
+    fraction = np.zeros(results.shape[1:], dtype=float)
+    for i_alt in range(results.shape[1]):
+        for i_alpha in range(results.shape[2]):
+            hits = 0
+            for i_m in range(n_mach):
+                if predicate(results[i_m, i_alt, i_alpha]):
+                    hits += 1
+            fraction[i_alt, i_alpha] = hits / max(n_mach, 1)
+    return fraction
+
+
+def _started(result):
+    return (
+        result is not None
+        and np.isfinite(float(result.get('unstart_flag', np.nan)))
+        and abs(float(result.get('unstart_flag', np.nan))) <= 0.5
+    )
+
+
+def _operable(result):
+    return _started(result) and (not bool(result.get('choked', False)))
+
+
+def _start_state_index(result):
+    if result is None:
+        return 2.0
+    flag = float(result.get('unstart_flag', np.nan))
+    if not np.isfinite(flag):
+        return 2.0
+    if flag > 0.5:
+        return 1.0
+    return 0.0
+
+
+def _choke_state_index(result):
+    if result is None:
+        return 2.0
+    return 1.0 if bool(result.get('choked', False)) else 0.0
+
+
+def _regular_edges(values):
+    values = np.asarray(values, dtype=float)
+    if values.size == 1:
+        delta = 0.5
+        return np.array([values[0] - delta, values[0] + delta], dtype=float)
+    mids = 0.5 * (values[:-1] + values[1:])
+    first = values[0] - 0.5 * (values[1] - values[0])
+    last = values[-1] + 0.5 * (values[-1] - values[-2])
+    return np.concatenate([[first], mids, [last]])
+
+
+def _plot_scalar_map(ax, alpha_values, altitude_values, grid, title,
+                     cmap='viridis', vmin=None, vmax=None):
+    valid = np.isfinite(grid)
+    ax.set_title(title)
+    ax.set_xlabel('Angle of attack [deg]')
+    ax.set_ylabel('Altitude [km]')
+    if not np.any(valid):
+        ax.text(0.5, 0.5, 'No converged points', ha='center', va='center',
+                transform=ax.transAxes, fontsize=10)
+        return None
+
+    levels = np.linspace(vmin, vmax, 17) if (vmin is not None and vmax is not None) else 16
+    contour = ax.contourf(
+        alpha_values,
+        altitude_values / 1e3,
+        grid,
+        levels=levels,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.contour(
+        alpha_values,
+        altitude_values / 1e3,
+        grid,
+        levels=6,
+        colors='k',
+        linewidths=0.35,
+        alpha=0.35,
+    )
+    return contour
+
+
+def _plot_discrete_map(ax, alpha_values, altitude_values, grid, title,
+                       cmap, norm, tick_values, tick_labels):
+    x_edges = _regular_edges(alpha_values)
+    y_edges = _regular_edges(altitude_values / 1e3)
+    mesh = ax.pcolormesh(
+        x_edges, y_edges, grid,
+        cmap=cmap, norm=norm, shading='flat',
+    )
+    ax.set_title(title)
+    ax.set_xlabel('Angle of attack [deg]')
+    ax.set_ylabel('Altitude [km]')
+    cbar = plt.colorbar(mesh, ax=ax, ticks=tick_values, pad=0.02)
+    cbar.ax.set_yticklabels(tick_labels)
+    return mesh
+
+
+def _metric_limits(grids):
+    finite_chunks = [g[np.isfinite(g)] for g in grids if np.any(np.isfinite(g))]
+    if not finite_chunks:
+        return None, None
+    finite = np.concatenate(finite_chunks)
+    vmin = float(np.min(finite))
+    vmax = float(np.max(finite))
+    if abs(vmax - vmin) <= 1.0e-12:
+        span = max(abs(vmax), 1.0)
+        vmin -= 0.05 * span
+        vmax += 0.05 * span
+    return vmin, vmax
+
+
+def fig_envelope_performance(envelope):
+    mach_values = envelope['mach_values']
+    alt_values = envelope['altitude_values']
+    alpha_values = envelope['alpha_values']
+
+    metrics = [
+        ('Net thrust [kN]', 'thrust', lambda r: r['thrust'] / 1e3, 'viridis'),
+        ('Specific thrust [N·s/kg_air]', 'specific thrust', lambda r: r['F_sp'], 'plasma'),
+        ('Inlet recovery', 'eta_pt', lambda r: r['eta_pt'], 'cividis'),
+    ]
+
+    fig, axes = plt.subplots(
+        len(metrics), len(mach_values),
+        figsize=(4.7 * len(mach_values), 10.8),
+        sharex=True, sharey=True,
+        constrained_layout=True,
+    )
+    axes = np.atleast_2d(axes)
+
+    for row, (cbar_label, title_stub, getter, cmap) in enumerate(metrics):
+        grids = [_envelope_slice(envelope, i_m, getter) for i_m in range(len(mach_values))]
+        vmin, vmax = _metric_limits(grids)
+        row_mappable = None
+        for col, M0 in enumerate(mach_values):
+            mappable = _plot_scalar_map(
+                axes[row, col], alpha_values, alt_values, grids[col],
+                title=f'M0={M0:.2f}  {title_stub}',
+                cmap=cmap, vmin=vmin, vmax=vmax,
+            )
+            if row == len(metrics) - 1:
+                axes[row, col].set_xlabel('Angle of attack [deg]')
+            if col > 0:
+                axes[row, col].set_ylabel('')
+            if row_mappable is None and mappable is not None:
+                row_mappable = mappable
+        if row_mappable is not None:
+            fig.colorbar(row_mappable, ax=axes[row, :], shrink=0.97, pad=0.02,
+                         label=cbar_label)
+
+    fig.suptitle(
+        f'Off-design performance maps  '
+        f'(phi={envelope["phi"]:.2f}, fixed engine geometry)',
+        fontsize=13,
+    )
+    _save(fig, 'offdesign_performance_altitude_aoa')
+
+
+def fig_envelope_operability(envelope):
+    mach_values = envelope['mach_values']
+    alt_values = envelope['altitude_values']
+    alpha_values = envelope['alpha_values']
+
+    fig, axes = plt.subplots(
+        2, len(mach_values),
+        figsize=(4.7 * len(mach_values), 7.2),
+        sharex=True, sharey=True,
+        constrained_layout=True,
+    )
+    axes = np.atleast_2d(axes)
+
+    start_cmap = ListedColormap(['seagreen', 'darkred', 'lightgray'])
+    start_norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], start_cmap.N)
+    choke_cmap = ListedColormap(['seagreen', 'firebrick', 'lightgray'])
+    choke_norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], choke_cmap.N)
+
+    for col, M0 in enumerate(mach_values):
+        start_grid = _envelope_slice(envelope, col, _start_state_index)
+        choke_grid = _envelope_slice(envelope, col, _choke_state_index)
+
+        _plot_discrete_map(
+            axes[0, col], alpha_values, alt_values, start_grid,
+            title=f'M0={M0:.2f}  inlet state',
+            cmap=start_cmap, norm=start_norm,
+            tick_values=[0.0, 1.0, 2.0],
+            tick_labels=['started', 'expelled', 'failed'],
+        )
+        _plot_discrete_map(
+            axes[1, col], alpha_values, alt_values, choke_grid,
+            title=f'M0={M0:.2f}  combustor choking',
+            cmap=choke_cmap, norm=choke_norm,
+            tick_values=[0.0, 1.0, 2.0],
+            tick_labels=['unchoked', 'choked', 'failed'],
+        )
+
+        if col > 0:
+            axes[0, col].set_ylabel('')
+            axes[1, col].set_ylabel('')
+
+    fig.suptitle('Operability maps  (fixed engine geometry)', fontsize=13)
+    _save(fig, 'offdesign_operability_altitude_aoa')
+
+
+def fig_envelope_band_summary(envelope):
+    mach_values = envelope['mach_values']
+    alt_values = envelope['altitude_values']
+    alpha_values = envelope['alpha_values']
+    results = envelope['results']
+
+    min_thrust = np.full(results.shape[1:], np.nan, dtype=float)
+    for i_alt in range(results.shape[1]):
+        for i_alpha in range(results.shape[2]):
+            thrusts = []
+            for i_m in range(results.shape[0]):
+                result = results[i_m, i_alt, i_alpha]
+                if result is not None:
+                    thrusts.append(float(result['thrust']) / 1e3)
+            if thrusts:
+                min_thrust[i_alt, i_alpha] = float(np.min(thrusts))
+
+    operable_fraction = 100.0 * _operability_fraction(envelope, _operable)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.2), constrained_layout=True)
+    thrust_vmin, thrust_vmax = _metric_limits([min_thrust])
+
+    thrust_map = _plot_scalar_map(
+        axes[0], alpha_values, alt_values, min_thrust,
+        title=(
+            f'Min net thrust across M={mach_values[0]:.2f}-'
+            f'{mach_values[-1]:.2f} [kN]'
+        ),
+        cmap='viridis', vmin=thrust_vmin, vmax=thrust_vmax,
+    )
+    if thrust_map is not None:
+        fig.colorbar(thrust_map, ax=axes[0], shrink=0.94, pad=0.02,
+                     label='Min net thrust [kN]')
+
+    op_map = _plot_scalar_map(
+        axes[1], alpha_values, alt_values, operable_fraction,
+        title='Operable Mach coverage [% of sampled Mach points]',
+        cmap='cividis', vmin=0.0, vmax=100.0,
+    )
+    if op_map is not None:
+        fig.colorbar(op_map, ax=axes[1], shrink=0.94, pad=0.02,
+                     label='Operable coverage [%]')
+
+    fig.suptitle('Mach-band envelope summary', fontsize=13)
+    _save(fig, 'offdesign_mach_band_summary')
 
 
 def _plot_engine_profile(
@@ -1069,8 +1421,62 @@ def main():
         default=CAD_WALL_THICKNESS_M * 1e3,
         help='CAD shell wall thickness in mm.',
     )
+    parser.add_argument(
+        '--envelope-mach',
+        nargs='+',
+        type=float,
+        default=list(ENVELOPE_MACH_VALUES_DEFAULT),
+        help='Mach slices for the altitude/AoA envelope plots.',
+    )
+    parser.add_argument(
+        '--envelope-alt-min',
+        type=float,
+        default=ENVELOPE_ALT_RANGE_DEFAULT[0],
+        help='Minimum altitude for the envelope plots [m].',
+    )
+    parser.add_argument(
+        '--envelope-alt-max',
+        type=float,
+        default=ENVELOPE_ALT_RANGE_DEFAULT[1],
+        help='Maximum altitude for the envelope plots [m].',
+    )
+    parser.add_argument(
+        '--envelope-alt-count',
+        type=int,
+        default=ENVELOPE_ALT_COUNT_DEFAULT,
+        help='Number of altitude samples for the envelope plots.',
+    )
+    parser.add_argument(
+        '--envelope-aoa-min',
+        type=float,
+        default=ENVELOPE_ALPHA_RANGE_DEFAULT[0],
+        help='Minimum angle of attack for the envelope plots [deg].',
+    )
+    parser.add_argument(
+        '--envelope-aoa-max',
+        type=float,
+        default=ENVELOPE_ALPHA_RANGE_DEFAULT[1],
+        help='Maximum angle of attack for the envelope plots [deg].',
+    )
+    parser.add_argument(
+        '--envelope-aoa-count',
+        type=int,
+        default=ENVELOPE_ALPHA_COUNT_DEFAULT,
+        help='Number of angle-of-attack samples for the envelope plots.',
+    )
     args = parser.parse_args()
     cad_wall_thickness_m = float(args.cad_wall_thickness_mm) * 1.0e-3
+    envelope_mach = np.asarray(args.envelope_mach, dtype=float)
+    envelope_alt = np.linspace(
+        float(args.envelope_alt_min),
+        float(args.envelope_alt_max),
+        int(args.envelope_alt_count),
+    )
+    envelope_alpha = np.linspace(
+        float(args.envelope_aoa_min),
+        float(args.envelope_aoa_max),
+        int(args.envelope_aoa_count),
+    )
     print('=' * 64)
     print('  plots_pycycle — pyc_run + 402inlet2 + nozzle_design')
     print('=' * 64)
@@ -1113,6 +1519,31 @@ def main():
     fig_ram_diagnostics(results, mach_range)
     fig_engine_pressure_profile(design, design_cycle)
     fig_engine_temperature_profile(design, design_cycle)
+
+    # Envelope sweep disabled for faster turnaround during routine plotting.
+    # Uncomment this block when you want the altitude/AoA operability maps.
+    # print(
+    #     '\n  envelope sweep over '
+    #     f'{len(envelope_mach)} Mach slices, '
+    #     f'{len(envelope_alt)} altitude points, '
+    #     f'{len(envelope_alpha)} AoA points'
+    # )
+    # print(
+    #     f'    Mach={envelope_mach[0]:.2f}..{envelope_mach[-1]:.2f}, '
+    #     f'alt={envelope_alt[0]/1e3:.2f}..{envelope_alt[-1]/1e3:.2f} km, '
+    #     f'aoa={envelope_alpha[0]:.2f}..{envelope_alpha[-1]:.2f} deg'
+    # )
+    # envelope = flight_envelope_sweep(
+    #     mach_values=envelope_mach,
+    #     altitude_values=envelope_alt,
+    #     alpha_values=envelope_alpha,
+    #     phi=PHI_DEFAULT,
+    #     design=design,
+    #     combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    # )
+    # fig_envelope_performance(envelope)
+    # fig_envelope_operability(envelope)
+    # fig_envelope_band_summary(envelope)
 
     print(f'\n  generating 3D CAD model (wall={cad_wall_thickness_m*1e3:.1f} mm) ...')
     try:

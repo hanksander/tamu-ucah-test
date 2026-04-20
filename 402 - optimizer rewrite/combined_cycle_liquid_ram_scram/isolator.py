@@ -10,7 +10,7 @@ SCRAM mode: Pseudo-shock / oblique shock train with small Pt loss.
 """
 
 from gas_dynamics import FlowState, normal_shock, isentropic_T, isentropic_P
-from config import ISOLATOR_PT_RECOVERY_SCRAM
+from pyc_config import ISOLATOR_PT_RECOVERY_SCRAM
 
 
 # Target subsonic Mach after isolator in ram mode.

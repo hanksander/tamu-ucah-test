@@ -60,7 +60,7 @@ from isolator  import compute_isolator
 from combustor import compute_combustor
 from nozzle    import compute_nozzle
 from thermo    import get_thermo
-from config    import (
+from pyc_config import (
     INLET_RAMPS_DEG,
     M_TRANSITION,
     A_CAPTURE,

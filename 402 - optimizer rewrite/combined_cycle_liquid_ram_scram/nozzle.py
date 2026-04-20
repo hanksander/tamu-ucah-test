@@ -34,7 +34,7 @@ CHANGES vs original
 
 import numpy as np
 from gas_dynamics import FlowState, isentropic_T, isentropic_M_from_Pt_P
-from config import F_STOICH, ETA_NOZZLE
+from pyc_config import F_STOICH, ETA_NOZZLE
 
 G0 = 9.80665   # standard gravity [m/s²]
 

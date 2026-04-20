@@ -2,6 +2,8 @@ import subprocess
 import sys
 
 # packages to install
+# Each entry is passed verbatim to `pip install`, so VCS URLs are allowed
+# (e.g. pyCycle is not on PyPI under this name and must come from GitHub).
 packages = [
     "numpy",
     "scipy",
@@ -16,7 +18,10 @@ packages = [
     "pandas",
     "trimesh",
     "shapely",
-    "manifold3d"
+    "manifold3d",
+    # pyCycle (OpenMDAO thermo-cycle library) — required by pyc_run,
+    # pyc_ram_cycle, and engine_envelope_test.  Installed from source.
+    "git+https://github.com/OpenMDAO/pyCycle.git",
 ]
 
 print("Installing aerospace packages in virtual environment...")

@@ -7,7 +7,7 @@ from inlet        import compute_inlet
 from isolator     import compute_isolator
 from combustor    import compute_combustor
 from nozzle       import compute_nozzle
-from config       import M_TRANSITION, A_CAPTURE, F_STOICH
+from pyc_config   import M_TRANSITION, A_CAPTURE, F_STOICH
 
 # Initialise Cantera once at import time
 _thermo = get_thermo()
