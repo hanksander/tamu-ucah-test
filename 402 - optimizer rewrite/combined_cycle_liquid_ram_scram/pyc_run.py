@@ -36,7 +36,7 @@ import numpy as np
 import openmdao.api as om
 from ambiance import Atmosphere
 
-from gas_dynamics import FlowState, isentropic_P, isentropic_T, isentropic_M_from_Pt_P
+from gas_dynamics import FlowState, isentropic_P, isentropic_T
 from combustor import combustor_face_response
 from pyc_config import (
     F_STOICH_JP10, ETA_COMBUSTOR,
@@ -127,7 +127,7 @@ def build_design(
     design['diffuser_area_ratio'] = diffuser_area_ratio_eff
     design['diffuser_min_shock_accommodation_dh'] = diffuser_min_shock_accommodation_dh_eff
     design['combustor_L_star']    = pick(combustor_L_star, COMBUSTOR_L_STAR_DEFAULT)
-    design['nozzle_AR']           = pick(nozzle_AR, NOZZLE_AR_DEFAULT)
+    design['nozzle_AR']           = float(pick(nozzle_AR, NOZZLE_AR))
 
     # Commit A_noz_throat analytically at the design point. The choked-nozzle
     # mass balance ties mass flow, combustor-exit totals, and throat area:
@@ -135,10 +135,12 @@ def build_design(
     # With mdot known from freestream capture, and (Tt4, Pt4, γ4, R4) from
     # the combustor at the design φ, we invert for A_t. This value is frozen
     # so that every off-design phi-envelope solve references the same throat.
+    # A_noz_exit is set from the commanded nozzle_AR (pyc_config NOZZLE_AR or
+    # caller override) — NOT from ideal-expansion sizing — so the geometry is
+    # in general under-, ideally-, or over-expanded at any given flight point.
     _design_pt = _compute_design_point_A_noz_throat(design)
     design['A_noz_throat']  = float(_design_pt['A_noz_throat'])
-    design['A_noz_exit']    = float(_design_pt['A_noz_exit'])
-    design['nozzle_AR']     = float(_design_pt['A_noz_exit'] / _design_pt['A_noz_throat'])
+    design['A_noz_exit']    = float(design['A_noz_throat'] * design['nozzle_AR'])
     design['design_point']  = _design_pt
     return design
 
@@ -186,24 +188,9 @@ def _compute_design_point_A_noz_throat(design: dict) -> dict:
     Gamma_mass = np.sqrt(gamma4 / R4) * (2.0 / gp1) ** (gp1 / (2.0 * gm1))
     A_noz_throat = mdot_total * np.sqrt(Tt4) / (Pt4 * Gamma_mass)
 
-    # Perfect-expansion exit area at the design ambient pressure.  Uses a
-    # gamma-refinement pass (combustor-exit gamma → nozzle-exit gamma at the
-    # cooler, expanded T9) analogous to nozzle.py.
     P0_des = float(Atmosphere(alt_des).pressure[0])
-    if Pt4 > P0_des:
-        thermo = get_thermo()
-        M9 = float(isentropic_M_from_Pt_P(Pt4 / P0_des, gamma4))
-        T9 = Tt4 / (1.0 + 0.5 * (gamma4 - 1.0) * M9 * M9)
-        gamma9 = float(thermo.gamma(T9, phi_des, P0_des))
-        M9 = float(isentropic_M_from_Pt_P(Pt4 / P0_des, gamma9))
-        A_ratio_exit = _inlet2.area_mach_ratio(M9, gamma=gamma9)
-        A_noz_exit = A_noz_throat * A_ratio_exit
-    else:
-        # Cannot expand supersonically — fall back to throat area.
-        A_noz_exit = A_noz_throat
     return {
         'A_noz_throat':     float(A_noz_throat),
-        'A_noz_exit':       float(A_noz_exit),
         'Pt4_design':       Pt4,
         'Tt4_design':       Tt4,
         'gamma4_design':    gamma4,
@@ -426,7 +413,7 @@ def _choked_nozzle_mass_param(gamma: float, R: float) -> float:
 
 def _solve_phi_envelope(capability, A_noz_throat, W_air,
                          Tt4_max, phi_request, thermo,
-                         M4_max: float = 0.98,
+                         M4_max: float = 0.95,
                          phi_grid: np.ndarray | None = None):
     """Cascade-only φ-envelope.
 

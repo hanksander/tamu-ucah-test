@@ -1,3 +1,65 @@
+"""
+Engine-envelope feasibility sweep.
+
+═══════════════════════════════════════════════════════════════════════════
+ INDEX OF LEVERS — what can be fixed, constrained, or swept
+═══════════════════════════════════════════════════════════════════════════
+Three disjoint categories. Anything in the Design dataclass is a
+candidate for any of the three.
+
+ 1. DESIGN VARIABLES  (class `Design` in trajectory_opt/engine_interface.py;
+    defaults sourced from combined_cycle_liquid_ram_scram/pyc_config.py)
+    Each one can be:
+       (a) FROZEN      — set a literal in `_build_baseline_design` below,
+       (b) INHERITED   — omit from the baseline; picks up the pyc_config
+                         default via the Design dataclass default,
+       (c) SWEPT       — add to `_candidate_grid` (coarse) and optionally
+                         `_refined_grid` (local refinement). Values listed
+                         in the grid override whatever the baseline says.
+    Full list (grouped):
+       Inlet/forebody   : LE_angle_deg, forebody_sep_margin, ramp_sep_margin,
+                          kantrowitz_margin, shock_focus_factor,
+                          inlet_width_m
+       Diffuser         : diffuser_AR, diffuser_min_shock_accommodation_dh
+       Combustor        : combustor_L_star
+       Nozzle           : nozzle_AR                 (Ae/At; A_exit is
+                                                    A_throat·nozzle_AR —
+                                                    NOT ideal-expansion sized)
+       Design-point
+       anchor (sizing)  : design_M0, design_alt_m, design_alpha_deg,
+                          design_mdot_kgs
+
+    As of this file, SWEPT = {design_M0, design_mdot_kgs, kantrowitz_margin,
+    LE_angle_deg, diffuser_AR}; everything else is FROZEN/INHERITED via
+    `_build_baseline_design`.
+
+ 2. ENVELOPE  (class `EnvelopeSpec`, "ENVELOPE" section)
+    Flight-condition box every candidate must satisfy. Expanded to 8 corners
+    + nominal-α midpoint by `_envelope_points`:
+       mach_min, mach_max
+       alt_min_m, alt_max_m
+       aoa_min_deg, aoa_max_deg
+       nominal_aoa_deg
+
+ 3. CONSTRAINTS  (class `EnvelopeSpec`, "CONSTRAINTS" section — pass/fail
+    limits applied to every candidate at every envelope point)
+    Geometry caps:
+       max_total_length_m
+       max_width_m
+       max_height_m
+       max_diameter_m               (overall frontal cap)
+       max_combustor_diameter_m
+       max_nozzle_exit_diameter_m   (← cap on nozzle Ae equivalent-round D)
+       min_combustor_volume_m3
+    Performance / operability:
+       min_thrust_N, phi_for_thrust (min thrust at this φ request)
+       reject_if_phi_clipped        (fail if closure clipped φ below request)
+    Hard cycle caps (pulled from pyc_config, applied inside evaluate_candidate
+    but NOT in EnvelopeSpec — edit pyc_config.py to move them):
+       M4_MAX, TT4_MAX_K
+═══════════════════════════════════════════════════════════════════════════
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -102,7 +164,9 @@ def _build_baseline_design(spec: EnvelopeSpec) -> Design:
         kantrowitz_margin=0.85,
         diffuser_AR=1.75,
         combustor_L_star=1.5,
-        nozzle_AR=9.0,                       # overridden by pyc_run ideal-expansion sizing
+        # nozzle_AR intentionally omitted — inherits pyc_config NOZZLE_AR so
+        # the commanded Ae/At drives A_noz_exit and the expansion state
+        # (ideal / under- / over-expanded) falls out of flight-point physics.
         LE_angle_deg=4.5,
         ramp_sep_margin=0.30,
         forebody_sep_margin=0.30,
@@ -198,17 +262,56 @@ def _analysis_max_height_m(analysis: dict, design_dict: dict) -> float:
 # Add/remove keys from the `knobs` dict to change what is swept; edit the
 # tuple values to change the discretization.  Anything NOT in these dicts
 # is inherited from _build_baseline_design above and stays frozen.
+#
+# ── CATALOGUE OF FREE VARIABLES ────────────────────────────────────────────
+# Every field on `Design` (see trajectory_opt/engine_interface.py) is a legal
+# sweep knob.  Grid size grows as the product of the per-knob cardinalities,
+# so be aggressive about pruning when you add a new axis.  The table below
+# lists what each knob controls and a sane physical range for the default
+# M=4–5 / alt=19–21 km envelope — use it as a starting point, not a hard cap.
+#
+#   knob                                  role                               sane range
+#   ─────────────────────────────────     ────────────────────────────────   ───────────────
+#   design_M0                             inlet design-point Mach            4.0 – 5.5
+#   design_alt_m                          inlet design-point altitude [m]    18e3 – 22e3
+#   design_alpha_deg                      inlet design-point AoA [deg]       0.0 – 4.0
+#   design_mdot_kgs                       air mass flow target at design     3.0 – 7.0
+#   LE_angle_deg                          forebody leading-edge angle        2.5 – 6.0
+#   forebody_sep_margin                   shock-separation margin on forbdy  0.20 – 0.45
+#   ramp_sep_margin                       shock-separation margin on ramp 2  0.20 – 0.45
+#   kantrowitz_margin                     Kantrowitz start-margin (A*/A_K)   0.75 – 0.95
+#   shock_focus_factor                    cowl-lip shock-focusing tolerance  1.00 – 1.30
+#   inlet_width_m                         inlet spanwise width [m]           fixed 0.275 for this vehicle
+#   diffuser_AR                           subsonic diffuser A_exit / A_thr   1.3 – 2.5
+#   diffuser_min_shock_accommodation_dh   shock accommodation in D_h         2.0 – 5.0
+#   combustor_L_star                      combustor characteristic length    0.8 – 2.0
+#   nozzle_AR                             nozzle Ae / At (drives expansion
+#                                         state — under/ideal/over; edit
+#                                         pyc_config.NOZZLE_AR for default)  3.0 – 10.0
+#
+# Knobs currently SWEPT by `_candidate_grid`/`_refined_grid`:
+#   design_M0, design_mdot_kgs, kantrowitz_margin, LE_angle_deg, diffuser_AR
+# Knobs currently FROZEN in `_build_baseline_design`:
+#   combustor_L_star, ramp_sep_margin, forebody_sep_margin, inlet_width_m,
+#   shock_focus_factor, diffuser_min_shock_accommodation_dh, design_alt_m,
+#   design_alpha_deg
+# Knobs currently INHERITED from pyc_config (no literal in baseline):
+#   nozzle_AR  (→ pyc_config.NOZZLE_AR)
 # ═══════════════════════════════════════════════════════════════════════════
 def _candidate_grid(base: Design, spec: EnvelopeSpec) -> Iterable[Design]:
     # Five-knob coarse grid (2·3·2·2·3 = 72 candidates) for a sub-hour sweep.
-    # Forebody/ramp margins, shock focus, Lstar, shock-accommodation D_h, and
-    # design altitude are frozen in _build_baseline_design.
+    # Forebody/ramp margins, shock focus, Lstar, shock-accommodation D_h,
+    # nozzle_AR, and design altitude/alpha are frozen upstream.  To promote a
+    # frozen knob to a swept one: add a tuple of trial values here (and in
+    # `_refined_grid` if you want local refinement around the coarse winner).
     knobs = {
         "design_M0":         (4.5, 5.0),
         "design_mdot_kgs":   (4.0, 5.0, 6.0),
         "kantrowitz_margin": (0.80, 0.85),
         "LE_angle_deg":      (3.5, 4.5),
         "diffuser_AR":       (1.5, 1.75, 2.0),
+        # Example — uncomment to sweep nozzle area ratio too:
+        # "nozzle_AR":       (4.0, 5.0, 7.0),
     }
     names = tuple(knobs.keys())
     for values in itertools.product(*(knobs[name] for name in names)):

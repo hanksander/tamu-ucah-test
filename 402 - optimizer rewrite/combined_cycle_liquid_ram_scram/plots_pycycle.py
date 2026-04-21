@@ -100,6 +100,57 @@ def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT):
     return results
 
 
+def altitude_sweep(alt_range, M0=INLET_DESIGN_M0,
+                   alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT):
+    results = []
+    total = len(alt_range)
+    for idx, alt in enumerate(alt_range, start=1):
+        t0 = time.perf_counter()
+        try:
+            r = pyc_run.analyze(M0=float(M0), altitude_m=float(alt),
+                                phi=phi, alpha_deg=alpha_deg)
+            dt = time.perf_counter() - t0
+            print(f'    [{idx:02d}/{total:02d}] alt={alt/1e3:.2f} km in {dt:.1f}s')
+        except Exception as e:
+            dt = time.perf_counter() - t0
+            print(f'  [warn] [{idx:02d}/{total:02d}] alt={alt/1e3:.2f} km '
+                  f'failed after {dt:.1f}s: {e}')
+            r = None
+        results.append(r)
+    return results
+
+
+def mach_alt_sweep(mach_range, alt_range,
+                   alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT):
+    """2D sweep over (M0, altitude) at fixed α and commanded φ.
+
+    Returns a (n_alt, n_mach) object array of analyze() dicts (or None on
+    failure), indexed as results[i_alt, j_mach].
+    """
+    mach_range = np.asarray(mach_range, dtype=float)
+    alt_range  = np.asarray(alt_range,  dtype=float)
+    results = np.empty((alt_range.size, mach_range.size), dtype=object)
+    total = alt_range.size * mach_range.size
+    k = 0
+    for i, alt in enumerate(alt_range):
+        for j, M in enumerate(mach_range):
+            k += 1
+            t0 = time.perf_counter()
+            try:
+                r = pyc_run.analyze(M0=float(M), altitude_m=float(alt),
+                                    phi=phi, alpha_deg=alpha_deg)
+                dt = time.perf_counter() - t0
+                print(f'    [{k:03d}/{total:03d}] M={M:.2f} '
+                      f'alt={alt/1e3:.2f} km in {dt:.1f}s')
+            except Exception as e:
+                dt = time.perf_counter() - t0
+                print(f'  [warn] [{k:03d}/{total:03d}] M={M:.2f} '
+                      f'alt={alt/1e3:.2f} km failed after {dt:.1f}s: {e}')
+                r = None
+            results[i, j] = r
+    return results
+
+
 def _arr(results, key, sub=None):
     out = []
     for r in results:
@@ -893,6 +944,79 @@ def fig_performance(results, mach_range):
     _save(fig, 'performance_vs_mach')
 
 
+def fig_performance_vs_alt(results, alt_range,
+                           M0=INLET_DESIGN_M0,
+                           alpha_deg=INLET_DESIGN_ALPHA_DEG,
+                           phi=PHI_DEFAULT):
+    """Isp, specific thrust, and net thrust vs altitude at fixed M0/α/φ."""
+    Isp    = _arr(results, 'Isp')
+    F_sp   = _arr(results, 'F_sp')
+    thrust = _arr(results, 'thrust')
+    alt_km = np.asarray(alt_range, dtype=float) / 1e3
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5.0))
+    axes[0].plot(alt_km, Isp, 'o-', color='navy')
+    axes[0].set_xlabel('Altitude [km]'); axes[0].set_ylabel('Isp [s]')
+    axes[0].set_title('Specific impulse')
+
+    axes[1].plot(alt_km, F_sp, 's-', color='darkgreen')
+    axes[1].set_xlabel('Altitude [km]')
+    axes[1].set_ylabel('F/ṁ_air  [N·s/kg_air]')
+    axes[1].set_title('Specific thrust')
+
+    axes[2].plot(alt_km, thrust / 1e3, '^-', color='firebrick')
+    axes[2].set_xlabel('Altitude [km]'); axes[2].set_ylabel('Net thrust [kN]')
+    axes[2].set_title('Net thrust')
+
+    for ax in axes:
+        ax.axvline(INLET_DESIGN_ALT_M / 1e3, color='gray',
+                   linestyle=':', lw=1.0, label='design alt')
+        ax.legend(loc='best', fontsize=8)
+    fig.suptitle(f'pyc_run altitude sweep  '
+                 f'(M0={M0}, α={alpha_deg}°, φ={phi})')
+    _save(fig, 'performance_vs_altitude')
+
+
+def fig_phi_vs_mach_alt(results_2d, mach_range, alt_range,
+                        alpha_deg=INLET_DESIGN_ALPHA_DEG,
+                        phi_request=PHI_DEFAULT):
+    """Effective (clipped) equivalence ratio over the (M0, altitude) grid.
+
+    The pyCycle stack commands phi_request, but _solve_phi_envelope soft-mins
+    it against the Tt4/choke/inlet-expulsion caps. phi_effective is what the
+    engine actually burns — lower than phi_request wherever an operability
+    cap binds.
+    """
+    mach_range = np.asarray(mach_range, dtype=float)
+    alt_range  = np.asarray(alt_range,  dtype=float)
+    phi_eff = np.full(results_2d.shape, np.nan, dtype=float)
+    for i in range(results_2d.shape[0]):
+        for j in range(results_2d.shape[1]):
+            r = results_2d[i, j]
+            if r is not None:
+                phi_eff[i, j] = float(r.get('phi_effective', r.get('phi', np.nan)))
+
+    fig, ax = plt.subplots(figsize=(10, 6.0))
+    M_grid, A_grid = np.meshgrid(mach_range, alt_range / 1e3)
+    pcm = ax.pcolormesh(M_grid, A_grid, phi_eff,
+                        shading='auto', cmap='viridis',
+                        vmin=0.0, vmax=max(float(phi_request), float(np.nanmax(phi_eff)) if np.isfinite(np.nanmax(phi_eff)) else float(phi_request)))
+    cs = ax.contour(M_grid, A_grid, phi_eff,
+                    levels=np.linspace(0.1, float(phi_request), 7),
+                    colors='white', linewidths=0.8)
+    ax.clabel(cs, inline=True, fontsize=8, fmt='%.2f')
+    ax.plot(INLET_DESIGN_M0, INLET_DESIGN_ALT_M / 1e3,
+            marker='*', color='red', markersize=14,
+            markeredgecolor='black', label='Design point')
+    ax.set_xlabel('M0')
+    ax.set_ylabel('Altitude [km]')
+    ax.set_title(f'Effective equivalence ratio φ_eff '
+                 f'(α={alpha_deg}°, φ_request={phi_request})')
+    ax.legend(loc='upper right', fontsize=8)
+    fig.colorbar(pcm, ax=ax, label='φ_effective')
+    _save(fig, 'phi_vs_mach_alt')
+
+
 def fig_mass_flows(results, mach_range):
     mdot_air  = _arr(results, 'mdot_air')
     mdot_fuel = _arr(results, 'mdot_fuel')
@@ -1495,11 +1619,34 @@ def main():
     )
 
     # Mach sweep
-    sweep_altitude_m = 24_000.0
+    sweep_altitude_m = INLET_DESIGN_ALT_M
     mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 8)
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT)
+
+    # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
+    alt_range = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
+                            INLET_DESIGN_ALT_M + 2_000.0, 9)
+    print(f'  Altitude sweep over {len(alt_range)} points '
+          f'at M0={INLET_DESIGN_M0}, α={INLET_DESIGN_ALPHA_DEG}°, '
+          f'phi={PHI_DEFAULT}')
+    alt_results = altitude_sweep(
+        alt_range, M0=INLET_DESIGN_M0,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
+    )
+
+    # 2-D (M0, altitude) sweep for the φ operability map.
+    phi_mach_range = np.linspace(max(M_MIN, 3.0), min(M_MAX, 5.0), 6)
+    phi_alt_range  = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
+                                 INLET_DESIGN_ALT_M + 2_000.0, 5)
+    print(f'  φ map over {len(phi_mach_range)}×{len(phi_alt_range)} '
+          f'(M0, alt) points at α={INLET_DESIGN_ALPHA_DEG}°, '
+          f'φ_request={PHI_DEFAULT}')
+    phi_map_results = mach_alt_sweep(
+        phi_mach_range, phi_alt_range,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
+    )
 
     print('\n  writing figures:')
     fig_flowpath(
@@ -1513,37 +1660,22 @@ def main():
         n_points=NOZZLE_BELL_POINTS_DEFAULT,
     )
     fig_performance(results, mach_range)
-    fig_mass_flows(results, mach_range)
+    fig_performance_vs_alt(
+        alt_results, alt_range,
+        M0=INLET_DESIGN_M0, alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
+    )
+    fig_phi_vs_mach_alt(
+        phi_map_results, phi_mach_range, phi_alt_range,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG, phi_request=PHI_DEFAULT,
+    )
+    #fig_mass_flows(results, mach_range)
     fig_station_T(results, mach_range)
     fig_station_Pt(results, mach_range)
     fig_ram_diagnostics(results, mach_range)
-    fig_engine_pressure_profile(design, design_cycle)
-    fig_engine_temperature_profile(design, design_cycle)
+    #fig_engine_pressure_profile(design, design_cycle)
+    #fig_engine_temperature_profile(design, design_cycle)
 
-    # Envelope sweep disabled for faster turnaround during routine plotting.
-    # Uncomment this block when you want the altitude/AoA operability maps.
-    # print(
-    #     '\n  envelope sweep over '
-    #     f'{len(envelope_mach)} Mach slices, '
-    #     f'{len(envelope_alt)} altitude points, '
-    #     f'{len(envelope_alpha)} AoA points'
-    # )
-    # print(
-    #     f'    Mach={envelope_mach[0]:.2f}..{envelope_mach[-1]:.2f}, '
-    #     f'alt={envelope_alt[0]/1e3:.2f}..{envelope_alt[-1]/1e3:.2f} km, '
-    #     f'aoa={envelope_alpha[0]:.2f}..{envelope_alpha[-1]:.2f} deg'
-    # )
-    # envelope = flight_envelope_sweep(
-    #     mach_values=envelope_mach,
-    #     altitude_values=envelope_alt,
-    #     alpha_values=envelope_alpha,
-    #     phi=PHI_DEFAULT,
-    #     design=design,
-    #     combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
-    # )
-    # fig_envelope_performance(envelope)
-    # fig_envelope_operability(envelope)
-    # fig_envelope_band_summary(envelope)
+
 
     print(f'\n  generating 3D CAD model (wall={cad_wall_thickness_m*1e3:.1f} mm) ...')
     try:

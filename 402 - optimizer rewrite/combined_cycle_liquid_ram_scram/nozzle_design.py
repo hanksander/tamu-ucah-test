@@ -1244,17 +1244,36 @@ def print_results(results):
         print(f"Throat area error:        {error:.6e} m^2")
 
 
-def default_bell_diverging_length(throat_area, exit_area):
+def default_bell_diverging_length(
+    throat_area,
+    exit_area,
+    throat_angle_deg=25.0,
+    exit_angle_deg=12.0,
+    bell_fraction=0.80,
+):
     """
-    Estimate a starting bell-nozzle divergent length from throat/exit areas.
+    Estimate a Rao-style bell divergent length from throat/exit areas.
+
+    Starts from a `bell_fraction`-bell reference (axial length relative to
+    an equivalent 15° conical expander with the same area ratio), then
+    clamps into the Rao Bezier monotonicity window bounded by the commanded
+    wall angles.  Outside that window the tangent intersection is either
+    ill-defined or places the bell's control point below the chord, which
+    forces the contour to bow inward and creates the spurious
+    converge/diverge oscillation seen with a raw cubic Hermite.
     """
 
     r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
     r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
     radius_change = max(r_exit - r_throat, 1.0e-6)
-    reference_angle = np.radians(15.0)
-    # Roughly a 75%-length bell compared with a 15-degree conical nozzle.
-    return max(0.50, 0.75 * radius_change / np.tan(reference_angle))
+
+    L_nominal = bell_fraction * radius_change / np.tan(np.radians(15.0))
+
+    theta_N = np.radians(throat_angle_deg)
+    theta_E = np.radians(exit_angle_deg)
+    L_min = radius_change / max(np.tan(theta_N), 1.0e-9)
+    L_max = radius_change / max(np.tan(theta_E), 1.0e-9)
+    return float(np.clip(L_nominal, L_min, L_max))
 
 
 def default_bell_converging_length(inlet_area, throat_area):
@@ -1373,7 +1392,13 @@ def size_bell_nozzle_for_vehicle(
 
 def hermite_curve(x0, y0, slope0, x1, y1, slope1, n_points):
     """
-    Cubic Hermite curve for a smooth bell-nozzle wall contour.
+    Cubic Hermite curve — retained for callers outside the Rao bell path.
+
+    NOTE: a raw cubic Hermite between prescribed endpoint slopes is NOT
+    monotone in general — if either |slope| exceeds 3·Δy/Δx the cubic
+    oscillates (Fritsch–Carlson condition).  The Rao bell contour below
+    uses a quadratic Bezier, which is monotone by construction within the
+    Rao feasibility window.
     """
 
     t = np.linspace(0.0, 1.0, n_points)
@@ -1388,6 +1413,99 @@ def hermite_curve(x0, y0, slope0, x1, y1, slope1, n_points):
     return x, np.maximum(y, 1.0e-6)
 
 
+# ── Rao bell-nozzle primitives ────────────────────────────────────────────
+
+RAO_THROAT_ARC_RADIUS_FRACTION = 0.382
+# Rao's canonical downstream throat-arc radius is 0.382·r_throat (Sutton,
+# "Rocket Propulsion Elements", and Rao 1958).  Kept as a module-level
+# constant so callers/plotters can reference the same value.
+
+
+def _rao_throat_arc(r_throat, theta_N_deg,
+                    R_d_factor=RAO_THROAT_ARC_RADIUS_FRACTION,
+                    n_points=40):
+    """Downstream-side throat circular arc for a Rao bell nozzle.
+
+    Starts at (x=0, r=r_throat) tangent to the axis (slope 0 — C¹ match
+    to the cosine converger, which also ends at slope 0) and sweeps
+    through angle θ_N to the tangent point N = (x_N, r_N) where the bell
+    Bezier picks up with slope tan(θ_N).
+
+    Parameters
+    ----------
+    r_throat : float                  Throat radius [m].
+    theta_N_deg : float               Initial divergent wall angle [deg].
+    R_d_factor : float                R_d / r_throat (Rao default 0.382).
+    n_points : int                    Number of points along the arc.
+
+    Returns
+    -------
+    x, r : ndarray                    Arc coordinates.
+    x_N, r_N : float                  Tangent-point hand-off to the bell.
+    """
+    R_d = float(R_d_factor) * float(r_throat)
+    theta_N = np.radians(float(theta_N_deg))
+    alpha = np.linspace(0.0, theta_N, int(max(n_points, 2)))
+    x = R_d * np.sin(alpha)
+    r = r_throat + R_d * (1.0 - np.cos(alpha))
+    x_N = float(R_d * np.sin(theta_N))
+    r_N = float(r_throat + R_d * (1.0 - np.cos(theta_N)))
+    return x, r, x_N, r_N
+
+
+def _rao_bezier_divergent(x_N, r_N, theta_N_deg,
+                          x_exit, r_exit, theta_E_deg, n_points):
+    """Quadratic-Bezier bell divergent section (Rao parabola).
+
+    Construction:
+        P0 = (x_N,  r_N),       tangent = (cos θ_N, sin θ_N)
+        P2 = (x_exit, r_exit),  tangent = (cos θ_E, sin θ_E)
+        P1 = intersection of the two tangent rays.
+
+    Solve [cos θ_N  cos θ_E; sin θ_N  sin θ_E] · [s1, s2]ᵀ = [Δx, Δr]ᵀ.
+    Determinant = −sin(θ_N − θ_E) < 0 when θ_N > θ_E.  Both s1, s2 > 0 iff
+      tan(θ_E) < Δr/Δx < tan(θ_N)     (the Rao feasibility window).
+    Within that window r1 − r0 > 0 and r2 − r1 > 0, so the Bezier's
+    r(t) = (1−t)²r0 + 2t(1−t)r1 + t²r2 has a strictly positive dr/dt on
+    [0, 1] — **monotone by construction**, no overshoot.  Same argument
+    for x(t), so r(x) is well-defined and monotone.
+
+    Outside the window we fall back to a Fritsch–Carlson slope-clamped
+    cubic Hermite — not ideal, but still monotone.
+    """
+    theta_N = np.radians(float(theta_N_deg))
+    theta_E = np.radians(float(theta_E_deg))
+    dx = float(x_exit) - float(x_N)
+    dr = float(r_exit) - float(r_N)
+    t = np.linspace(0.0, 1.0, int(max(n_points, 2)))
+
+    feasible = (theta_N > theta_E) and (dx > 0.0) and (dr > 0.0)
+    if feasible:
+        det = np.sin(theta_N - theta_E)
+        s1 = (np.cos(theta_E) * dr - np.sin(theta_E) * dx) / det
+        s2 = (np.sin(theta_N) * dx - np.cos(theta_N) * dr) / det
+        feasible = (s1 > 0.0) and (s2 > 0.0)
+
+    if feasible:
+        x1 = x_N + s1 * np.cos(theta_N)
+        r1 = r_N + s1 * np.sin(theta_N)
+        x = (1.0 - t) ** 2 * x_N + 2.0 * t * (1.0 - t) * x1 + t**2 * x_exit
+        r = (1.0 - t) ** 2 * r_N + 2.0 * t * (1.0 - t) * r1 + t**2 * r_exit
+        return x, r
+
+    # Fallback: slope-clamped cubic Hermite (Fritsch–Carlson monotone).
+    max_slope = 3.0 * dr / max(dx, 1.0e-12)
+    m0 = float(min(np.tan(theta_N), max_slope))
+    m1 = float(min(np.tan(theta_E), max_slope))
+    h00 = 2.0 * t**3 - 3.0 * t**2 + 1.0
+    h10 = t**3 - 2.0 * t**2 + t
+    h01 = -2.0 * t**3 + 3.0 * t**2
+    h11 = t**3 - t**2
+    x = x_N + t * dx
+    r = h00 * r_N + h10 * dx * m0 + h01 * r_exit + h11 * dx * m1
+    return x, np.maximum(r, 1.0e-6)
+
+
 def generate_bell_contour(
     inlet_area,
     throat_area,
@@ -1399,13 +1517,23 @@ def generate_bell_contour(
     n_points,
 ):
     """
-    Build a smooth nozzle contour from pyCycle station areas.
+    Rao-style bell-nozzle wall contour from pyCycle station areas.
 
-    pyCycle gives station areas, not wall shape. This function creates a
-    reasonable bell-style profile for visualization and preliminary geometry.
-    Performance still comes from pyCycle station areas. The stored geometry is
-    axisymmetric and is reported in terms of local radius/diameter; the 2D
-    plots use that radius about the centerline.
+    pyCycle gives station areas, not wall shape.  This builds an
+    axisymmetric Rao bell for visualization and preliminary geometry;
+    performance still comes from the pyCycle station solution.
+
+    Profile (all joins C¹, whole contour monotone in radius):
+      1. Cosine-eased convergent section r_inlet → r_throat, zero wall
+         slope at both endpoints.
+      2. Downstream throat circular arc of radius R_d = 0.382·r_throat,
+         sweeping α ∈ [0, θ_N].  Slope 0 at the throat (matches the
+         converger), slope tan(θ_N) at the tangent point N.
+      3. Rao parabola (quadratic Bezier) from N with slope tan(θ_N) to
+         the exit with slope tan(θ_E).  Monotone by construction
+         whenever θ_N > θ_E and the diverging length lies in the
+         feasibility window Δr/tan(θ_N) ≤ L_bell ≤ Δr/tan(θ_E).
+         `default_bell_diverging_length` already clamps into this window.
     """
 
     r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
@@ -1420,34 +1548,58 @@ def generate_bell_contour(
     elif converging_length <= 0.0:
         raise ValueError("converging_length must be positive.")
 
-    throat_angle = np.radians(throat_angle_deg)
-    exit_angle = np.radians(exit_angle_deg)
-
     if diverging_length is None:
-        diverging_length = default_bell_diverging_length(throat_area, exit_area)
+        diverging_length = default_bell_diverging_length(
+            throat_area, exit_area,
+            throat_angle_deg=throat_angle_deg,
+            exit_angle_deg=exit_angle_deg,
+        )
     elif diverging_length <= 0.0:
         raise ValueError("diverging_length must be positive.")
 
-    n_conv = max(30, int(n_points * 0.35))
-    n_div = max(60, n_points - n_conv)
+    # ── Station-count split: converger / throat arc / bell divergent ──
+    n_conv = max(30, int(n_points * 0.25))
+    n_arc  = max(20, int(n_points * 0.15))
+    n_bell = max(60, n_points - n_conv - n_arc)
 
+    # ── (1) Cosine converger — unchanged, monotone with zero slope at
+    #        both endpoints (continuity-of-tangent with the throat arc).
     x_conv = np.linspace(-converging_length, 0.0, n_conv)
     s = (x_conv + converging_length) / converging_length
-    # Cosine easing gives zero wall slope at the inlet and throat.
     r_conv = r_throat + (r_inlet - r_throat) * 0.5 * (1.0 + np.cos(np.pi * s))
 
-    x_div, r_div = hermite_curve(
-        0.0,
-        r_throat,
-        np.tan(throat_angle),
-        diverging_length,
-        r_exit,
-        np.tan(exit_angle),
-        n_div,
+    # ── (2) Throat circular arc (Rao, R_d = 0.382·r_throat) ──
+    x_arc, r_arc, x_N, r_N = _rao_throat_arc(
+        r_throat=r_throat,
+        theta_N_deg=throat_angle_deg,
+        R_d_factor=RAO_THROAT_ARC_RADIUS_FRACTION,
+        n_points=n_arc,
     )
 
-    x = np.concatenate([x_conv, x_div[1:]])
-    r = np.concatenate([r_conv, r_div[1:]])
+    # ── (3) Rao parabola (quadratic Bezier) from N to exit ──
+    # Guard: if the arc already exceeds the user's diverging_length
+    # budget, stretch the target to at least x_N + a sensible floor so
+    # the Bezier call stays well-posed.  The feasibility clamp below
+    # pulls diverging_length back into the monotone window.
+    if diverging_length <= x_N:
+        diverging_length = x_N + max(1.0e-3, 0.1 * (r_exit - r_N))
+
+    if r_exit > r_N and throat_angle_deg > exit_angle_deg:
+        L_bell_min = (r_exit - r_N) / np.tan(np.radians(throat_angle_deg))
+        L_bell_max = (r_exit - r_N) / max(np.tan(np.radians(exit_angle_deg)), 1.0e-9)
+        L_bell = float(np.clip(diverging_length - x_N, L_bell_min, L_bell_max))
+        diverging_length = x_N + L_bell
+
+    x_bell, r_bell = _rao_bezier_divergent(
+        x_N=x_N, r_N=r_N, theta_N_deg=throat_angle_deg,
+        x_exit=diverging_length, r_exit=r_exit, theta_E_deg=exit_angle_deg,
+        n_points=n_bell,
+    )
+
+    # Drop duplicate join points (converger end == arc start == throat;
+    # arc end == bell start == N).
+    x = np.concatenate([x_conv, x_arc[1:], x_bell[1:]])
+    r = np.concatenate([r_conv, r_arc[1:], r_bell[1:]])
     area = np.pi * r**2
     width = float(INLET_DESIGN_WIDTH_M)
     height = area / width
@@ -1470,6 +1622,9 @@ def generate_bell_contour(
         "diverging_length": diverging_length,
         "throat_angle_deg": throat_angle_deg,
         "exit_angle_deg": exit_angle_deg,
+        "throat_arc_radius_m": RAO_THROAT_ARC_RADIUS_FRACTION * r_throat,
+        "throat_arc_tangent_x": x_N,
+        "throat_arc_tangent_r": r_N,
     }
 
 

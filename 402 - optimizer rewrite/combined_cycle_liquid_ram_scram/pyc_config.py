@@ -124,11 +124,11 @@ DESIGN PARAMETERS
 """
 
 INLET_DESIGN_M0                    = 5.0
-INLET_DESIGN_ALT_M                 = 20_000.0   # mid of 19–21 km envelope
-INLET_DESIGN_ALPHA_DEG             = 3.0        # worst-α design anchor
+INLET_DESIGN_ALT_M                 = 17_000.0   # mid of 19–21 km envelope
+INLET_DESIGN_ALPHA_DEG             = 2.5        # worst-α design anchor
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 4.5
-INLET_DESIGN_MDOT_KGS              = 5.0     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.275   # inlet spanwise width [m] (hard req)
+INLET_DESIGN_MDOT_KGS              = 8.0     # design-point air mass flow [kg/s]
+INLET_DESIGN_WIDTH_M               = 0.25   # inlet spanwise width [m] (hard req)
 INLET_FOREBODY_SEP_MARGIN          = 0.30
 INLET_RAMP_SEP_MARGIN              = 0.30
 INLET_KANTROWITZ_MARGIN            = 0.85
@@ -158,10 +158,10 @@ INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
 DIFFUSER_AREA_RATIO = 1.75
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 4
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 2
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4
 
 
-COMBUSTOR_L_STAR_DEFAULT = 1.5
+COMBUSTOR_L_STAR_DEFAULT = 4.0
 NOZZLE_AR                = 15.0   # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
@@ -173,7 +173,7 @@ NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV'
 ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
 ETA_DIFFUSER         = 0.98   # subsonic diffuser total-pressure recovery (friction)
 
-PHI_DEFAULT = 0.7
+PHI_DEFAULT = 0.8
 
 # RAM combustor exit Mach for pyCycle design mode
 # Fixed-geometry approximation used across the Mach sweep.
