@@ -21,7 +21,7 @@ candidate for any of the three.
                           kantrowitz_margin, shock_focus_factor,
                           inlet_width_m
        Diffuser         : diffuser_AR, diffuser_min_shock_accommodation_dh
-       Combustor        : combustor_L_star
+       Combustor        : combustor_length_m
        Nozzle           : nozzle_AR                 (Ae/At; A_exit is
                                                     A_throat·nozzle_AR —
                                                     NOT ideal-expansion sized)
@@ -118,9 +118,9 @@ class EnvelopeSpec:
     mach_max: float = 5.0
     alt_min_m: float = 19_000.0
     alt_max_m: float = 21_000.0
-    aoa_min_deg: float = 0.0
-    aoa_max_deg: float = 3.0
-    nominal_aoa_deg: float = 3.0
+    aoa_min_deg: float = -1.0
+    aoa_max_deg: float = 4.0
+    nominal_aoa_deg: float = 2.0
 
     # ── CONSTRAINTS (pass/fail limits applied to every candidate) ──
     max_total_length_m: float = 3.8
@@ -130,7 +130,7 @@ class EnvelopeSpec:
     max_combustor_diameter_m: float = 0.35   # combustion-chamber cap
     max_nozzle_exit_diameter_m: float = 0.38 # nozzle exit cap
     min_combustor_volume_m3: float = 0.08
-    min_thrust_N: float = 6_000.0
+    min_thrust_N: float = 5_000.0
     phi_for_thrust: float = 1.0
     reject_if_phi_clipped: bool = False
 
@@ -163,7 +163,7 @@ def _build_baseline_design(spec: EnvelopeSpec) -> Design:
     return Design(
         kantrowitz_margin=0.85,
         diffuser_AR=1.75,
-        combustor_L_star=1.5,
+        combustor_length_m=0.75,
         # nozzle_AR intentionally omitted — inherits pyc_config NOZZLE_AR so
         # the commanded Ae/At drives A_noz_exit and the expansion state
         # (ideal / under- / over-expanded) falls out of flight-point physics.
@@ -176,7 +176,7 @@ def _build_baseline_design(spec: EnvelopeSpec) -> Design:
         design_M0=5.0,
         design_alt_m=0.5 * (spec.alt_min_m + spec.alt_max_m),   # 20 000 m
         design_alpha_deg=spec.nominal_aoa_deg,                  # 3.0 deg
-        design_mdot_kgs=5.0,
+        design_mdot_kgs=7.0,
     )
 
 
@@ -194,7 +194,7 @@ def _build_design_dict(design: Design) -> dict:
         shock_focus_factor=design.shock_focus_factor,
         diffuser_min_shock_accommodation_dh=design.diffuser_min_shock_accommodation_dh,
         diffuser_area_ratio=min(design.diffuser_AR, 2.5),
-        combustor_L_star=design.combustor_L_star,
+        combustor_length_m=design.combustor_length_m,
         nozzle_AR=design.nozzle_AR,
     )
 
@@ -284,32 +284,35 @@ def _analysis_max_height_m(analysis: dict, design_dict: dict) -> float:
 #   inlet_width_m                         inlet spanwise width [m]           fixed 0.275 for this vehicle
 #   diffuser_AR                           subsonic diffuser A_exit / A_thr   1.3 – 2.5
 #   diffuser_min_shock_accommodation_dh   shock accommodation in D_h         2.0 – 5.0
-#   combustor_L_star                      combustor characteristic length    0.8 – 2.0
+#   combustor_length_m                    combustor chamber length [m]       0.4 – 1.0
 #   nozzle_AR                             nozzle Ae / At (drives expansion
 #                                         state — under/ideal/over; edit
 #                                         pyc_config.NOZZLE_AR for default)  3.0 – 10.0
 #
 # Knobs currently SWEPT by `_candidate_grid`/`_refined_grid`:
-#   design_M0, design_mdot_kgs, kantrowitz_margin, LE_angle_deg, diffuser_AR
+#   design_M0, design_mdot_kgs, LE_angle_deg, diffuser_AR
+# Knobs ready to sweep but currently commented out in the grids:
+#   ramp_sep_margin, kantrowitz_margin
 # Knobs currently FROZEN in `_build_baseline_design`:
-#   combustor_L_star, ramp_sep_margin, forebody_sep_margin, inlet_width_m,
+#   combustor_length_m, ramp_sep_margin, forebody_sep_margin, inlet_width_m,
 #   shock_focus_factor, diffuser_min_shock_accommodation_dh, design_alt_m,
 #   design_alpha_deg
 # Knobs currently INHERITED from pyc_config (no literal in baseline):
 #   nozzle_AR  (→ pyc_config.NOZZLE_AR)
 # ═══════════════════════════════════════════════════════════════════════════
 def _candidate_grid(base: Design, spec: EnvelopeSpec) -> Iterable[Design]:
-    # Five-knob coarse grid (2·3·2·2·3 = 72 candidates) for a sub-hour sweep.
-    # Forebody/ramp margins, shock focus, Lstar, shock-accommodation D_h,
+    # Four-knob coarse grid (2·3·2·3 = 36 candidates) for a sub-hour sweep.
+    # Forebody/ramp margins, shock focus, chamber length, shock-accommodation D_h,
     # nozzle_AR, and design altitude/alpha are frozen upstream.  To promote a
     # frozen knob to a swept one: add a tuple of trial values here (and in
     # `_refined_grid` if you want local refinement around the coarse winner).
     knobs = {
         "design_M0":         (4.5, 5.0),
         "design_mdot_kgs":   (4.0, 5.0, 6.0),
-        "kantrowitz_margin": (0.80, 0.85),
         "LE_angle_deg":      (3.5, 4.5),
         "diffuser_AR":       (1.5, 1.75, 2.0),
+        # "ramp_sep_margin":   (0.25, 0.30, 0.35),
+        # "kantrowitz_margin": (0.80, 0.85, 0.90),
         # Example — uncomment to sweep nozzle area ratio too:
         # "nozzle_AR":       (4.0, 5.0, 7.0),
     }
@@ -326,9 +329,10 @@ def _refined_grid(seed: Design, spec: EnvelopeSpec) -> Iterable[Design]:
     knobs = {
         "design_M0":         around(seed.design_M0,         0.25,  4.5,  5.0),
         "design_mdot_kgs":   around(seed.design_mdot_kgs,   0.5,   3.5,  6.5),
-        "kantrowitz_margin": around(seed.kantrowitz_margin, 0.025, 0.80, 0.90),
         "LE_angle_deg":      around(seed.LE_angle_deg,      0.25,  3.0,  5.0),
         "diffuser_AR":       around(seed.diffuser_AR,       0.125, 1.4,  2.0),
+        # "ramp_sep_margin":   around(seed.ramp_sep_margin,   0.025, 0.20, 0.40),
+        # "kantrowitz_margin": around(seed.kantrowitz_margin, 0.025, 0.80, 0.90),
     }
     names = tuple(knobs.keys())
     for values in itertools.product(*(knobs[name] for name in names)):
@@ -927,7 +931,7 @@ def main() -> int:
     # Otherwise: change the "1" default on the next line to your desired
     # worker count.  Start with 1 to confirm correctness, then scale up.
     # ═══════════════════════════════════════════════════════════════════════
-    max_workers_env = os.environ.get("ENGINE_ENVELOPE_WORKERS", "4")
+    max_workers_env = os.environ.get("ENGINE_ENVELOPE_WORKERS", "6")
     try:
         max_workers = max(1, int(max_workers_env))
     except ValueError:

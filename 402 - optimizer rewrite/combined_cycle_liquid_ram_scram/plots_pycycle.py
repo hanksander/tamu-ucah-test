@@ -31,7 +31,8 @@ sys.path.insert(0, _HERE)
 import pyc_run
 from pyc_config import (
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M, INLET_DESIGN_ALPHA_DEG,
-    INLET_DESIGN_WIDTH_M, COMBUSTOR_L_STAR_DEFAULT,
+    INLET_DESIGN_WIDTH_M, COMBUSTOR_LENGTH_M_DEFAULT,
+    INLET_CONSTANT_AREA_LENGTH_M,
     M_MIN, M_MAX,
 )
 import nozzle_design
@@ -240,74 +241,25 @@ def _polyline_slope(points, at_start=False):
 
 def _build_inlet_floor_curve(ramp2_start_xy, foot_xy, diffuser_lower_xy,
                              blend_fraction_of_ramp2=0.35):
-    """Lower-surface curve from partway up ramp-2 into the diffuser entry.
-
-    The quintic blend starts at ``blend_fraction_of_ramp2`` of the way back
-    along ramp-2 from ``foot_xy``, so the ramp-2/throat corner at ``foot_xy``
-    is replaced by a smooth fillet rather than a sharp vertex.  Set
-    ``blend_fraction_of_ramp2=0`` to recover the old behavior (curve starts
-    at the foot).
-    """
-    ramp2_start_xy = np.asarray(ramp2_start_xy, dtype=float)
-    foot_xy = np.asarray(foot_xy, dtype=float)
+    """Lower-surface straight segment from the ramp-2 foot to diffuser entry."""
     diffuser_lower_xy = np.asarray(diffuser_lower_xy, dtype=float)
     end_xy = np.asarray(diffuser_lower_xy[0], dtype=float)
-
-    if diffuser_lower_xy.shape[0] >= 2:
-        end_slope = _polyline_slope(diffuser_lower_xy, at_start=True)
-    else:
-        end_slope = 0.0
-
-    dx_ramp = foot_xy[0] - ramp2_start_xy[0]
-    if abs(dx_ramp) <= 1.0e-12:
-        start_slope = end_slope
-    else:
-        start_slope = float((foot_xy[1] - ramp2_start_xy[1]) / dx_ramp)
-
-    t = float(np.clip(blend_fraction_of_ramp2, 0.0, 0.9))
-    blend_start_xy = foot_xy + t * (ramp2_start_xy - foot_xy)
-
-    if end_xy[0] <= blend_start_xy[0] + 1.0e-9:
-        return np.array([blend_start_xy, end_xy], dtype=float)
-    return _quintic_floor_curve(
-        blend_start_xy,
-        end_xy,
-        start_slope=start_slope,
-        end_slope=end_slope,
-    )
+    foot_xy = np.asarray(foot_xy, dtype=float)
+    return np.array([foot_xy, end_xy], dtype=float)
 
 
-def _build_inlet_roof_curve(cowl_xy, throat_upper_xy, diffuser_upper_xy):
+def _build_inlet_roof_curve(ramp2_start_xy, foot_xy, cowl_xy, throat_upper_xy,
+                            diffuser_upper_xy):
+    """Upper-surface straight segment from the cowl lip to the throat."""
     cowl_xy = np.asarray(cowl_xy, dtype=float)
     throat_upper_xy = np.asarray(throat_upper_xy, dtype=float)
-    diffuser_upper_xy = np.asarray(diffuser_upper_xy, dtype=float)
-    end_xy = np.asarray(diffuser_upper_xy[0], dtype=float)
-
-    if diffuser_upper_xy.shape[0] >= 2:
-        end_slope = _polyline_slope(diffuser_upper_xy, at_start=True)
-    else:
-        end_slope = 0.0
-
-    dx_cowl = throat_upper_xy[0] - cowl_xy[0]
-    if abs(dx_cowl) <= 1.0e-12:
-        start_slope = end_slope
-    else:
-        start_slope = float((throat_upper_xy[1] - cowl_xy[1]) / dx_cowl)
-
-    if end_xy[0] <= throat_upper_xy[0] + 1.0e-9:
-        return np.array([throat_upper_xy, end_xy], dtype=float)
-    return _quintic_floor_curve(
-        throat_upper_xy,
-        end_xy,
-        start_slope=start_slope,
-        end_slope=end_slope,
-    )
+    return np.array([cowl_xy, throat_upper_xy], dtype=float)
 
 
 def _flowpath_layout(
     design,
     design_cycle,
-    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
     diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
     throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
@@ -326,54 +278,66 @@ def _flowpath_layout(
     throat_h  = float(abs(t_up[1] - t_lo[1]))
     throat_x0 = max(t_up[0], t_lo[0])
     inlet_center_y  = 0.5 * (t_up[1] + t_lo[1])
+    const_area_len = max(0.0, float(INLET_CONSTANT_AREA_LENGTH_M))
+    diffuser_entry_x = throat_x0 + const_area_len
 
     # Subsonic diffuser contour between inlet throat and combustor face.
     diff = design.get('diffuser')
     if diff is None:
         diff_len    = 0.0
         diff_h_exit = throat_h
-        diff_upper_raw = np.array([[throat_x0, inlet_center_y + 0.5 * throat_h]])
-        diff_lower_raw = np.array([[throat_x0, inlet_center_y - 0.5 * throat_h]])
+        diff_upper_raw = np.array([[diffuser_entry_x, inlet_center_y + 0.5 * throat_h]])
+        diff_lower_raw = np.array([[diffuser_entry_x, inlet_center_y - 0.5 * throat_h]])
         diff_h_stations = np.array([throat_h], dtype=float)
+        diff_x_stations = np.array([diffuser_entry_x], dtype=float)
     else:
         diff_len    = float(diff['length_m'])
         diff_h_exit = float(diff['h_exit'])
         diff_upper_raw = np.asarray(diff['upper_wall_xy'], dtype=float)
         diff_lower_raw = np.asarray(diff['lower_wall_xy'], dtype=float)
         diff_h_stations = np.asarray(diff['h_stations'], dtype=float)
+        diff_x_stations = np.asarray(diff['x_stations'], dtype=float) + const_area_len
 
     # Keep the inlet geometry fixed, then anchor the diffuser/combustor/nozzle
     # roof to the cowl-ending height so the upper wall stays flush downstream.
     flowpath_top_y = float(diff_upper_raw[0, 1])
     diff_upper = np.column_stack([
-        diff_upper_raw[:, 0],
+        diff_x_stations,
         np.full(diff_upper_raw.shape[0], flowpath_top_y, dtype=float),
     ])
     diff_lower = np.column_stack([
-        diff_lower_raw[:, 0],
+        diff_x_stations,
         flowpath_top_y - diff_h_stations,
     ])
 
-    inlet_floor = _build_inlet_floor_curve(brk2, foot, diff_lower)
-    inlet_roof = _build_inlet_roof_curve(cowl, t_up, diff_upper)
-    # inlet_floor now starts partway up ramp-2 (before ``foot``) and blends
-    # smoothly into the diffuser entry, replacing the ramp-2/throat corner.
+    inlet_floor = np.array([foot, t_lo], dtype=float)
+    inlet_roof = _build_inlet_roof_curve(brk2, foot, cowl, t_up, diff_upper)
+    const_area_upper = np.array([
+        t_up,
+        np.array([diffuser_entry_x, t_up[1]], dtype=float),
+    ])
+    const_area_lower = np.array([
+        t_lo,
+        np.array([diffuser_entry_x, t_lo[1]], dtype=float),
+    ])
+    # Keep the drawn/CAD lower wall faithful to the design geometry: ramp 2
+    # runs all the way to the opening foot ``foot`` before the throat blend
+    # begins.
     inlet_lower = np.vstack([
         fore,
         nose,
         brk2,
         inlet_floor,
     ])
-    inlet_upper = np.vstack([cowl, inlet_roof[1:]])
+    inlet_upper = inlet_roof
 
-    duct_x0   = throat_x0 + diff_len        # combustor face
+    duct_x0   = diffuser_entry_x + diff_len        # combustor face
 
     combustor = design_cycle.get('combustor_geometry')
     A_throat = float(design_cycle['nozzle_throat_area'])
-    if combustor is None or abs(float(combustor.get('L_star', np.nan)) - combustor_L_star) > 1.0e-12:
+    if combustor is None or abs(float(combustor.get('length_m', np.nan)) - combustor_length_m) > 1.0e-12:
         combustor = pyc_run.compute_combustor_geometry(
-            nozzle_throat_area=A_throat,
-            combustor_L_star=combustor_L_star,
+            combustor_length_m=combustor_length_m,
             design=design,
         )
 
@@ -411,10 +375,15 @@ def _flowpath_layout(
         'inlet_lower': inlet_lower,
         'inlet_roof': inlet_roof,
         'inlet_floor': inlet_floor,
+        'const_area_upper': const_area_upper,
+        'const_area_lower': const_area_lower,
+        'const_area_len': const_area_len,
+        'diffuser_entry_x': diffuser_entry_x,
         'throat_h':  throat_h,
         'throat_x0': throat_x0,
         'diff_upper': diff_upper,
         'diff_lower': diff_lower,
+        'diff_x_stations': diff_x_stations,
         'diff_h_stations': diff_h_stations,
         'diff_len':   diff_len,
         'diff_h_exit': diff_h_exit,
@@ -500,7 +469,7 @@ def fig_inlet_pt_vs_alpha(design):
 def fig_flowpath(
     design,
     design_cycle,
-    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
     diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
     throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
@@ -514,7 +483,7 @@ def fig_flowpath(
     """
     layout = _flowpath_layout(
         design, design_cycle,
-        combustor_L_star=combustor_L_star,
+        combustor_length_m=combustor_length_m,
         converging_length=converging_length,
         diverging_length=diverging_length,
         throat_angle_deg=throat_angle_deg,
@@ -533,6 +502,8 @@ def fig_flowpath(
     inlet_lower = layout['inlet_lower']
     inlet_upper = layout['inlet_upper']
     inlet_floor = layout['inlet_floor']
+    const_area_upper = layout['const_area_upper']
+    const_area_lower = layout['const_area_lower']
 
     # Subsonic diffuser + combustor duct + nozzle pulled from the shared layout
     diff_upper = layout['diff_upper']
@@ -574,6 +545,17 @@ def fig_flowpath(
     # design). The cowl shock emanates from the cowl lip and impinges on the
     # ramp-2 line at the focus (shock-on-lip) or at F.
     focus  = np.asarray(design['shock_focus_xy'], dtype=float)
+    lower_wall = np.vstack([brk2, t_lo])
+    shock_segments = _inlet2.build_internal_shock_segments(
+        C=cowl,
+        F=foot,
+        T_upper=t_up,
+        T_lower=t_lo,
+        cowl_shock_abs_deg=design['cowl_shock_abs_deg'],
+        reflection_list=design.get('reflection_list') or [],
+        lower_wall_xy=lower_wall,
+        upper_wall_xy=inlet_upper,
+    )
     shock_origins = [
         (fore, design['shock_fore_abs_deg'], 'Forebody shock'),
         (nose, design['shock1_abs_deg'],     'Ramp-1 shock'),
@@ -586,40 +568,39 @@ def fig_flowpath(
                 label='Compression shocks' if not shock_label_used else None)
         shock_label_used = True
 
-    # Cowl shock: from lip C, directed downward at cowl_shock_abs_deg,
-    # impinging on the ramp-2 surface. At the design point the impingement
-    # lies at the ramp-2 normal foot F (shock-on-lip closure).
-    cowl_shock_end = foot
-    ax.plot([cowl[0], cowl_shock_end[0]], [cowl[1], cowl_shock_end[1]],
-            '-.', color='darkred', lw=1.3, label='Cowl shock')
-
-    # ── Reflection cascade in the isolator ─────────────────────────────────
-    # Each reflection record stores the point on the wall where an incident
-    # shock lands; consecutive records are connected by the reflected shock
-    # segment traveling to the opposite wall.  A trailing "terminal" entry
-    # with no xy is a normal shock — drawn as a vertical across the throat.
-    refl = design.get('reflection_list') or []
-    xy_refl = [(float(r['x']), float(r['y']))
-               for r in refl if ('x' in r and 'y' in r)]
+    cowl_label_used = False
     cascade_label_used = False
-    for (x0_r, y0_r), (x1_r, y1_r) in zip(xy_refl[:-1], xy_refl[1:]):
-        ax.plot([x0_r, x1_r], [y0_r, y1_r],
-                '-.', color='coral', lw=1.0,
-                label='Reflected shocks' if not cascade_label_used else None)
-        cascade_label_used = True
-    for (xr, yr) in xy_refl:
-        ax.plot(xr, yr, 'o', color='coral', ms=3.0, zorder=5)
-    has_terminal = any(r.get('wall') == 'terminal' for r in refl)
-    if has_terminal and xy_refl:
-        # Draw the terminal normal shock at the throat plane (short of T_up/T_lo
-        # by the half-step from the last reflection to the throat).
-        t_mid_x = 0.5 * (xy_refl[-1][0] + max(t_up[0], t_lo[0]))
-        ax.plot([t_mid_x, t_mid_x], [t_lo[1], t_up[1]],
-                '-', color='black', lw=1.4, label='Terminal normal shock')
+    terminal_label_used = False
+    for seg in shock_segments:
+        start = seg['start']
+        end = seg['end']
+        if seg['kind'] == 'cowl':
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                    '-.', color='darkred', lw=1.3,
+                    label='Cowl shock' if not cowl_label_used else None)
+            cowl_label_used = True
+        elif seg['kind'] == 'reflection':
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                    '-.', color='coral', lw=1.0,
+                    label='Reflected shocks' if not cascade_label_used else None)
+            cascade_label_used = True
+        elif seg['kind'] == 'terminal':
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                    '-', color='black', lw=1.4,
+                    label='Terminal normal shock' if not terminal_label_used else None)
+            terminal_label_used = True
 
     # ── Subsonic diffuser walls (throat -> combustor face) ─────────────────
     ax.plot(inlet_floor[:, 0], inlet_floor[:, 1],
             '-', color='slateblue', lw=2.0, label='Inlet floor closure')
+    if layout['const_area_len'] > 0.0:
+        ax.plot(const_area_upper[:, 0], const_area_upper[:, 1],
+                '-', color='mediumpurple', lw=2.0, label='Constant-area section')
+        ax.plot(const_area_lower[:, 0], const_area_lower[:, 1],
+                '-', color='mediumpurple', lw=2.0)
+        ax.fill_between(const_area_upper[:, 0],
+                        const_area_lower[:, 1], const_area_upper[:, 1],
+                        color='mediumpurple', alpha=0.08)
     if layout['diff_len'] > 0.0:
         ax.plot(diff_upper[:, 0], diff_upper[:, 1],
                 '-', color='slateblue', lw=2.0, label='Diffuser')
@@ -644,6 +625,7 @@ def fig_flowpath(
     ax.set_title(f'Flowpath (to scale) — design M={INLET_DESIGN_M0}, '
                  f'alt={INLET_DESIGN_ALT_M/1e3:.0f} km')
     ax.set_aspect('equal')
+    ax.invert_yaxis()
     ax.legend(loc='upper left')
     _save(fig, 'flowpath_geometry')
 
@@ -660,7 +642,7 @@ def fig_cad_model(
     ring_points=CAD_RING_POINTS_DEFAULT,
     diffuser_section_count=CAD_DIFFUSER_SECTION_COUNT_DEFAULT,
     nozzle_section_count=CAD_NOZZLE_SECTION_COUNT_DEFAULT,
-    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
     diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
     throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
@@ -702,7 +684,7 @@ def fig_cad_model(
 
     layout = _flowpath_layout(
         design, design_cycle,
-        combustor_L_star=combustor_L_star,
+        combustor_length_m=combustor_length_m,
         converging_length=converging_length,
         diverging_length=diverging_length,
         throat_angle_deg=throat_angle_deg,
@@ -721,6 +703,8 @@ def fig_cad_model(
     duct_radius = layout['duct_radius']
     bx = layout['bx']
     nozzle_r = layout['bell']['radius']
+    const_area_len = layout['const_area_len']
+    diffuser_entry_x = layout['diffuser_entry_x']
     diff = design.get('diffuser')
 
     throat_w = float(diff['throat_width_m']) if diff is not None else float(INLET_DESIGN_WIDTH_M)
@@ -840,14 +824,17 @@ def fig_cad_model(
     outer_sections = []
 
     if diff is not None:
-        xs = np.asarray(diff['x_stations'], dtype=float)
+        xs = np.asarray(layout['diff_x_stations'], dtype=float)
         areas = np.asarray(diff['A_stations'], dtype=float)
         heights = np.asarray(layout['diff_h_stations'], dtype=float)
         blends = np.asarray(diff['section_blend_stations'], dtype=float)
-        throat_x = float(xs[0])
+        throat_x = float(layout['throat_x0'])
         throat_center_y = flowpath_top_y - 0.5 * throat_h
         inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=False), throat_center_y))
         outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True), throat_center_y))
+        if const_area_len > 0.0:
+            inner_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w, throat_h, outer=False), throat_center_y))
+            outer_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True), throat_center_y))
         diffuser_idx = np.linspace(0, len(xs) - 1, diffuser_section_count, dtype=int).tolist()
         diffuser_idx = sorted(set(diffuser_idx))
         if diffuser_idx[-1] != len(xs) - 1:
@@ -860,8 +847,12 @@ def fig_cad_model(
             outer_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=True), section_center_y))
     else:
         throat_area = float(design['throat_area_actual_m2'])
-        inner_sections.append(_ring_to_xyz(duct_x0, _morph_ring(throat_area, 0.0, outer=False), duct_center_y))
-        outer_sections.append(_ring_to_xyz(duct_x0, _morph_ring(throat_area, 0.0, outer=True), duct_center_y))
+        throat_x = float(layout['throat_x0'])
+        inner_sections.append(_ring_to_xyz(throat_x, _morph_ring(throat_area, 0.0, outer=False), duct_center_y))
+        outer_sections.append(_ring_to_xyz(throat_x, _morph_ring(throat_area, 0.0, outer=True), duct_center_y))
+        if const_area_len > 0.0:
+            inner_sections.append(_ring_to_xyz(diffuser_entry_x, _morph_ring(throat_area, 0.0, outer=False), duct_center_y))
+            outer_sections.append(_ring_to_xyz(diffuser_entry_x, _morph_ring(throat_area, 0.0, outer=True), duct_center_y))
 
     inner_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius, ring_points), duct_center_y))
     outer_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius + t, ring_points), duct_center_y))
@@ -1131,7 +1122,7 @@ def flight_envelope_sweep(
     alpha_values,
     phi=PHI_DEFAULT,
     design=None,
-    combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+    combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
 ):
     """Evaluate fixed geometry over a Mach-altitude-AoA envelope."""
     mach_values = np.asarray(mach_values, dtype=float)
@@ -1159,7 +1150,7 @@ def flight_envelope_sweep(
                         phi=float(phi),
                         alpha_deg=float(alpha_deg),
                         design=design,
-                        combustor_L_star=combustor_L_star,
+                        combustor_length_m=combustor_length_m,
                     )
                     dt = time.perf_counter() - t0
                     print(
@@ -1470,7 +1461,7 @@ def _plot_engine_profile(
     layout = _flowpath_layout(
         design,
         design_cycle,
-        combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+        combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
         converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
         diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
         throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
@@ -1615,19 +1606,19 @@ def main():
         M0=INLET_DESIGN_M0,
         altitude_m=INLET_DESIGN_ALT_M,
         phi=PHI_DEFAULT,
-        combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+        combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     )
 
     # Mach sweep
     sweep_altitude_m = INLET_DESIGN_ALT_M
-    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 8)
+    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 25)
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT)
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
     alt_range = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
-                            INLET_DESIGN_ALT_M + 2_000.0, 9)
+                            INLET_DESIGN_ALT_M + 2_000.0, 25)
     print(f'  Altitude sweep over {len(alt_range)} points '
           f'at M0={INLET_DESIGN_M0}, α={INLET_DESIGN_ALPHA_DEG}°, '
           f'phi={PHI_DEFAULT}')
@@ -1652,7 +1643,7 @@ def main():
     fig_flowpath(
         design,
         design_cycle,
-        combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+        combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
         converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
         diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
         throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
@@ -1672,7 +1663,7 @@ def main():
     fig_station_T(results, mach_range)
     fig_station_Pt(results, mach_range)
     fig_ram_diagnostics(results, mach_range)
-    #fig_engine_pressure_profile(design, design_cycle)
+    fig_engine_pressure_profile(design, design_cycle)
     #fig_engine_temperature_profile(design, design_cycle)
 
 
@@ -1683,7 +1674,7 @@ def main():
             design,
             design_cycle,
             wall_thickness_m=cad_wall_thickness_m,
-            combustor_L_star=COMBUSTOR_L_STAR_DEFAULT,
+            combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
             converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
             diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
             throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,

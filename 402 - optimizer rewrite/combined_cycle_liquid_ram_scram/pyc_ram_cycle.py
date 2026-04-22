@@ -16,8 +16,10 @@ import numpy as np
 import openmdao.api as om
 import pycycle.api as pyc
 
-from combustor import compute_combustor
-from gas_dynamics import FlowState, isentropic_P, isentropic_T
+from combustor import (
+    compute_combustor_variable_rayleigh,
+    build_station3_state_from_totals,
+)
 from pyc_config import (
     ETA_COMBUSTOR, F_STOICH_JP10,
     INLET_DESIGN_ALPHA_DEG,
@@ -30,11 +32,6 @@ _inlet2_spec = importlib.util.spec_from_file_location(
     'inlet2', os.path.join(os.path.dirname(__file__), '402inlet2.py'))
 _inlet2 = importlib.util.module_from_spec(_inlet2_spec)
 _inlet2_spec.loader.exec_module(_inlet2)
-
-
-AIR_GAMMA = 1.4
-AIR_R = 287.05
-
 
 class RayleighCombustorCalcs(om.ExplicitComponent):
     """
@@ -168,25 +165,25 @@ class RayleighCombustorCalcs(om.ExplicitComponent):
         far = float(inputs['Fl_I:FAR'][0])
         area_ratio = float(inputs['area_ratio'][0])
 
-        gamma3 = AIR_GAMMA
-        R3 = AIR_R
-        T3 = isentropic_T(Tt3, M3, gamma3)
-        P3 = isentropic_P(Pt3, M3, gamma3)
-        gamma3 = thermo.gamma(T3, 0.0, P3)
-        R3 = thermo.R(T3, 0.0, P3)
-        T3 = isentropic_T(Tt3, M3, gamma3)
-        P3 = isentropic_P(Pt3, M3, gamma3)
-
-        state3 = FlowState(M=M3, T=T3, P=P3, Pt=Pt3, Tt=Tt3, gamma=gamma3, R=R3)
+        state3 = build_station3_state_from_totals(
+            Pt3=Pt3,
+            Tt3=Tt3,
+            M3=M3,
+            thermo=thermo,
+        )
         # FAR from analyze() is now the true phi*f_stoich (no eta_c baked in),
         # so recover phi by dividing by f_stoich alone. eta_c is applied by
         # compute_combustor to the heat release only.
         phi = far / max(F_STOICH_JP10, 1.0e-12)
-        state4, choked = compute_combustor(
+        # The current combustor model is intentionally constant-area. OpenMDAO
+        # finite-difference passes may perturb `area_ratio` away from 1.0, so
+        # ignore that input here until a variable-area combustor model exists.
+        _ = area_ratio
+        state4, choked = compute_combustor_variable_rayleigh(
             state3,
             phi,
             thermo,
-            area_ratio=area_ratio,
+            area_ratio=1.0,
         )
 
         Wfuel = W_air * far

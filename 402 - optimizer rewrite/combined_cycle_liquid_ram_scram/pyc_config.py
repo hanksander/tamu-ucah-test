@@ -123,16 +123,20 @@ DESIGN PARAMETERS
   - Lower: shorter diffuser, less shock travel room, earlier expelled/swallowed transitions.
 """
 
-INLET_DESIGN_M0                    = 5.0
-INLET_DESIGN_ALT_M                 = 17_000.0   # mid of 19–21 km envelope
-INLET_DESIGN_ALPHA_DEG             = 2.5        # worst-α design anchor
-INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 4.5
-INLET_DESIGN_MDOT_KGS              = 8.0     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.25   # inlet spanwise width [m] (hard req)
-INLET_FOREBODY_SEP_MARGIN          = 0.30
-INLET_RAMP_SEP_MARGIN              = 0.30
-INLET_KANTROWITZ_MARGIN            = 0.85
-INLET_SHOCK_FOCUS_FACTOR           = 1.10
+#Vehicle forebody angle = 8 degrees.
+#total height 0.35 meters.
+#total width = 0.45
+
+INLET_DESIGN_M0                    = 4.5
+INLET_DESIGN_ALT_M                 = 16_000.0   # mid of 19–21 km envelope
+INLET_DESIGN_ALPHA_DEG             = 2        # worst-α design anchor
+INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 8
+INLET_DESIGN_MDOT_KGS              = 5.0     # design-point air mass flow [kg/s]
+INLET_DESIGN_WIDTH_M               = 0.3   # inlet spanwise width [m] (hard req)
+INLET_FOREBODY_SEP_MARGIN          = 0.6
+INLET_RAMP_SEP_MARGIN              = 0.2
+INLET_KANTROWITZ_MARGIN            = 0.8
+INLET_SHOCK_FOCUS_FACTOR           = 1.25
 
 # Air properties used by 402inlet2's cold-air oblique/normal-shock solver
 # (freestream-temperature relations). The thermally-perfect path uses
@@ -154,15 +158,16 @@ INLET_LEGACY_SHOCK_FOCUS_FACTOR  = 1.25
 INLET_SHOCK_EXTENSION_FACTOR = 1.20   # how far shocks are drawn past the inlet
 INLET_COWL_EXTENSION_FACTOR  = 1.35   # cowl length scale in plots
 INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
+INLET_CONSTANT_AREA_LENGTH_M = 0.1    # visual-only constant-area section ahead of diffuser [m]
 
-DIFFUSER_AREA_RATIO = 1.75
+DIFFUSER_AREA_RATIO = 3
 DIFFUSER_HALF_ANGLE_DEG = 7.0
-DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 4
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4
+DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 8
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 1
 
 
-COMBUSTOR_L_STAR_DEFAULT = 4.0
-NOZZLE_AR                = 15.0   # nozzle Ae/At committed design knob
+COMBUSTOR_LENGTH_M_DEFAULT = 1.75
+NOZZLE_AR                = 10.0   # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Efficiencies
@@ -173,7 +178,7 @@ NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV'
 ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
 ETA_DIFFUSER         = 0.98   # subsonic diffuser total-pressure recovery (friction)
 
-PHI_DEFAULT = 0.8
+PHI_DEFAULT = 0.9
 
 # RAM combustor exit Mach for pyCycle design mode
 # Fixed-geometry approximation used across the Mach sweep.

@@ -28,7 +28,7 @@ def _design_to_overrides(d: Design) -> dict:
         shock_focus_factor=d.shock_focus_factor,
         diffuser_min_shock_accommodation_dh=d.diffuser_min_shock_accommodation_dh,
         diffuser_area_ratio=d.diffuser_AR,
-        combustor_L_star=d.combustor_L_star,
+        combustor_length_m=d.combustor_length_m,
         nozzle_AR=d.nozzle_AR,
     )
 

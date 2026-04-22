@@ -16,7 +16,7 @@ from combined_cycle_liquid_ram_scram.pyc_config import (
     INLET_RAMP_SEP_MARGIN, INLET_KANTROWITZ_MARGIN,
     INLET_SHOCK_FOCUS_FACTOR, DIFFUSER_AREA_RATIO,
     DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
-    COMBUSTOR_L_STAR_DEFAULT, NOZZLE_AR_DEFAULT,
+    COMBUSTOR_LENGTH_M_DEFAULT, NOZZLE_AR_DEFAULT,
 )
 
 class Status(Enum):
@@ -33,7 +33,7 @@ class Design:
     Add fields with defaults; never break existing callers."""
     kantrowitz_margin:   float = float(INLET_KANTROWITZ_MARGIN)
     diffuser_AR:         float = float(DIFFUSER_AREA_RATIO)
-    combustor_L_star:    float = float(COMBUSTOR_L_STAR_DEFAULT)
+    combustor_length_m:  float = float(COMBUSTOR_LENGTH_M_DEFAULT)
     nozzle_AR:           float = float(NOZZLE_AR_DEFAULT)
     LE_angle_deg:        float = float(INLET_DESIGN_LEADING_EDGE_ANGLE_DEG)
     ramp_sep_margin:     float = float(INLET_RAMP_SEP_MARGIN)

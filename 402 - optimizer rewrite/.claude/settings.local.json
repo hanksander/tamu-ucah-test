@@ -13,7 +13,9 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('pyc_run.py', encoding='utf-8'\\).read\\(\\)\\); print\\('pyc_run.py OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('pyc_run.py'\\).read\\(\\)\\); print\\('pyc_run.py OK'\\); ast.parse\\(open\\('pyc_config.py'\\).read\\(\\)\\); print\\('pyc_config.py OK'\\)\")",
       "Bash(python -c 'import ast *)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('trajectory_opt/perf_surrogate.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('trajectory_opt/perf_surrogate.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -m py_compile \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/combined_cycle_liquid_ram_scram/pyc_run.py\" \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/combined_cycle_liquid_ram_scram/pyc_config.py\" \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/combined_cycle_liquid_ram_scram/plots_pycycle.py\" \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/trajectory_opt/engine_interface.py\" \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/trajectory_opt/engine_adapter.py\" \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/trajectory_opt/engine_envelope_test.py\")",
+      "Bash(python -m py_compile \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/combined_cycle_liquid_ram_scram/pyc_run.py\" \"C:/Users/hanks/OneDrive/Desktop/tamu-ucah-test/402 - optimizer rewrite/combined_cycle_liquid_ram_scram/plots_pycycle.py\")"
     ]
   }
 }

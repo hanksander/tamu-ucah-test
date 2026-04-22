@@ -30,6 +30,7 @@ CHANGES vs original
   at realistic pressures instead of always at 1 atm.
 """
 
+import numpy as np
 from scipy.optimize import brentq
 
 from gas_dynamics import FlowState, rayleigh_exit, isentropic_T, isentropic_P
@@ -141,6 +142,258 @@ def compute_combustor(
                      gamma=gamma4, R=R4), choked
 
 
+def _mixture_total_enthalpy(thermo, Tt: float, phi: float, P_ref: float) -> float:
+    """Mixture total enthalpy at the current composition basis."""
+    if phi <= 1.0e-12:
+        return thermo.h_air(Tt, P_ref)
+    return thermo.h(Tt, phi, P_ref)
+
+
+def _solve_step_total_temperature(
+    Tt_in: float,
+    P_ref: float,
+    phi_in: float,
+    phi_out: float,
+    dq_step: float,
+    thermo,
+) -> float:
+    """Solve total temperature after a small heat-addition step.
+
+    Heat is specified per kg of incoming air. Thermo enthalpy is on a
+    per-kg-mixture basis, so mixture mass growth from fuel addition is
+    accounted for explicitly across the step.
+    """
+    f_in = phi_in * F_STOICH
+    f_out = phi_out * F_STOICH
+    h_t_in = _mixture_total_enthalpy(thermo, Tt_in, phi_in, P_ref)
+    target = ((1.0 + f_in) * h_t_in + dq_step) / max(1.0 + f_out, 1.0e-12)
+
+    lo = Tt_in
+    hi = Tt_in + 5000.0
+    f_lo = thermo.h(lo, phi_out, P_ref) - target
+    f_hi = thermo.h(hi, phi_out, P_ref) - target
+
+    if f_lo > 0.0:
+        # This should be rare for a positive heat-addition step, but allow a
+        # small backoff in case the mixture-basis change makes the target dip.
+        for _ in range(12):
+            lo = max(50.0, 0.8 * lo)
+            f_lo = thermo.h(lo, phi_out, P_ref) - target
+            if f_lo <= 0.0:
+                break
+
+    if f_hi < 0.0:
+        for _ in range(12):
+            hi = hi + max(1000.0, 0.5 * hi)
+            f_hi = thermo.h(hi, phi_out, P_ref) - target
+            if f_hi >= 0.0:
+                break
+
+    if f_lo * f_hi > 0.0:
+        raise ValueError(
+            "Could not bracket total-temperature root in "
+            f"_solve_step_total_temperature: phi_in={phi_in:.6f}, "
+            f"phi_out={phi_out:.6f}, Tt_in={Tt_in:.3f}, "
+            f"f(lo)={f_lo:.6e}, f(hi)={f_hi:.6e}"
+        )
+
+    return brentq(
+        lambda T: thermo.h(T, phi_out, P_ref) - target,
+        lo,
+        hi,
+        xtol=5.0,
+    )
+
+
+def _advance_variable_rayleigh_step(
+    state_in: FlowState,
+    phi_in: float,
+    phi_out: float,
+    dq_step: float,
+    thermo,
+) -> tuple[FlowState, bool]:
+    """Advance one small constant-area heat-addition step."""
+    Tt_out = _solve_step_total_temperature(
+        Tt_in=state_in.Tt,
+        P_ref=state_in.P,
+        phi_in=phi_in,
+        phi_out=phi_out,
+        dq_step=dq_step,
+        thermo=thermo,
+    )
+
+    M_out, Pt_ratio, choked = rayleigh_exit(
+        state_in.M,
+        Tt_out / max(state_in.Tt, 1.0e-12),
+        state_in.gamma,
+        supersonic=False,
+    )
+
+    Pt_out = state_in.Pt * Pt_ratio
+    T_out = isentropic_T(Tt_out, M_out, state_in.gamma)
+    P_out = isentropic_P(Pt_out, M_out, state_in.gamma)
+    gamma_out = thermo.gamma(T_out, phi_out, P_out)
+    R_out = thermo.R(T_out, phi_out, P_out)
+
+    gamma_avg = 0.5 * (state_in.gamma + gamma_out)
+    M_out, Pt_ratio, choked = rayleigh_exit(
+        state_in.M,
+        Tt_out / max(state_in.Tt, 1.0e-12),
+        gamma_avg,
+        supersonic=False,
+    )
+
+    Pt_out = state_in.Pt * Pt_ratio
+    T_out = isentropic_T(Tt_out, M_out, gamma_out)
+    P_out = isentropic_P(Pt_out, M_out, gamma_out)
+
+    gamma_out = thermo.gamma(T_out, phi_out, P_out)
+    R_out = thermo.R(T_out, phi_out, P_out)
+    T_out = isentropic_T(Tt_out, M_out, gamma_out)
+    P_out = isentropic_P(Pt_out, M_out, gamma_out)
+
+    return FlowState(
+        M=M_out,
+        T=T_out,
+        P=P_out,
+        Pt=Pt_out,
+        Tt=Tt_out,
+        gamma=gamma_out,
+        R=R_out,
+    ), choked
+
+
+def _bisect_variable_rayleigh_sonic_step(
+    state_in: FlowState,
+    phi_in: float,
+    phi_out_full: float,
+    dq_step_full: float,
+    thermo,
+    n_iter: int = 24,
+) -> FlowState:
+    """Back out the exact heat-addition fraction where the march reaches sonic."""
+    lo = 0.0
+    hi = 1.0
+    sonic_state = None
+
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        phi_mid = phi_in + mid * (phi_out_full - phi_in)
+        dq_mid = mid * dq_step_full
+        state_mid, choked_mid = _advance_variable_rayleigh_step(
+            state_in=state_in,
+            phi_in=phi_in,
+            phi_out=phi_mid,
+            dq_step=dq_mid,
+            thermo=thermo,
+        )
+        if choked_mid or state_mid.M >= 1.0:
+            sonic_state = state_mid
+            hi = mid
+        else:
+            lo = mid
+
+    if sonic_state is None:
+        sonic_state, _ = _advance_variable_rayleigh_step(
+            state_in=state_in,
+            phi_in=phi_in,
+            phi_out=phi_out_full,
+            dq_step=dq_step_full,
+            thermo=thermo,
+        )
+    return sonic_state
+
+
+def compute_combustor_variable_rayleigh(
+    state3: FlowState,
+    phi: float,
+    thermo,
+    eta_c: float = ETA_COMBUSTOR,
+    area_ratio: float = 1.0,
+    n_steps: int = 50,
+    sonic_bisect_iters: int = 24,
+) -> tuple[FlowState, bool]:
+    """Variable-property Rayleigh march for a constant-area combustor.
+
+    This solver distributes the total heat addition over many small steps,
+    updates thermo properties at each step, and uses local Rayleigh relations
+    with a representative gamma for each increment. It is implemented for a
+    constant-area combustor only and is not wired into the cycle yet.
+    """
+    if not np.isfinite(phi) or phi < 0.0:
+        raise ValueError("phi must be finite and non-negative.")
+    if n_steps < 1:
+        raise ValueError("n_steps must be at least 1.")
+    if abs(area_ratio - 1.0) > 1.0e-9:
+        raise ValueError(
+            "compute_combustor_variable_rayleigh currently supports constant-area "
+            "combustors only (area_ratio must be 1.0)."
+        )
+    if phi <= 1.0e-12:
+        return state3, False
+
+    q_total = eta_c * phi * F_STOICH * LHV_JP10
+    dq_step = q_total / float(n_steps)
+    dphi = phi / float(n_steps)
+
+    state = state3
+    phi_curr = 0.0
+    choked = False
+
+    for _ in range(n_steps):
+        phi_next = min(phi, phi_curr + dphi)
+        state_next, choked_step = _advance_variable_rayleigh_step(
+            state_in=state,
+            phi_in=phi_curr,
+            phi_out=phi_next,
+            dq_step=dq_step,
+            thermo=thermo,
+        )
+
+        if choked_step or state_next.M >= 1.0:
+            state = _bisect_variable_rayleigh_sonic_step(
+                state_in=state,
+                phi_in=phi_curr,
+                phi_out_full=phi_next,
+                dq_step_full=dq_step,
+                thermo=thermo,
+                n_iter=sonic_bisect_iters,
+            )
+            choked = True
+            break
+
+        state = state_next
+        phi_curr = phi_next
+
+    return state, choked
+
+
+def build_station3_state_from_totals(
+    Pt3: float,
+    Tt3: float,
+    M3: float,
+    thermo,
+) -> FlowState:
+    """Reconstruct combustor-inlet static state from totals + Mach.
+
+    Uses a first-pass perfect-air inversion followed by a thermo-refined
+    gamma/R update so standalone combustor queries match the burner path.
+    """
+    gamma3 = 1.40
+    R3 = 287.05
+
+    T3 = isentropic_T(Tt3, M3, gamma3)
+    P3 = isentropic_P(Pt3, M3, gamma3)
+
+    gamma3 = thermo.gamma(T3, 0.0, P3)
+    R3 = thermo.R(T3, 0.0, P3)
+
+    T3 = isentropic_T(Tt3, M3, gamma3)
+    P3 = isentropic_P(Pt3, M3, gamma3)
+
+    return FlowState(M=M3, T=T3, P=P3, Pt=Pt3, Tt=Tt3, gamma=gamma3, R=R3)
+
+
 # ---------------------------------------------------------------------------
 # Standalone wrapper for the inlet-limited RAM closure (Phase 1).
 #
@@ -152,12 +405,6 @@ def compute_combustor(
 # station-4 numbers the solver needs, with zero OpenMDAO/pyCycle coupling.
 # ---------------------------------------------------------------------------
 
-_AIR_GAMMA_STATION3 = 1.40   # cold-air γ for building state3 from (Pt, Tt, M).
-_AIR_R_STATION3     = 287.05 # Rayleigh flow inside compute_combustor runs a
-                              # two-pass scheme that refines with product-γ, so
-                              # the inlet-γ used here only seeds the first pass.
-
-
 def combustor_face_response(
     Pt3: float,
     Tt3: float,
@@ -166,6 +413,9 @@ def combustor_face_response(
     thermo,
     area_ratio: float = 1.0,
     eta_c: float = ETA_COMBUSTOR,
+    model: str = "variable_property_rayleigh",
+    n_steps: int = 80,
+    sonic_bisect_iters: int = 24,
 ) -> dict:
     """Standalone combustor evaluation for the φ-envelope solver.
 
@@ -174,16 +424,36 @@ def combustor_face_response(
     solver roots on: Ps4 (matched against the inlet's Ps_max), M4 (thermal-
     choke limit), Tt4 (material limit), plus Pt4 for diagnostics.
     """
-    gam = _AIR_GAMMA_STATION3
-    one_plus_half_gm1_Msq = 1.0 + 0.5 * (gam - 1.0) * M3 * M3
-    T3 = Tt3 / one_plus_half_gm1_Msq
-    P3 = Pt3 / one_plus_half_gm1_Msq ** (gam / (gam - 1.0))
+    state3 = build_station3_state_from_totals(
+        Pt3=Pt3,
+        Tt3=Tt3,
+        M3=M3,
+        thermo=thermo,
+    )
 
-    state3 = FlowState(M=M3, T=T3, P=P3, Pt=Pt3, Tt=Tt3,
-                       gamma=gam, R=_AIR_R_STATION3)
-
-    state4, choked = compute_combustor(state3, phi=phi, thermo=thermo,
-                                       eta_c=eta_c, area_ratio=area_ratio)
+    if model == "avg_gamma_rayleigh":
+        state4, choked = compute_combustor(
+            state3,
+            phi=phi,
+            thermo=thermo,
+            eta_c=eta_c,
+            area_ratio=area_ratio,
+        )
+    elif model == "variable_property_rayleigh":
+        state4, choked = compute_combustor_variable_rayleigh(
+            state3,
+            phi=phi,
+            thermo=thermo,
+            eta_c=eta_c,
+            area_ratio=area_ratio,
+            n_steps=n_steps,
+            sonic_bisect_iters=sonic_bisect_iters,
+        )
+    else:
+        raise ValueError(
+            "model must be 'avg_gamma_rayleigh' or "
+            "'variable_property_rayleigh'."
+        )
 
     return {
         'Ps4':     float(state4.P),

@@ -249,6 +249,124 @@ def unit_from_angle_deg(angle_deg):
 def cross2(a, b):
     return a[0] * b[1] - a[1] * b[0]
 
+
+def _ray_line_intersection(origin_xy, direction_xy, line_start_xy, line_end_xy):
+    origin_xy = np.asarray(origin_xy, dtype=float)
+    direction_xy = np.asarray(direction_xy, dtype=float)
+    line_start_xy = np.asarray(line_start_xy, dtype=float)
+    line_end_xy = np.asarray(line_end_xy, dtype=float)
+
+    wall_dir = line_end_xy - line_start_xy
+    denom = cross2(direction_xy, wall_dir)
+    if abs(denom) <= 1.0e-12:
+        return None
+
+    delta = line_start_xy - origin_xy
+    lam = cross2(delta, wall_dir) / denom
+    mu = cross2(delta, direction_xy) / denom
+    if lam < -1.0e-12 or mu < -1.0e-9 or mu > 1.0 + 1.0e-9:
+        return None
+    return origin_xy + lam * direction_xy
+
+
+def _ray_polyline_intersection(origin_xy, direction_xy, polyline_xy):
+    polyline_xy = np.asarray(polyline_xy, dtype=float)
+    best_hit = None
+    best_dist = float("inf")
+
+    for p0, p1 in zip(polyline_xy[:-1], polyline_xy[1:]):
+        hit = _ray_line_intersection(origin_xy, direction_xy, p0, p1)
+        if hit is None:
+            continue
+        dist = float(np.linalg.norm(hit - origin_xy))
+        if dist <= 1.0e-9:
+            continue
+        if dist < best_dist:
+            best_dist = dist
+            best_hit = hit
+
+    return best_hit
+
+
+def build_internal_shock_segments(C, F, T_upper, T_lower, cowl_shock_abs_deg,
+                                  reflection_list, lower_wall_xy=None,
+                                  upper_wall_xy=None):
+    """
+    Reconstruct the cowl shock and reflection-cascade segments from the wall
+    geometry and the stored reflection strengths/turns.
+    """
+    C = np.asarray(C, dtype=float)
+    F = np.asarray(F, dtype=float)
+    T_upper = np.asarray(T_upper, dtype=float)
+    T_lower = np.asarray(T_lower, dtype=float)
+
+    if lower_wall_xy is None:
+        lower_wall_xy = np.vstack([F, T_lower])
+    else:
+        lower_wall_xy = np.asarray(lower_wall_xy, dtype=float)
+
+    if upper_wall_xy is None:
+        upper_wall_xy = np.vstack([C, T_upper])
+    else:
+        upper_wall_xy = np.asarray(upper_wall_xy, dtype=float)
+
+    first_hit = _ray_polyline_intersection(
+        C,
+        unit_from_angle_deg(cowl_shock_abs_deg),
+        lower_wall_xy,
+    )
+    if first_hit is None:
+        first_hit = F.copy()
+
+    segments = [{
+        "kind": "cowl",
+        "start": C,
+        "end": first_hit,
+    }]
+
+    current_point = first_hit
+    for rec in reflection_list or []:
+        wall = rec.get("wall")
+        if wall == "terminal":
+            throat_x = float(max(T_upper[0], T_lower[0]))
+            segments.append({
+                "kind": "terminal",
+                "start": np.array([throat_x, T_lower[1]], dtype=float),
+                "end": np.array([throat_x, T_upper[1]], dtype=float),
+            })
+            break
+
+        beta_rel = rec.get("beta_rel_deg")
+        flow_dir_in = rec.get("flow_dir_in_deg")
+        if beta_rel is None or flow_dir_in is None:
+            continue
+
+        if wall == "floor":
+            shock_abs = flow_dir_in + beta_rel
+            target_wall = upper_wall_xy
+        elif wall == "roof":
+            shock_abs = flow_dir_in - beta_rel
+            target_wall = lower_wall_xy
+        else:
+            continue
+
+        next_point = _ray_polyline_intersection(
+            current_point,
+            unit_from_angle_deg(shock_abs),
+            target_wall,
+        )
+        if next_point is None:
+            break
+
+        segments.append({
+            "kind": "reflection",
+            "start": current_point.copy(),
+            "end": next_point,
+        })
+        current_point = next_point
+
+    return segments
+
 def total_temperature(T, M, gamma=GAMMA):
     return T * (1.0 + 0.5 * (gamma - 1.0) * M**2)
 
@@ -597,13 +715,20 @@ def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
         "focus_point": focus_point,
     }
 
-def solve_forebody_start_from_focus(focus_point,shock_fore_abs,):
-    tan_bf = math.tan(math.radians(shock_fore_abs))
-    if abs(tan_bf) < 1e-12:
-        raise ValueError("Forebody shock angle is too small to solve forebody placement.")
+def solve_forebody_start_from_focus(focus_point, theta_fore, shock_fore_abs):
+    focus_point = np.asarray(focus_point, dtype=float)
+    forebody_dir = unit_from_angle_deg(theta_fore)
+    shock_dir = unit_from_angle_deg(shock_fore_abs)
 
-    x_fore = focus_point[0] - focus_point[1] / tan_bf
-    return np.array([x_fore, 0.0], dtype=float)
+    denom = cross2(forebody_dir, shock_dir)
+    if abs(denom) < 1.0e-12:
+        raise ValueError("Forebody and forebody shock are nearly parallel.")
+
+    s_fore = -cross2(focus_point, shock_dir) / denom
+    if s_fore <= 0.0:
+        raise ValueError("Computed forebody start is not upstream of the nose.")
+
+    return -s_fore * forebody_dir
 
 def solve_cowl_stage(M2, theta2, leading_edge_angle_deg, T2=None):
     theta_cowl = -leading_edge_angle_deg
@@ -843,6 +968,50 @@ def point_in_body_frame(point_xy,leading_edge_angle_deg,):
     y_body = -x * math.sin(theta) + y * math.cos(theta)
 
     return np.array([x_body, y_body], dtype=float)
+
+
+def _polyline_slope(points, at_start=False):
+    points = np.asarray(points, dtype=float)
+    if points.shape[0] < 2:
+        return 0.0
+    if at_start:
+        p0, p1 = points[0], points[1]
+    else:
+        p0, p1 = points[-2], points[-1]
+    return float((p1[1] - p0[1]) / max(p1[0] - p0[0], 1.0e-12))
+
+
+def _quintic_curve(start_xy, end_xy, start_slope, end_slope, n_points=80):
+    x0, y0 = map(float, start_xy)
+    x1, y1 = map(float, end_xy)
+    dx = x1 - x0
+    if dx <= 1.0e-9:
+        return np.array([[x0, y0], [x1, y1]], dtype=float)
+
+    m0 = float(start_slope) * dx
+    m1 = float(end_slope) * dx
+    coeff = np.linalg.solve(
+        np.array([
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            [0.0, 0.0, 2.0, 6.0, 12.0, 20.0],
+        ], dtype=float),
+        np.array([y0, m0, 0.0, y1, m1, 0.0], dtype=float),
+    )
+    s = np.linspace(0.0, 1.0, int(n_points))
+    y = np.polyval(coeff[::-1], s)
+    x = x0 + dx * s
+    return np.column_stack([x, y])
+
+
+def _build_cowl_roof_curve(ramp2_start_xy, foot_xy, cowl_xy, throat_upper_xy,
+                           diffuser_upper_xy):
+    cowl_xy = np.asarray(cowl_xy, dtype=float)
+    throat_upper_xy = np.asarray(throat_upper_xy, dtype=float)
+    return np.array([cowl_xy, throat_upper_xy], dtype=float)
 
 def invert_area_mach_ratio_supersonic(target_A_over_Astar, gamma=GAMMA,
                                       tol=1e-4, max_iter=50,):
@@ -1329,6 +1498,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
 
     P_fore = solve_forebody_start_from_focus(
         focus_point=geom["focus_point"],
+        theta_fore=forebody["theta_fore"],
         shock_fore_abs=forebody["shock_fore_abs"],
     )
 
@@ -1629,14 +1799,34 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
     cowl_shock_abs = result["cowl_shock_abs_deg"]
     theta_cowl = result["theta_cowl_deg"]
 
-    x_end = shock_extension_factor * max(T_upper[0], C[0], focus[0])
-    cowl_dir = unit_from_angle_deg(theta_cowl)
+    diffuser = result.get("diffuser")
+    if diffuser is not None:
+        diffuser_upper = np.asarray(diffuser["upper_wall_xy"], dtype=float)
+        cowl_curve = _build_cowl_roof_curve(P1, F, C, T_upper, diffuser_upper)
+        cowl_tip = cowl_curve[-1]
+    else:
+        cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], _COWL_MIN_LEN_M)
+        cowl_dir = unit_from_angle_deg(theta_cowl)
+        cowl_curve = np.vstack([C, C + cowl_len * cowl_dir])
+        cowl_tip = cowl_curve[-1]
+
+    lower_wall = np.vstack([P1, T_lower])
+    shock_segments = build_internal_shock_segments(
+        C=C,
+        F=F,
+        T_upper=T_upper,
+        T_lower=T_lower,
+        cowl_shock_abs_deg=cowl_shock_abs,
+        reflection_list=result.get("reflection_list") or [],
+        lower_wall_xy=lower_wall,
+        upper_wall_xy=cowl_curve,
+    )
+
+    x_end = shock_extension_factor * max(T_upper[0], C[0], focus[0], cowl_tip[0])
 
     fore_shock_dir = unit_from_angle_deg(shock_fore_abs)
     shock1_dir = unit_from_angle_deg(shock1_abs)
     shock2_dir = unit_from_angle_deg(shock2_abs)
-    cowl_shock_dir = unit_from_angle_deg(cowl_shock_abs)
-
     lam_fore_end = (x_end - P_fore[0]) / fore_shock_dir[0]
     y_fore_end = P_fore[1] + lam_fore_end * fore_shock_dir[1]
 
@@ -1646,12 +1836,6 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
     lam2_end = (x_end - P1[0]) / shock2_dir[0]
     y_s2_end = P1[1] + lam2_end * shock2_dir[1]
 
-    lamc_end = (x_end - C[0]) / cowl_shock_dir[0]
-    y_sc_end = C[1] + lamc_end * cowl_shock_dir[1]
-
-    cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], _COWL_MIN_LEN_M)
-    cowl_end = C + cowl_len * cowl_dir
-
     fig, ax = plt.subplots(figsize=(11, 5.5))
 
     # Geometry
@@ -1659,14 +1843,12 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
         linewidth=2, label="Forebody")
     ax.plot([P0[0], P1[0]], [P0[1], P1[1]],
         linewidth=2, label="Ramp 1")
-    ax.plot([P1[0], F[0]], [P1[1], F[1]],
-        linewidth=2, label="Ramp 2")
-    ax.plot([F[0], T_lower[0]], [F[1], T_lower[1]],
-        linewidth=2, label="Internal sharp edge")
+    ax.plot([P1[0], T_lower[0]], [P1[1], T_lower[1]],
+        linewidth=2, label="Lower inlet surface")
     ax.plot([F[0], C[0]], [F[1], C[1]],
         linewidth=2, label="Opening (normal to Ramp 2)")
-    ax.plot([C[0], cowl_end[0]], [C[1], cowl_end[1]],
-        linewidth=2, label="Angled cowl")
+    ax.plot(cowl_curve[:, 0], cowl_curve[:, 1],
+        linewidth=2, label="Cowl")
     ax.plot([T_lower[0], T_upper[0]], [T_lower[1], T_upper[1]],
         linewidth=2, label="Throat Shock", linestyle= "--")
 
@@ -1677,8 +1859,23 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
         linestyle="--", linewidth=1.5, label="Ramp 1 shock")
     ax.plot([P1[0], x_end], [P1[1], y_s2_end],
         linestyle="--", linewidth=1.5, label="Ramp 2 shock")
-    ax.plot([C[0], x_end], [C[1], y_sc_end],
-        linestyle="--", linewidth=1.5, label="Cowl shock")
+    cowl_label_used = False
+    reflection_label_used = False
+    for seg in shock_segments:
+        start = seg["start"]
+        end = seg["end"]
+        if seg["kind"] == "cowl":
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                linestyle="--", linewidth=1.5, label="Cowl shock")
+            cowl_label_used = True
+        elif seg["kind"] == "reflection":
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                linestyle="--", linewidth=1.3,
+                label="Reflected shocks" if not reflection_label_used else None)
+            reflection_label_used = True
+        elif seg["kind"] == "terminal":
+            ax.plot([start[0], end[0]], [start[1], end[1]],
+                linestyle="-", linewidth=1.5, label="Terminal normal shock")
 
     # Focus point
     ax.plot(focus[0], focus[1], marker="x", markersize=8)
@@ -1703,13 +1900,16 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
     ax.grid(True)
     ax.legend()
 
+    shock_y = []
+    for seg in shock_segments:
+        shock_y.extend([seg["start"][1], seg["end"][1]])
     y_max = max(C[1], F[1], y_fore_end, y_s1_end, y_s2_end,
-        y_sc_end, T_upper[1], focus[1], cowl_end[1])
+        T_upper[1], focus[1], cowl_tip[1], *shock_y)
     y_min = min(P_fore[1], P0[1], P1[1], F[1], C[1],
-        y_sc_end, T_lower[1], focus[1], cowl_end[1], 0.0)
+        T_lower[1], focus[1], cowl_tip[1], 0.0, *shock_y)
 
     ax.set_xlim(P_fore[0] - 0.02 * (x_end - P_fore[0]),
-        1.05 * max(x_end, cowl_end[0], T_upper[0]))
+        1.05 * max(x_end, cowl_tip[0], T_upper[0]))
     ax.set_ylim(y_min - 0.05 * max(y_max - y_min, 1e-6),
         y_max + 0.15 * max(y_max - y_min, 1e-6))
 
@@ -2096,14 +2296,34 @@ def plot_fixed_geometry_case(ax,case,shock_extension_factor=_SHOCK_EXT_FACTOR,
     cowl_shock_abs = case["cowl_shock_abs_deg"]
     theta_cowl = case["theta_cowl_deg"]
 
-    x_end = shock_extension_factor * max(T_upper[0], C[0], focus[0])
-    cowl_dir = unit_from_angle_deg(theta_cowl)
+    diffuser = case.get("diffuser")
+    if diffuser is not None:
+        diffuser_upper = np.asarray(diffuser["upper_wall_xy"], dtype=float)
+        cowl_curve = _build_cowl_roof_curve(P1, F, C, T_upper, diffuser_upper)
+        cowl_tip = cowl_curve[-1]
+    else:
+        cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], _COWL_MIN_LEN_M)
+        cowl_dir = unit_from_angle_deg(theta_cowl)
+        cowl_curve = np.vstack([C, C + cowl_len * cowl_dir])
+        cowl_tip = cowl_curve[-1]
+
+    lower_wall = np.vstack([P1, T_lower])
+    shock_segments = build_internal_shock_segments(
+        C=C,
+        F=F,
+        T_upper=T_upper,
+        T_lower=T_lower,
+        cowl_shock_abs_deg=cowl_shock_abs,
+        reflection_list=case.get("reflection_list") or [],
+        lower_wall_xy=lower_wall,
+        upper_wall_xy=cowl_curve,
+    )
+
+    x_end = shock_extension_factor * max(T_upper[0], C[0], focus[0], cowl_tip[0])
 
     fore_shock_dir = unit_from_angle_deg(shock_fore_abs)
     shock1_dir = unit_from_angle_deg(shock1_abs)
     shock2_dir = unit_from_angle_deg(shock2_abs)
-    cowl_shock_dir = unit_from_angle_deg(cowl_shock_abs)
-
     lam_fore_end = (x_end - P_fore[0]) / fore_shock_dir[0]
     y_fore_end = P_fore[1] + lam_fore_end * fore_shock_dir[1]
 
@@ -2113,24 +2333,22 @@ def plot_fixed_geometry_case(ax,case,shock_extension_factor=_SHOCK_EXT_FACTOR,
     lam2_end = (x_end - P1[0]) / shock2_dir[0]
     y_s2_end = P1[1] + lam2_end * shock2_dir[1]
 
-    lamc_end = (x_end - C[0]) / cowl_shock_dir[0]
-    y_sc_end = C[1] + lamc_end * cowl_shock_dir[1]
-
-    cowl_len = cowl_extension_factor * max(T_upper[0] - C[0], _COWL_MIN_LEN_M)
-    cowl_end = C + cowl_len * cowl_dir
-
     ax.plot([P_fore[0], P0[0]], [P_fore[1], P0[1]], linewidth=1.5)
     ax.plot([P0[0], P1[0]], [P0[1], P1[1]], linewidth=1.5)
-    ax.plot([P1[0], F[0]], [P1[1], F[1]], linewidth=1.5)
-    ax.plot([F[0], T_lower[0]], [F[1], T_lower[1]], linewidth=1.5)
+    ax.plot([P1[0], T_lower[0]], [P1[1], T_lower[1]], linewidth=1.5)
     ax.plot([F[0], C[0]], [F[1], C[1]], linewidth=1.5)
-    ax.plot([C[0], cowl_end[0]], [C[1], cowl_end[1]], linewidth=1.5)
+    ax.plot(cowl_curve[:, 0], cowl_curve[:, 1], linewidth=1.5)
     ax.plot([T_lower[0], T_upper[0]], [T_lower[1], T_upper[1]], linewidth=1.5, linestyle=":")
 
     ax.plot([P_fore[0], x_end], [P_fore[1], y_fore_end], linestyle="--", linewidth=1.0)
     ax.plot([P0[0], x_end], [P0[1], y_s1_end], linestyle="--", linewidth=1.0)
     ax.plot([P1[0], x_end], [P1[1], y_s2_end], linestyle="--", linewidth=1.0)
-    ax.plot([C[0], x_end], [C[1], y_sc_end], linestyle="--", linewidth=1.0)
+    for seg in shock_segments:
+        start = seg["start"]
+        end = seg["end"]
+        style = "-" if seg["kind"] == "terminal" else "--"
+        lw = 1.2 if seg["kind"] == "cowl" else 1.0
+        ax.plot([start[0], end[0]], [start[1], end[1]], linestyle=style, linewidth=lw)
 
     ax.plot(focus[0], focus[1], marker="x", markersize=5)
 
@@ -2260,27 +2478,35 @@ def plot_pt_vs_alpha(cases):
     plt.title("Total Pressure Recovery vs Alpha (cascade + diffuser)")
     plt.show()
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 
-
+from pyc_config import (
+    INLET_DESIGN_M0, INLET_DESIGN_ALT_M,
+    INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
+    INLET_DESIGN_MDOT_KGS, INLET_FOREBODY_SEP_MARGIN,
+    INLET_RAMP_SEP_MARGIN, INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
+    INLET_DESIGN_WIDTH_M
+)
 ##SWEEP METHOD TO FIND BEST GEOMETRY
 Sweep = True
-Sweep = False    #Comment out this line when new cruise conditions are used to first determine the best geometry
+#Sweep = False    #Comment out this line when new cruise conditions are used to first determine the best geometry
 if Sweep:
     if __name__ == "__main__":
-        forebody_margin_values = np.linspace(0.2, 0.3, 10)
-        ramp_margin_values = np.linspace(0.25, 0.35, 10)
+        forebody_margin_values = np.linspace(0.2, 0.5, 10)
+        ramp_margin_values = np.linspace(0.2, 0.5, 10)
 
         sweep = sweep_d2r_margins(
-            M0=5.0,
-            altitude_m=12000.0,
-            alpha_deg=2.0,
-            leading_edge_angle_deg=6.0,
-            mdot_required=6.0,
-            width_m=0.25,
+            M0=INLET_DESIGN_M0,
+            altitude_m=INLET_DESIGN_ALT_M,
+            alpha_deg=INLET_DESIGN_ALPHA_DEG,
+            leading_edge_angle_deg=INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
+            mdot_required=INLET_DESIGN_MDOT_KGS,
+            width_m=INLET_DESIGN_WIDTH_M,
             forebody_margin_values=forebody_margin_values,
             ramp_margin_values=ramp_margin_values,
-            kantrowitz_margin=0.95,
-            shock_focus_factor=1.25,
+            kantrowitz_margin=INLET_KANTROWITZ_MARGIN,
+            shock_focus_factor=INLET_SHOCK_FOCUS_FACTOR,
             verbose=True,
         )
 
@@ -2293,32 +2519,35 @@ else:
 ###PLOT A SINGLE GEOMETRY
     if __name__ == "__main__":
         result = design_2ramp_shock_matched_inlet(
-            M0=5.0,
-            altitude_m=12000.0,
-            alpha_deg=2.0,
-            leading_edge_angle_deg=6.0,
-            mdot_required=6.0,
-            width_m=0.25,
-            forebody_separation_margin=0.2,
-            ramp_separation_margin=0.28,
-            kantrowitz_margin=0.95,
-            shock_focus_factor=1.25,
+            M0=INLET_DESIGN_M0,
+            altitude_m=INLET_DESIGN_ALT_M,
+            alpha_deg=INLET_DESIGN_ALPHA_DEG,
+            leading_edge_angle_deg=INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
+            mdot_required=INLET_DESIGN_MDOT_KGS,
+            width_m=INLET_DESIGN_WIDTH_M,
+            forebody_separation_margin=INLET_FOREBODY_SEP_MARGIN,
+            ramp_separation_margin=INLET_RAMP_SEP_MARGIN,
+            kantrowitz_margin=INLET_KANTROWITZ_MARGIN,
+            shock_focus_factor=INLET_SHOCK_FOCUS_FACTOR,
         )
 
         print_d2r_report(result)
         plot_2ramp_shock_matched_inlet(result)
 
         # 3x3 shock grid
+
+
+        
         mach_grid = [4.0, 4.5, 5.0]
-        alpha_grid = [2.0, 5.0, 8.0]
+        alpha_grid = [-2.0, 2.0, 5.0]
 
         plot_fixed_geometry_3x3_grid(
             result=result,
-            altitude_m=12000.0,
+            altitude_m=INLET_DESIGN_ALT_M,
             mach_values=mach_grid,
             alpha_values=alpha_grid,
         )
-
+        '''
         # pt vs Mach at fixed alpha
         mach_sweep = np.linspace(4.0, 5.0, 15)
         cases_mach = sweep_fixed_geometry_vs_mach(
@@ -2338,3 +2567,5 @@ else:
             M0=5.0,
         )
         plot_pt_vs_alpha(cases_alpha)
+
+        '''

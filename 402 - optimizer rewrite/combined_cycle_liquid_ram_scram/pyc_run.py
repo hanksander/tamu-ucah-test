@@ -47,7 +47,7 @@ from pyc_config import (
     INLET_FOREBODY_SEP_MARGIN, INLET_RAMP_SEP_MARGIN,
     INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
     NOZZLE_TYPE,
-    TT4_MAX_K, M4_MAX, COMBUSTOR_L_STAR_DEFAULT,
+    TT4_MAX_K, M4_MAX, COMBUSTOR_LENGTH_M_DEFAULT,
     DIFFUSER_AREA_RATIO, NOZZLE_AR, NOZZLE_AR_DEFAULT,
     DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
     PHI_DEFAULT,
@@ -78,7 +78,7 @@ def build_design(
     forebody_separation_margin=None, ramp_separation_margin=None,
     kantrowitz_margin=None, shock_focus_factor=None,
     diffuser_area_ratio=None, diffuser_min_shock_accommodation_dh=None,
-    combustor_L_star=None, nozzle_AR=None, design_phi=None,
+    combustor_length_m=None, nozzle_AR=None, design_phi=None,
 ):
     """Build an inlet+geometry design dict. Any arg left as None falls
     back to the pyc_config default."""
@@ -126,7 +126,7 @@ def build_design(
     design['A_combustor_face']        = diffuser["A_exit"]
     design['diffuser_area_ratio'] = diffuser_area_ratio_eff
     design['diffuser_min_shock_accommodation_dh'] = diffuser_min_shock_accommodation_dh_eff
-    design['combustor_L_star']    = pick(combustor_L_star, COMBUSTOR_L_STAR_DEFAULT)
+    design['combustor_length_m']  = float(pick(combustor_length_m, COMBUSTOR_LENGTH_M_DEFAULT))
     design['nozzle_AR']           = float(pick(nozzle_AR, NOZZLE_AR))
 
     # Commit A_noz_throat analytically at the design point. The choked-nozzle
@@ -349,7 +349,7 @@ def compute_inlet_conditions(M0, alt_m, ramp_angles=None, alpha_deg=0.0):
 
 from scipy.interpolate import PchipInterpolator as _Pchip
 
-_SOFTMIN_K = 20.0  # larger → sharper soft-min (closer to true min)
+_SOFTMIN_K = 15.0  # larger → sharper soft-min (closer to true min)               #LOWER
 
 _inlet_cap_cache: dict = {}
 _INLET_CAP_CACHE_MAX = 2048
@@ -423,11 +423,13 @@ def _solve_phi_envelope(capability, A_noz_throat, W_air,
       φ_choke          — thermal-choke margin on M4
       φ_inlet_limit    — Pt3_req(φ) = Pt3_deliverable (inlet expulsion)
 
-    Pt3_req at each φ comes from:
+    Each cap is found by Brent root-finding on obs(φ) − target, so cap
+    values are smooth in flight condition (no coarse-grid PCHIP topology
+    artefacts). Pt3_req(φ) is computed inline from the choked-nozzle mass
+    balance and the Rayleigh combustor face response at φ:
         Pt4_req = W_tot · √Tt4 / (A_noz_throat · Γ(γ4, R4))
-        π_comb  = Pt4 / Pt3   (from Rayleigh; function of M3, Tt4/Tt3, γ)
-        Pt3_req = Pt4_req / π_comb
-    with W_tot = W_air · (1 + FAR(φ)).
+        π_comb  = Pt4 / Pt3
+        Pt3_req = Pt4_req / π_comb,  W_tot = W_air · (1 + FAR(φ)).
     """
     if not capability.get('ok', False):
         return {
@@ -441,79 +443,76 @@ def _solve_phi_envelope(capability, A_noz_throat, W_air,
     Tt3 = float(capability['Tt0'])
     M3  = float(capability['M3_diffuser_exit'])
 
-    if phi_grid is None:
-        phi_top = max(0.95, float(phi_request) + 0.1)
-        phi_grid = np.linspace(0.05, phi_top, 8)
-    else:
-        phi_grid = np.asarray(phi_grid, dtype=float)
+    PHI_LO = 0.02
+    phi_top = max(0.95, float(phi_request) + 0.10)
 
-    Tt4_arr     = np.empty_like(phi_grid)
-    M4_arr      = np.empty_like(phi_grid)
-    Pt3_req_arr = np.empty_like(phi_grid)
-    Pt4_arr     = np.empty_like(phi_grid)
-
-    for i, phi in enumerate(phi_grid):
+    def _obs_at(phi):
         face = combustor_face_response(
             Pt3=Pt3, Tt3=Tt3, M3=M3, phi=float(phi),
             thermo=thermo, area_ratio=1.0,  # constant-area combustor
         )
-        Tt4     = float(face['Tt4'])
+        Tt4      = float(face['Tt4'])
         Pt4_here = float(face['Pt4'])
-        gamma4  = float(face['gamma4'])
-        R4      = float(face['R4'])
-        FAR     = float(face['f_ratio'])
-
+        gamma4   = float(face['gamma4'])
+        R4       = float(face['R4'])
+        FAR      = float(face['f_ratio'])
+        M4_here  = float(face['M4'])
         Gamma_mass = _choked_nozzle_mass_param(gamma4, R4)
         mdot_total = W_air * (1.0 + FAR)
         Pt4_req    = mdot_total * np.sqrt(Tt4) / (A_noz_throat * Gamma_mass)
         pi_comb    = Pt4_here / max(Pt3, 1.0e-9)
         Pt3_req    = Pt4_req / max(pi_comb, 1.0e-9)
+        return Tt4, M4_here, Pt4_here, Pt3_req
 
-        Tt4_arr[i]     = Tt4
-        M4_arr[i]      = float(face['M4'])
-        Pt4_arr[i]     = Pt4_here
-        Pt3_req_arr[i] = Pt3_req
+    def _invert(obs_index, target):
+        """Brentq on obs[obs_index](φ) − target over [PHI_LO, phi_top].
 
-    def _phi_at_obs_target(obs_arr, target):
-        """Invert a monotone-increasing observable to find φ(target).
-
-        target > obs[max] → cap never binds within the grid → +∞
-        target < obs[min] → already violated at lowest φ      → lowest φ
+        target ≥ obs(phi_top) → cap never binds → +inf
+        target ≤ obs(PHI_LO)  → already violated at floor → PHI_LO
         """
-        x = np.asarray(obs_arr, dtype=float)
-        y = np.asarray(phi_grid, dtype=float)
-        mask = np.isfinite(x) & np.isfinite(y)
-        x = x[mask]; y = y[mask]
-        if x.size < 2:
+        target = float(target)
+        obs_lo = _obs_at(PHI_LO)[obs_index]
+        obs_hi = _obs_at(phi_top)[obs_index]
+        if not (np.isfinite(obs_lo) and np.isfinite(obs_hi)):
             return float('nan')
-        order = np.argsort(y)
-        x = x[order]; y = y[order]
-        keep = np.concatenate(([True], np.diff(x) > 0.0))
-        x = x[keep]; y = y[keep]
-        if x.size < 2:
-            return float('nan')
-        if target >= x[-1]:
+        if target >= obs_hi:
             return float('inf')
-        if target <= x[0]:
-            return float(y[0])
-        inv = _Pchip(x, y, extrapolate=False)
-        return float(inv(target))
+        if target <= obs_lo:
+            return float(PHI_LO)
+        def _res(phi):
+            return _obs_at(phi)[obs_index] - target
+        try:
+            return float(_brentq(_res, PHI_LO, phi_top,
+                                  xtol=1.0e-5, rtol=1.0e-6, maxiter=60))
+        except Exception:
+            return float('nan')
 
-    phi_Tt4         = _phi_at_obs_target(Tt4_arr,     Tt4_max)
-    phi_choke       = _phi_at_obs_target(M4_arr,      M4_max)
-    phi_inlet_limit = _phi_at_obs_target(Pt3_req_arr, Pt3)
+    phi_Tt4         = _invert(0, Tt4_max)
+    phi_choke       = _invert(1, M4_max)
+    phi_inlet_limit = _invert(3, Pt3)
 
     phi_caps = np.array(
         [float(phi_request), phi_Tt4, phi_choke, phi_inlet_limit],
         dtype=float,
     )
     phi_cap = _softmin(phi_caps, k=_SOFTMIN_K)
-    phi_cap = float(max(0.02, phi_cap))
+    phi_cap = float(max(PHI_LO, phi_cap))
 
     face_cap = combustor_face_response(
         Pt3=Pt3, Tt3=Tt3, M3=M3, phi=phi_cap,
         thermo=thermo, area_ratio=1.0,
     )
+
+    # Optional diagnostic grid (not used by the solver; kept so downstream
+    # plotting code can still introspect the φ-observable curves).
+    phi_grid_diag = (np.linspace(PHI_LO, phi_top, 12) if phi_grid is None
+                     else np.asarray(phi_grid, dtype=float))
+    Tt4_arr     = np.empty_like(phi_grid_diag)
+    M4_arr      = np.empty_like(phi_grid_diag)
+    Pt4_arr     = np.empty_like(phi_grid_diag)
+    Pt3_req_arr = np.empty_like(phi_grid_diag)
+    for i, phi in enumerate(phi_grid_diag):
+        Tt4_arr[i], M4_arr[i], Pt4_arr[i], Pt3_req_arr[i] = _obs_at(phi)
 
     return {
         'ok':              True,
@@ -529,7 +528,7 @@ def _solve_phi_envelope(capability, A_noz_throat, W_air,
         'M4':              float(face_cap['M4']),
         'Tt4':             float(face_cap['Tt4']),
         'Pt4':             float(face_cap['Pt4']),
-        'grid_phi':        phi_grid,
+        'grid_phi':        phi_grid_diag,
         'Tt4_arr':         Tt4_arr,
         'M4_arr':          M4_arr,
         'Pt4_arr':         Pt4_arr,
@@ -574,8 +573,7 @@ def _build_air_state_from_totals(M, Tt, Pt, thermo=None):
 # ---------------------------------------------------------------------------
 
 def compute_combustor_geometry(
-    nozzle_throat_area: float,
-    combustor_L_star: float,
+    combustor_length_m: float,
     design: dict | None = None,
     cross_section_area_m2: float | None = None,
     cross_section_shape: str | None = None,
@@ -583,16 +581,14 @@ def compute_combustor_geometry(
     height_m: float | None = None,
 ) -> dict:
     """
-    Size a constant-area combustor from characteristic length.
+    Size a constant-area combustor from a user-supplied chamber length.
 
-    When a diffuser is present, the combustor inherits the diffuser exit area
-    and is treated as circular. Legacy rectangular sizing is retained as a
-    fallback for cases without a diffuser block.
+    Cross-section is taken from the diffuser exit area when a diffuser block
+    is attached to `design` (circular). A rectangular fallback is retained
+    for designs without a diffuser. Volume = A_cc · L_cc.
     """
-    if nozzle_throat_area <= 0.0:
-        raise ValueError("nozzle_throat_area must be positive.")
-    if combustor_L_star <= 0.0:
-        raise ValueError("combustor_L_star must be positive.")
+    if combustor_length_m <= 0.0:
+        raise ValueError("combustor_length_m must be positive.")
 
     if cross_section_area_m2 is None:
         diff = design.get("diffuser") if isinstance(design, dict) else None
@@ -621,14 +617,12 @@ def compute_combustor_geometry(
     combustor_area = float(cross_section_area_m2)
     if combustor_area <= 0.0:
         raise ValueError("Combustor cross_section_area_m2 must be positive.")
-    combustor_volume = combustor_L_star * nozzle_throat_area
-    combustor_length = combustor_volume / combustor_area
+    combustor_length = float(combustor_length_m)
+    combustor_volume = combustor_area * combustor_length
 
     geometry = {
-        "L_star": float(combustor_L_star),
         "cross_section_shape": str(cross_section_shape or "circular"),
         "cross_section_area_m2": float(combustor_area),
-        "throat_area_m2": float(nozzle_throat_area),
         "volume_m3": float(combustor_volume),
         "length_m": float(combustor_length),
     }
@@ -762,19 +756,19 @@ def build_geometry_summary(design: dict) -> dict:
 
     This path is intentionally cheaper than `analyze()`: it reuses the inlet
     geometry already built by `build_design()`, sizes the combustor directly
-    from L* and throat area, and estimates nozzle packaging from throat area
-    and commanded nozzle area ratio. No pyCycle / nozzle performance solve.
+    from user-supplied chamber length and diffuser exit area, and estimates
+    nozzle packaging from throat area and commanded nozzle area ratio. No
+    pyCycle / nozzle performance solve.
     """
     if not isinstance(design, dict):
         raise TypeError("design must be a dict returned by build_design().")
 
-    nozzle_throat_area = float(design["throat_area_actual_m2"])
-    combustor_L_star = float(design.get("combustor_L_star", COMBUSTOR_L_STAR_DEFAULT))
+    nozzle_throat_area = float(design["A_noz_throat"])
+    combustor_length_m = float(design.get("combustor_length_m", COMBUSTOR_LENGTH_M_DEFAULT))
     nozzle_AR = float(design.get("nozzle_AR", NOZZLE_AR_DEFAULT))
 
     combustor_geometry = compute_combustor_geometry(
-        nozzle_throat_area=nozzle_throat_area,
-        combustor_L_star=combustor_L_star,
+        combustor_length_m=combustor_length_m,
         design=design,
     )
     combustor_section = _build_combustor_section_summary(combustor_geometry)
@@ -820,7 +814,7 @@ def analyze(
     phi:          float,
     alpha_deg:    float | None = None,
     ramp_angles:  list  | None = None,
-    combustor_L_star: float | None = None,
+    combustor_length_m: float | None = None,
     design = None,
     verbose:      bool         = False,
 ) -> dict:
@@ -866,17 +860,14 @@ def analyze(
     W_kgs   = rho0 * V0 * A_capture_m2         # kg/s
     W_lbms  = W_kgs * KG2LBM                   # lbm/s
 
-    combustor_L_star_eff = (float(combustor_L_star) if combustor_L_star is not None
-                             else float(COMBUSTOR_L_STAR_DEFAULT))
-    # Pre-pyCycle we only need the combustor cross-section area (for
-    # burner.area_ratio and the envelope's A3).  L* volume/length depend on
-    # the *nozzle* throat, which comes out of the pyCycle solve — so
-    # compute_combustor_geometry is deferred until after run_model() and
-    # called with nozz.Throat:stat:area. Using the inlet Kantrowitz throat
-    # here would undersize chamber volume by the (A_nozzle/A_inlet) ratio.
+    combustor_length_m_eff = (float(combustor_length_m) if combustor_length_m is not None
+                              else float(design.get("combustor_length_m",
+                                                    COMBUSTOR_LENGTH_M_DEFAULT)))
+    # Chamber cross-section comes from the diffuser exit area and length is
+    # user-supplied, so the geometry is fully determined before pyCycle runs
+    # (no dependency on nozzle throat). burner.area_ratio uses A_cc / A_throat_inlet.
     combustor_geometry = compute_combustor_geometry(
-        nozzle_throat_area=float(design["throat_area_actual_m2"]),   # placeholder
-        combustor_L_star=combustor_L_star_eff,
+        combustor_length_m=combustor_length_m_eff,
         design=design,
     )
     combustor_area_ratio = (
@@ -892,7 +883,7 @@ def analyze(
     prob.set_val('fc.alt', altitude_m * M2FT, units='ft')
     prob.set_val('fc.MN',  M0)
     prob.set_val('fc.W',   W_lbms, units='lbm/s')
-    prob.set_val("burner.area_ratio", combustor_area_ratio)
+    prob.set_val("burner.area_ratio", 1.0)
 
     # ── Inlet capability + φ envelope (cascade-only) ─────────────────────────
     capability = _get_capability(design, M0, altitude_m, eval_alpha_deg)
@@ -1002,15 +993,6 @@ def analyze(
         Fn_N = Fg_N - ram_drag_N
     F_sp = Fn_N / max(W_kgs, 1.0e-12)
     Isp  = Fn_N / max(Wfuel * G0, 1.0e-12)
-
-    # Rebuild combustor geometry with the real nozzle throat so L* volume and
-    # chamber length reflect V_c = L* · A_throat_nozzle (not the inlet
-    # Kantrowitz throat used as a placeholder before the pyCycle solve).
-    combustor_geometry = compute_combustor_geometry(
-        nozzle_throat_area=throat_area_m2,
-        combustor_L_star=combustor_L_star_eff,
-        design=design,
-    )
 
     nozzle_throat = {
         "area":  throat_area_m2,
@@ -1219,10 +1201,8 @@ def _print_cycle(r):
     print(f"  section diameter = {combustor_section.get('diameter_m', float('nan')):>8.5f} m")
     print(f"  section area     = {combustor_section.get('area_m2', float('nan')):>8.5f} m^2")
     if combustor_geom is not None:
-        print(f"  L*               = {combustor_geom.get('L_star', float('nan')):>8.5f} m")
-        print(f"  throat area At   = {combustor_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
-        print(f"  chamber volume   = {combustor_geom.get('volume_m3', float('nan')):>8.5f} m^3")
         print(f"  chamber length   = {combustor_geom.get('length_m', float('nan')):>8.5f} m")
+        print(f"  chamber volume   = {combustor_geom.get('volume_m3', float('nan')):>8.5f} m^3")
     print()
     print("  Nozzle geometry")
     print(f"  throat area At   = {nozzle_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
