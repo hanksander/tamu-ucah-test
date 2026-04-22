@@ -921,7 +921,10 @@ def analyze(
 
     phi_inlet_limit = float(envelope_info.get('phi_inlet_limit', float('inf')))
     unstart_flag = 0.0
-    if not np.isfinite(phi_inlet_limit) or phi_inlet_limit < 0.05:
+    # A finite near-zero inlet limit means the frozen inlet cannot support even
+    # the minimum combustor loading without expulsion/swallow issues. By
+    # contrast, +inf means the inlet cap never binds, which is a healthy case.
+    if np.isfinite(phi_inlet_limit) and phi_inlet_limit < 0.05:
         unstart_flag = 1.0
 
     inlet_inputs = {
