@@ -1694,8 +1694,8 @@ def main():
     results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT)
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
-    alt_range = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
-                            INLET_DESIGN_ALT_M + 2_000.0, 15)
+    alt_range = np.linspace(INLET_DESIGN_ALT_M - 1_000.0,
+                            INLET_DESIGN_ALT_M + 3_000.0, 10)
     print(f'  Altitude sweep over {len(alt_range)} points '
           f'at M0={INLET_DESIGN_M0}, α={INLET_DESIGN_ALPHA_DEG}°, '
           f'phi={PHI_DEFAULT}')
@@ -1705,7 +1705,7 @@ def main():
     )
 
     # AoA sweep at fixed design Mach and altitude.
-    alpha_range = np.linspace(-4.0, 6.0, 15)
+    alpha_range = np.linspace(-3.0, 6.0, 9   )
     print(f'  AoA sweep over {len(alpha_range)} points '
           f'at M0={INLET_DESIGN_M0}, alt={INLET_DESIGN_ALT_M/1e3:.0f} km, '
           f'phi={PHI_DEFAULT}')
@@ -1716,8 +1716,9 @@ def main():
         phi=PHI_DEFAULT,
     )
 
+    """
     # 2-D (M0, altitude) sweep for the φ operability map.
-    phi_mach_range = np.linspace(max(M_MIN, 3.0), min(M_MAX, 5.0), 6)
+    phi_mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 6)
     phi_alt_range  = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
                                  INLET_DESIGN_ALT_M + 2_000.0, 5)
     print(f'  φ map over {len(phi_mach_range)}×{len(phi_alt_range)} '
@@ -1727,7 +1728,7 @@ def main():
         phi_mach_range, phi_alt_range,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
     )
-
+    """
     print('\n  writing figures:')
     fig_flowpath(
         design,
@@ -1748,15 +1749,17 @@ def main():
         aoa_results, alpha_range,
         M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT,
     )
+    """
     fig_phi_vs_mach_alt(
         phi_map_results, phi_mach_range, phi_alt_range,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi_request=PHI_DEFAULT,
     )
+    """
     #fig_mass_flows(results, mach_range)
-    fig_station_T(results, mach_range)
-    fig_station_Pt(results, mach_range)
+    #fig_station_T(results, mach_range)
+    #fig_station_Pt(results, mach_range)
     fig_ram_diagnostics(results, mach_range)
-    fig_engine_pressure_profile(design, design_cycle)
+    #fig_engine_pressure_profile(design, design_cycle)
     #fig_engine_temperature_profile(design, design_cycle)
 
 

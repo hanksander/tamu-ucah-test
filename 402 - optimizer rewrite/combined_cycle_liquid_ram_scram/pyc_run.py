@@ -1283,6 +1283,10 @@ if __name__ == '__main__':
 
     from pyc_config import PHI_DEFAULT
 
+    off_design_M0 = 5.0
+    off_design_altitude_m = 19_000.0
+    off_design_alpha_deg = 3
+    off_design_phi = PHI_DEFAULT
 
     print("\n--- Design Point Performance")
     design = _get_inlet_design()
@@ -1293,6 +1297,25 @@ if __name__ == '__main__':
         alpha_deg=INLET_DESIGN_ALPHA_DEG,
         verbose=True,
     )
+
+    """
+
+    print("\n--- Off-Design Point Performance")
+    off_design_result = analyze(
+        M0=off_design_M0,
+        altitude_m=off_design_altitude_m,
+        phi=off_design_phi,
+        alpha_deg=off_design_alpha_deg,
+        verbose=True,
+    )
+
+    print("\n--- Off-Design Delta vs Design")
+    print(f"  dThrust   = {(off_design_result['thrust'] - design_result['thrust'])/1e3:>8.2f} kN")
+    print(f"  dIsp      = {off_design_result['Isp'] - design_result['Isp']:>8.1f} s")
+    print(f"  dmdot_air = {off_design_result['mdot_air'] - design_result['mdot_air']:>8.3f} kg/s")
+    print(f"  deta_pt   = {off_design_result['eta_pt'] - design_result['eta_pt']:>8.4f}")
+    
+    """
 
     print("\n--- Design Point Flowpath Plot")
     try:
