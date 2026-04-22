@@ -2490,7 +2490,7 @@ from pyc_config import (
 )
 ##SWEEP METHOD TO FIND BEST GEOMETRY
 Sweep = True
-#Sweep = False    #Comment out this line when new cruise conditions are used to first determine the best geometry
+Sweep = False    #Comment out this line when new cruise conditions are used to first determine the best geometry
 if Sweep:
     if __name__ == "__main__":
         forebody_margin_values = np.linspace(0.2, 0.5, 10)

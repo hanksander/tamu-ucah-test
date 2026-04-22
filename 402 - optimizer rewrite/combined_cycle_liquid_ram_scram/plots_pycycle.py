@@ -121,6 +121,26 @@ def altitude_sweep(alt_range, M0=INLET_DESIGN_M0,
     return results
 
 
+def aoa_sweep(alpha_range, M0=INLET_DESIGN_M0,
+              altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT):
+    results = []
+    total = len(alpha_range)
+    for idx, alpha_deg in enumerate(alpha_range, start=1):
+        t0 = time.perf_counter()
+        try:
+            r = pyc_run.analyze(M0=float(M0), altitude_m=float(altitude_m),
+                                phi=phi, alpha_deg=float(alpha_deg))
+            dt = time.perf_counter() - t0
+            print(f'    [{idx:02d}/{total:02d}] alpha={alpha_deg:+.2f} deg in {dt:.1f}s')
+        except Exception as e:
+            dt = time.perf_counter() - t0
+            print(f'  [warn] [{idx:02d}/{total:02d}] alpha={alpha_deg:+.2f} deg '
+                  f'failed after {dt:.1f}s: {e}')
+            r = None
+        results.append(r)
+    return results
+
+
 def mach_alt_sweep(mach_range, alt_range,
                    alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT):
     """2D sweep over (M0, altitude) at fixed α and commanded φ.
@@ -968,6 +988,63 @@ def fig_performance_vs_alt(results, alt_range,
     _save(fig, 'performance_vs_altitude')
 
 
+def fig_performance_vs_aoa(results, alpha_range,
+                           M0=INLET_DESIGN_M0,
+                           altitude_m=INLET_DESIGN_ALT_M,
+                           phi=PHI_DEFAULT):
+    """Fixed-Mach/fixed-altitude AoA sweep with unstart/choke markers."""
+    alpha_range = np.asarray(alpha_range, dtype=float)
+    thrust = _arr(results, 'thrust') / 1e3
+    eta_pt = _arr(results, 'eta_pt')
+    M4 = np.array([
+        float(r['M_stations'].get(4, np.nan)) if r is not None else np.nan
+        for r in results
+    ], dtype=float)
+    phi_eff = _arr(results, 'phi_effective')
+    unstart = _arr(results, 'unstart_flag')
+    choked = _arr(results, 'choked')
+
+    mask_unstart = np.isfinite(unstart) & (unstart > 0.5)
+    mask_choked = np.isfinite(choked) & (choked > 0.5)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.0), sharex=True)
+    axes = axes.ravel()
+    series = [
+        (thrust, 'Net thrust [kN]', 'Net thrust', 'firebrick', 'o-'),
+        (eta_pt, 'Pt3/Pt0 [-]', 'Inlet recovery', 'navy', 's-'),
+        (M4, 'M4 [-]', 'Combustor exit Mach', 'darkgreen', '^-'),
+        (phi_eff, 'Effective phi [-]', 'Effective equivalence ratio', 'darkorange', 'd-'),
+    ]
+
+    for ax, (y, ylabel, title, color, style) in zip(axes, series):
+        ax.plot(alpha_range, y, style, color=color, label='response')
+        if np.any(mask_unstart):
+            ax.plot(alpha_range[mask_unstart], y[mask_unstart], 'x',
+                    color='crimson', ms=8, mew=2, linestyle='None',
+                    label='unstart')
+        if np.any(mask_choked):
+            ax.plot(alpha_range[mask_choked], y[mask_choked], 'o',
+                    mfc='none', mec='black', ms=8, mew=1.5, linestyle='None',
+                    label='choked')
+        ax.axvline(INLET_DESIGN_ALPHA_DEG, color='gray',
+                   linestyle=':', lw=1.0, label='design AoA')
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+
+    axes[2].set_xlabel('Angle of attack [deg]')
+    axes[3].set_xlabel('Angle of attack [deg]')
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    dedup = {}
+    for h, l in zip(handles, labels):
+        dedup.setdefault(l, h)
+    axes[0].legend(dedup.values(), dedup.keys(), loc='best', fontsize=8)
+
+    fig.suptitle(f'pyc_run AoA sweep  '
+                 f'(M0={M0}, alt={altitude_m/1e3:.1f} km, phi={phi})')
+    _save(fig, 'performance_vs_aoa')
+
+
 def fig_phi_vs_mach_alt(results_2d, mach_range, alt_range,
                         alpha_deg=INLET_DESIGN_ALPHA_DEG,
                         phi_request=PHI_DEFAULT):
@@ -1611,20 +1688,32 @@ def main():
 
     # Mach sweep
     sweep_altitude_m = INLET_DESIGN_ALT_M
-    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 25)
+    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 15)
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT)
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
     alt_range = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
-                            INLET_DESIGN_ALT_M + 2_000.0, 25)
+                            INLET_DESIGN_ALT_M + 2_000.0, 15)
     print(f'  Altitude sweep over {len(alt_range)} points '
           f'at M0={INLET_DESIGN_M0}, α={INLET_DESIGN_ALPHA_DEG}°, '
           f'phi={PHI_DEFAULT}')
     alt_results = altitude_sweep(
         alt_range, M0=INLET_DESIGN_M0,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
+    )
+
+    # AoA sweep at fixed design Mach and altitude.
+    alpha_range = np.linspace(-4.0, 6.0, 15)
+    print(f'  AoA sweep over {len(alpha_range)} points '
+          f'at M0={INLET_DESIGN_M0}, alt={INLET_DESIGN_ALT_M/1e3:.0f} km, '
+          f'phi={PHI_DEFAULT}')
+    aoa_results = aoa_sweep(
+        alpha_range,
+        M0=INLET_DESIGN_M0,
+        altitude_m=INLET_DESIGN_ALT_M,
+        phi=PHI_DEFAULT,
     )
 
     # 2-D (M0, altitude) sweep for the φ operability map.
@@ -1654,6 +1743,10 @@ def main():
     fig_performance_vs_alt(
         alt_results, alt_range,
         M0=INLET_DESIGN_M0, alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
+    )
+    fig_performance_vs_aoa(
+        aoa_results, alpha_range,
+        M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT,
     )
     fig_phi_vs_mach_alt(
         phi_map_results, phi_mach_range, phi_alt_range,

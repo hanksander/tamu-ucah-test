@@ -104,7 +104,7 @@ except ModuleNotFoundError as exc:
     ENGINE_COMBUSTOR_D_MAX_M   = 0.35
     ENGINE_D_MAX_M             = 0.38
     ENGINE_L_MAX_M             = 3.8
-    ENGINE_MIN_THRUST_N        = 6_000.0
+    ENGINE_MIN_THRUST_N        = 4_000.0
     ENGINE_NOZZLE_EXIT_D_MAX_M = 0.38
 
 
@@ -116,21 +116,21 @@ class EnvelopeSpec:
     # ── ENVELOPE (flight conditions the design must work at) ──
     mach_min: float = 4.0
     mach_max: float = 5.0
-    alt_min_m: float = 19_000.0
-    alt_max_m: float = 21_000.0
-    aoa_min_deg: float = -1.0
+    alt_min_m: float = 17_000.0
+    alt_max_m: float = 19_000.0
+    aoa_min_deg: float = -2.0
     aoa_max_deg: float = 4.0
-    nominal_aoa_deg: float = 2.0
+    nominal_aoa_deg: float = -2.0
 
     # ── CONSTRAINTS (pass/fail limits applied to every candidate) ──
-    max_total_length_m: float = 3.8
-    max_width_m: float = 0.275
+    max_total_length_m: float = 4
+    max_width_m: float = 0.3
     max_height_m: float = 0.38
     max_diameter_m: float = 0.38             # overall frontal cap
-    max_combustor_diameter_m: float = 0.35   # combustion-chamber cap
-    max_nozzle_exit_diameter_m: float = 0.38 # nozzle exit cap
+    max_combustor_diameter_m: float = 0.38   # combustion-chamber cap
+    max_nozzle_exit_diameter_m: float = 0.41 # nozzle exit cap
     min_combustor_volume_m3: float = 0.08
-    min_thrust_N: float = 5_000.0
+    min_thrust_N: float = 4000
     phi_for_thrust: float = 1.0
     reject_if_phi_clipped: bool = False
 
@@ -162,21 +162,21 @@ class CandidateResult:
 def _build_baseline_design(spec: EnvelopeSpec) -> Design:
     return Design(
         kantrowitz_margin=0.85,
-        diffuser_AR=1.75,
-        combustor_length_m=0.75,
+        diffuser_AR=4,
+        combustor_length_m=1.75,
         # nozzle_AR intentionally omitted — inherits pyc_config NOZZLE_AR so
         # the commanded Ae/At drives A_noz_exit and the expansion state
         # (ideal / under- / over-expanded) falls out of flight-point physics.
-        LE_angle_deg=4.5,
+        LE_angle_deg=6,
         ramp_sep_margin=0.30,
-        forebody_sep_margin=0.30,
+        forebody_sep_margin=0.60,
         inlet_width_m=spec.max_width_m,      # 0.275 m hard requirement
-        shock_focus_factor=1.10,
-        diffuser_min_shock_accommodation_dh=3.0,
+        shock_focus_factor=1.20,
+        diffuser_min_shock_accommodation_dh=1.0,
         design_M0=5.0,
         design_alt_m=0.5 * (spec.alt_min_m + spec.alt_max_m),   # 20 000 m
         design_alpha_deg=spec.nominal_aoa_deg,                  # 3.0 deg
-        design_mdot_kgs=7.0,
+        design_mdot_kgs=6.0,
     )
 
 
@@ -307,12 +307,12 @@ def _candidate_grid(base: Design, spec: EnvelopeSpec) -> Iterable[Design]:
     # frozen knob to a swept one: add a tuple of trial values here (and in
     # `_refined_grid` if you want local refinement around the coarse winner).
     knobs = {
-        "design_M0":         (4.5, 5.0),
-        "design_mdot_kgs":   (4.0, 5.0, 6.0),
-        "LE_angle_deg":      (3.5, 4.5),
-        "diffuser_AR":       (1.5, 1.75, 2.0),
-        # "ramp_sep_margin":   (0.25, 0.30, 0.35),
-        # "kantrowitz_margin": (0.80, 0.85, 0.90),
+        #"design_M0":         (4.5, 5.0),
+        "design_mdot_kgs":   (5.0, 6.0, 7.0),
+        #"LE_angle_deg":      (3.5, 4.5),
+        "diffuser_AR":       (3.0, 4.0, 5.0),
+        "ramp_sep_margin":   (0.25, 0.25, 0.30, 0.35),
+        "kantrowitz_margin": (0.75, 0.80, 0.85, 0.90),
         # Example — uncomment to sweep nozzle area ratio too:
         # "nozzle_AR":       (4.0, 5.0, 7.0),
     }
@@ -327,12 +327,12 @@ def _refined_grid(seed: Design, spec: EnvelopeSpec) -> Iterable[Design]:
         return tuple(vals)
 
     knobs = {
-        "design_M0":         around(seed.design_M0,         0.25,  4.5,  5.0),
-        "design_mdot_kgs":   around(seed.design_mdot_kgs,   0.5,   3.5,  6.5),
-        "LE_angle_deg":      around(seed.LE_angle_deg,      0.25,  3.0,  5.0),
-        "diffuser_AR":       around(seed.diffuser_AR,       0.125, 1.4,  2.0),
-        # "ramp_sep_margin":   around(seed.ramp_sep_margin,   0.025, 0.20, 0.40),
-        # "kantrowitz_margin": around(seed.kantrowitz_margin, 0.025, 0.80, 0.90),
+        #"design_M0":         around(seed.design_M0,         0.25,  4.5,  5.0),
+        "design_mdot_kgs":   around(seed.design_mdot_kgs,   0.5,   5.5,  7.5),
+        #"LE_angle_deg":      around(seed.LE_angle_deg,      0.25,  3.0,  5.0),
+        "diffuser_AR":       around(seed.diffuser_AR,       0.125, 2.0,  5.0),
+        "ramp_sep_margin":   around(seed.ramp_sep_margin,   0.025, 0.20, 0.40),
+        "kantrowitz_margin": around(seed.kantrowitz_margin, 0.025, 0.75, 0.90),
     }
     names = tuple(knobs.keys())
     for values in itertools.product(*(knobs[name] for name in names)):

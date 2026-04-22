@@ -1229,12 +1229,31 @@ if __name__ == '__main__':
 
 
     from pyc_config import PHI_DEFAULT
-    print("=" * 60)
-    print("  pyCycle Ramjet")
-    print("=" * 60)
+
 
     print("\n--- Design Point Performance")
-    analyze(M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT, alpha_deg = 3, verbose=True)
+    design = _get_inlet_design()
+    design_result = analyze(
+        M0=INLET_DESIGN_M0,
+        altitude_m=INLET_DESIGN_ALT_M,
+        phi=PHI_DEFAULT,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG,
+        verbose=True,
+    )
+
+    print("\n--- Design Point Flowpath Plot")
+    try:
+        import os
+        import plots_pycycle
+        plots_pycycle.OUTDIR = _HERE
+        os.makedirs(plots_pycycle.OUTDIR, exist_ok=True)
+        plots_pycycle.fig_flowpath(
+            design,
+            design_result,
+            combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
+        )
+    except Exception as exc:
+        print(f"  [warn] flowpath plot generation failed: {type(exc).__name__}: {exc}")
 
 
 
