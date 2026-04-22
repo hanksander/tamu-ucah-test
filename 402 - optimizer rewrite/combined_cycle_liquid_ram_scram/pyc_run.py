@@ -27,7 +27,7 @@ every run_model() call.
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-
+#sys.path.insert(0, _HERE)
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -1245,7 +1245,7 @@ if __name__ == '__main__':
     try:
         import os
         import plots_pycycle
-        plots_pycycle.OUTDIR = _HERE
+        plots_pycycle.OUTDIR = os.path.dirname(os.path.abspath(__file__))
         os.makedirs(plots_pycycle.OUTDIR, exist_ok=True)
         plots_pycycle.fig_flowpath(
             design,
