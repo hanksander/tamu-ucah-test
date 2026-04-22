@@ -127,15 +127,15 @@ DESIGN PARAMETERS
 #total height 0.35 meters.
 #total width = 0.45
 
-INLET_DESIGN_M0                    = 4.5
-INLET_DESIGN_ALT_M                 = 16_000.0   # mid of 19–21 km envelope
-INLET_DESIGN_ALPHA_DEG             = -2        # worst-α design anchor
+INLET_DESIGN_M0                    = 5.0
+INLET_DESIGN_ALT_M                 = 17_000.0   # mid of 19–21 km envelope
+INLET_DESIGN_ALPHA_DEG             = 0        # worst-α design anchor
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 8
-INLET_DESIGN_MDOT_KGS              = 6.0     # design-point air mass flow [kg/s]
+INLET_DESIGN_MDOT_KGS              = 8.5     # design-point air mass flow [kg/s]
 INLET_DESIGN_WIDTH_M               = 0.3   # inlet spanwise width [m] (hard req)
 INLET_FOREBODY_SEP_MARGIN          = 0.5
-INLET_RAMP_SEP_MARGIN              = 0.2
-INLET_KANTROWITZ_MARGIN            = 0.8
+INLET_RAMP_SEP_MARGIN              = 0.1
+INLET_KANTROWITZ_MARGIN            = 0.85
 INLET_SHOCK_FOCUS_FACTOR           = 1.25
 
 # Air properties used by 402inlet2's cold-air oblique/normal-shock solver
@@ -160,14 +160,14 @@ INLET_COWL_EXTENSION_FACTOR  = 1.35   # cowl length scale in plots
 INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
 INLET_CONSTANT_AREA_LENGTH_M = 0.1    # visual-only constant-area section ahead of diffuser [m]
 
-DIFFUSER_AREA_RATIO = 4
+DIFFUSER_AREA_RATIO = 2.5
 DIFFUSER_HALF_ANGLE_DEG = 7.0
-DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 8
+DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 12
 DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 1
 
 
-COMBUSTOR_LENGTH_M_DEFAULT = 1
-NOZZLE_AR                = 10.0   # nozzle Ae/At committed design knob
+COMBUSTOR_LENGTH_M_DEFAULT = 1.4
+NOZZLE_AR                = 8   # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Efficiencies

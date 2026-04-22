@@ -706,6 +706,27 @@ def _estimate_nozzle_geometry(
     }
 
 
+def _compute_diffuser_volume_m3(diffuser: dict | None) -> float:
+    if not isinstance(diffuser, dict):
+        return 0.0
+    xs = np.asarray(diffuser.get("x_stations", []), dtype=float)
+    areas = np.asarray(diffuser.get("A_stations", []), dtype=float)
+    if xs.size < 2 or areas.size != xs.size:
+        return 0.0
+    return float(np.trapezoid(areas, xs))
+
+
+def _compute_nozzle_converging_volume_m3(inlet_area_m2: float, throat_area_m2: float) -> float:
+    if inlet_area_m2 <= 0.0 or throat_area_m2 <= 0.0:
+        return 0.0
+    converging_length_m = float(
+        nozzle_design.default_bell_converging_length(inlet_area_m2, throat_area_m2)
+    )
+    r_in = float(np.sqrt(inlet_area_m2 / np.pi))
+    r_th = float(np.sqrt(throat_area_m2 / np.pi))
+    return float((np.pi * converging_length_m / 3.0) * (r_in * r_in + r_in * r_th + r_th * r_th))
+
+
 def _build_geometry_packaging_summary(
     design: dict,
     inlet_geometry: dict,
@@ -778,6 +799,16 @@ def build_geometry_summary(design: dict) -> dict:
         nozzle_AR=nozzle_AR,
         combustor_diameter_m=combustor_section["diameter_m"],
     )
+    diffuser_volume_m3 = _compute_diffuser_volume_m3(design.get("diffuser"))
+    nozzle_converging_volume_m3 = _compute_nozzle_converging_volume_m3(
+        inlet_area_m2=float(combustor_geometry["cross_section_area_m2"]),
+        throat_area_m2=float(nozzle_throat_area),
+    )
+    internal_precombustion_volume_m3 = (
+        float(combustor_geometry["volume_m3"])
+        + diffuser_volume_m3
+        + nozzle_converging_volume_m3
+    )
     packaging = _build_geometry_packaging_summary(
         design=design,
         inlet_geometry=inlet_geometry,
@@ -800,6 +831,9 @@ def build_geometry_summary(design: dict) -> dict:
         "max_width_m": float(packaging["max_width_m"]),
         "max_height_m": float(packaging["max_height_m"]),
         "combustor_volume_m3": float(combustor_geometry["volume_m3"]),
+        "diffuser_volume_m3": float(diffuser_volume_m3),
+        "nozzle_converging_volume_m3": float(nozzle_converging_volume_m3),
+        "internal_precombustion_volume_m3": float(internal_precombustion_volume_m3),
     })
     return summary
 
@@ -1060,6 +1094,16 @@ def analyze(
         "expansion_state": nozzle_perf["expansion_state"],
         "length_m": float(max(nozzle_length_m, 0.3)),
     }
+    diffuser_volume_m3 = _compute_diffuser_volume_m3(design.get("diffuser"))
+    nozzle_converging_volume_m3 = _compute_nozzle_converging_volume_m3(
+        inlet_area_m2=float(combustor_geometry["cross_section_area_m2"]),
+        throat_area_m2=float(nozzle_throat["area"]),
+    )
+    internal_precombustion_volume_m3 = (
+        float(combustor_geometry["volume_m3"])
+        + diffuser_volume_m3
+        + nozzle_converging_volume_m3
+    )
     packaging = _build_geometry_packaging_summary(
         design=design,
         inlet_geometry=inlet_geometry,
@@ -1131,6 +1175,9 @@ def analyze(
         combustor_geometry=combustor_geometry,
         nozzle_geometry=nozzle_geometry,
         geometry=packaging,
+        diffuser_volume_m3=float(diffuser_volume_m3),
+        nozzle_converging_volume_m3=float(nozzle_converging_volume_m3),
+        internal_precombustion_volume_m3=float(internal_precombustion_volume_m3),
 
     )
 
@@ -1192,6 +1239,7 @@ def _print_cycle(r):
     print(f"  width            = {inlet_geom.get('width_m', float('nan')):>8.5f} m")
     print(f"  diffuser exit    = {inlet_geom.get('diffuser_exit_shape', 'n/a')}")
     print(f"  diffuser exit dia= {inlet_geom.get('diffuser_exit_diameter_m', float('nan')):>8.5f} m")
+    print(f"  diffuser volume  = {r.get('diffuser_volume_m3', float('nan')):>8.5f} m^3")
     print(f"  forebody length  = {inlet_geom.get('forebody_length_m', float('nan')):>8.5f} m")
     print(f"  ramp1 length     = {inlet_geom.get('ramp1_length_m', float('nan')):>8.5f} m")
     print(f"  break2->lip dist = {inlet_geom.get('shock2_to_lip_m', float('nan')):>8.5f} m")
@@ -1214,6 +1262,8 @@ def _print_cycle(r):
     print(f"  exit diameter    = {nozzle_geom.get('exit_diameter_m', float('nan')):>8.5f} m")
     print(f"  area ratio Ae/At = {nozzle_geom.get('area_ratio', float('nan')):>8.5f}")
     print(f"  expansion state  = {nozzle_geom.get('expansion_state', 'n/a')}")
+    print(f"  conv. sec volume = {r.get('nozzle_converging_volume_m3', float('nan')):>8.5f} m^3")
+    print(f"  sum vol (cc+diff+conv) = {r.get('internal_precombustion_volume_m3', float('nan')):>8.5f} m^3")
     print()
     print("  Performance")
     print(f"  Isp       = {r['Isp']:>8.1f} s")
