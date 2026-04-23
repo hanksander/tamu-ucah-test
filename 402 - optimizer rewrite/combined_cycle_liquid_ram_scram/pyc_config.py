@@ -176,7 +176,7 @@ NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 # (downward in the inverted-y display). The diffuser walls are re-lofted to
 # meet the offset combustor face; the inlet, ramps, throat, and constant-area
 # section are left untouched.
-COMBUSTOR_Y_OFFSET_M = 0.16
+COMBUSTOR_Y_OFFSET_M = 0.1
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.85   # combustion efficiency
