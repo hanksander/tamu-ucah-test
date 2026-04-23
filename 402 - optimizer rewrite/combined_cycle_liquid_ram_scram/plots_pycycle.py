@@ -31,7 +31,7 @@ sys.path.insert(0, _HERE)
 import pyc_run
 from pyc_config import (
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M, INLET_DESIGN_ALPHA_DEG,
-    INLET_DESIGN_WIDTH_M, COMBUSTOR_LENGTH_M_DEFAULT,
+    INLET_DESIGN_WIDTH_M, COMBUSTOR_LENGTH_M_DEFAULT, COMBUSTOR_WIDTH_M_DEFAULT,
     INLET_CONSTANT_AREA_LENGTH_M,
     M_MIN, M_MAX,
 )
@@ -84,7 +84,7 @@ def _save(fig, name):
 # Mach sweep through pyc_run
 # ---------------------------------------------------------------------------
 
-def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT):
+def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT):            #############################################################################
     results = []
     total = len(mach_range)
     for idx, M in enumerate(mach_range, start=1):
@@ -364,8 +364,11 @@ def _flowpath_layout(
     duct_len = float(combustor['length_m'])
     duct_x1 = duct_x0 + duct_len
     duct_area = float(combustor['cross_section_area_m2'])
-    duct_radius = float(combustor['radius_m'])
-    duct_center_y = flowpath_top_y - duct_radius
+    duct_width = float(combustor.get('width_m', COMBUSTOR_WIDTH_M_DEFAULT))
+    duct_height = float(combustor['height_m'])
+    duct_top_y = flowpath_top_y
+    duct_bottom_y = duct_top_y - duct_height
+    duct_center_y = 0.5 * (duct_top_y + duct_bottom_y)
 
     A_exit = float(design_cycle['nozzle_exit_area'])
     A_inlet = duct_area
@@ -378,6 +381,7 @@ def _flowpath_layout(
         throat_angle_deg=throat_angle_deg,
         exit_angle_deg=exit_angle_deg,
         n_points=n_points,
+        width_m=duct_width,
     )
 
     x_shift = duct_x1 - bell['x'][0]
@@ -408,7 +412,10 @@ def _flowpath_layout(
         'diff_len':   diff_len,
         'diff_h_exit': diff_h_exit,
         'duct_area': duct_area,
-        'duct_radius': duct_radius,
+        'duct_width': duct_width,
+        'duct_height': duct_height,
+        'duct_top_y': duct_top_y,
+        'duct_bottom_y': duct_bottom_y,
         'duct_center_y': duct_center_y,
         'duct_x0': duct_x0,
         'duct_len': duct_len,
@@ -497,9 +504,8 @@ def fig_flowpath(
     n_points=NOZZLE_BELL_POINTS_DEFAULT,
 ):
     """
-    Nose-to-tail to-scale flowpath.  Inlet is 2D side view (from 402inlet2);
-    combustor and nozzle are axisymmetric after the diffuser exit, with the
-    inlet retained as the existing 2D side-view geometry.
+    Nose-to-tail to-scale flowpath. Inlet is a 2D side view (from 402inlet2);
+    the diffuser, combustor, and nozzle remain rectangular downstream.
     """
     layout = _flowpath_layout(
         design, design_cycle,
@@ -528,7 +534,10 @@ def fig_flowpath(
     # Subsonic diffuser + combustor duct + nozzle pulled from the shared layout
     diff_upper = layout['diff_upper']
     diff_lower = layout['diff_lower']
-    duct_radius = layout['duct_radius']
+    duct_width = layout['duct_width']
+    duct_height = layout['duct_height']
+    duct_top_y = layout['duct_top_y']
+    duct_bottom_y = layout['duct_bottom_y']
     duct_x0   = layout['duct_x0']
     duct_len  = layout['duct_len']
     duct_x1   = layout['duct_x1']
@@ -539,12 +548,8 @@ def fig_flowpath(
     bell      = layout['bell']
     bx        = layout['bx']
     duct_center_y = layout['duct_center_y']
-    r_nozz    = bell['radius']
-    duct_h    = 2.0 * duct_radius
-    duct_y_lo = duct_center_y - duct_radius
-    h_nozz    = 2.0 * r_nozz
-    y_nozz_up = duct_center_y + r_nozz
-    y_nozz_lo = duct_center_y - r_nozz
+    y_nozz_up = duct_center_y + bell['upper_wall']
+    y_nozz_lo = duct_center_y + bell['lower_wall']
 
     fig, ax = plt.subplots(figsize=(16, 5.5))
 
@@ -630,7 +635,7 @@ def fig_flowpath(
                         color='slateblue', alpha=0.06)
 
     # ── Combustor duct ──────────────────────────────────────────────────────
-    duct = Rectangle((duct_x0, duct_y_lo), duct_len, duct_h,
+    duct = Rectangle((duct_x0, duct_bottom_y), duct_len, duct_height,
                      fill=False, ec='darkgreen', lw=2.0)
     ax.add_patch(duct)
 
@@ -659,6 +664,7 @@ def fig_cad_model(
     design_cycle,
     wall_thickness_m,
     output_path=None,
+    extra_output_paths=None,
     ring_points=CAD_RING_POINTS_DEFAULT,
     diffuser_section_count=CAD_DIFFUSER_SECTION_COUNT_DEFAULT,
     nozzle_section_count=CAD_NOZZLE_SECTION_COUNT_DEFAULT,
@@ -682,8 +688,9 @@ def fig_cad_model(
     design            : dict from 402inlet2.design_2ramp_shock_matched_inlet.
     design_cycle      : dict returned by pyc_run.analyze at the design point.
     wall_thickness_m  : shell wall thickness [m].
-    output_path       : destination file ('.stl', '.obj', '.ply', '.glb');
+    output_path       : primary destination file ('.stl', '.obj', '.ply', '.glb');
                         defaults to <OUTDIR>/engine_cad.stl.
+    extra_output_paths: optional iterable of additional export paths.
 
     Returns
     -------
@@ -720,16 +727,16 @@ def fig_cad_model(
     inlet_upper = layout['inlet_upper']
     duct_x0 = layout['duct_x0']
     duct_x1 = layout['duct_x1']
-    duct_radius = layout['duct_radius']
+    duct_width = layout['duct_width']
+    duct_height = layout['duct_height']
     bx = layout['bx']
-    nozzle_r = layout['bell']['radius']
+    nozzle_h = layout['bell']['height']
     const_area_len = layout['const_area_len']
     diffuser_entry_x = layout['diffuser_entry_x']
     diff = design.get('diffuser')
 
     throat_w = float(diff['throat_width_m']) if diff is not None else float(INLET_DESIGN_WIDTH_M)
     throat_h = float(diff['throat_height_m']) if diff is not None else float(layout['throat_h'])
-    diffuser_exit_radius = float(diff['exit_radius_m']) if diff is not None else float(duct_radius)
     half_width = 0.5 * throat_w
 
     def _ring_to_xyz(x_val, ring_zy, center_y):
@@ -738,37 +745,33 @@ def fig_cad_model(
         x = np.full_like(y, x_val, dtype=float)
         return np.column_stack([x, y, z])
 
-    def _circle_ring(radius_m, n_theta):
-        theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
-        return np.column_stack([radius_m * np.cos(theta), radius_m * np.sin(theta)])
-
     def _rectangle_ring(width_m, height_m, outer=False, n_theta=None):
         if n_theta is None:
             n_theta = ring_points
         width_m = float(width_m)
         height_m = float(height_m)
-        area_m2 = width_m * height_m
-        circle_radius = diffuser_exit_radius + (t if outer else 0.0)
-        return _inlet2.morphed_rectangle_to_circle_section(
-            area_m2=area_m2,
-            blend=0.0,
-            rect_width_m=width_m,
-            rect_height_m=height_m,
-            circle_radius_m=circle_radius,
-            n_points=n_theta,
-        )
-
-    def _morph_ring(area_m2, blend, outer=False, n_theta=None):
-        if n_theta is None:
-            n_theta = ring_points
-        return _inlet2.morphed_rectangle_to_circle_section(
-            area_m2=area_m2,
-            blend=blend,
-            rect_width_m=throat_w + (2.0 * t if outer else 0.0),
-            rect_height_m=throat_h + (2.0 * t if outer else 0.0),
-            circle_radius_m=diffuser_exit_radius + (t if outer else 0.0),
-            n_points=n_theta,
-        )
+        if outer:
+            width_m += 2.0 * t
+            height_m += 2.0 * t
+        n_side = max(2, n_theta // 4)
+        n_last = n_theta - 3 * n_side
+        top = np.column_stack([
+            np.linspace(-0.5 * width_m, 0.5 * width_m, n_side, endpoint=False),
+            np.full(n_side, 0.5 * height_m, dtype=float),
+        ])
+        right = np.column_stack([
+            np.full(n_side, 0.5 * width_m, dtype=float),
+            np.linspace(0.5 * height_m, -0.5 * height_m, n_side, endpoint=False),
+        ])
+        bottom = np.column_stack([
+            np.linspace(0.5 * width_m, -0.5 * width_m, n_side, endpoint=False),
+            np.full(n_side, -0.5 * height_m, dtype=float),
+        ])
+        left = np.column_stack([
+            np.full(n_last, -0.5 * width_m, dtype=float),
+            np.linspace(-0.5 * height_m, 0.5 * height_m, n_last, endpoint=False),
+        ])
+        return np.vstack([top, right, bottom, left])
 
     def _bridge_rings(ring_a, ring_b):
         n = ring_a.shape[0]
@@ -845,16 +848,15 @@ def fig_cad_model(
 
     if diff is not None:
         xs = np.asarray(layout['diff_x_stations'], dtype=float)
-        areas = np.asarray(diff['A_stations'], dtype=float)
         heights = np.asarray(layout['diff_h_stations'], dtype=float)
-        blends = np.asarray(diff['section_blend_stations'], dtype=float)
+        widths = np.asarray(diff['width_stations'], dtype=float)
         throat_x = float(layout['throat_x0'])
         throat_center_y = flowpath_top_y - 0.5 * throat_h
         inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=False), throat_center_y))
-        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True), throat_center_y))
+        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=True), throat_center_y))
         if const_area_len > 0.0:
             inner_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w, throat_h, outer=False), throat_center_y))
-            outer_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w + 2.0 * t, throat_h + 2.0 * t, outer=True), throat_center_y))
+            outer_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w, throat_h, outer=True), throat_center_y))
         diffuser_idx = np.linspace(0, len(xs) - 1, diffuser_section_count, dtype=int).tolist()
         diffuser_idx = sorted(set(diffuser_idx))
         if diffuser_idx[-1] != len(xs) - 1:
@@ -863,27 +865,27 @@ def fig_cad_model(
             if idx == 0:
                 continue
             section_center_y = flowpath_top_y - 0.5 * float(heights[idx])
-            inner_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=False), section_center_y))
-            outer_sections.append(_ring_to_xyz(float(xs[idx]), _morph_ring(float(areas[idx]), float(blends[idx]), outer=True), section_center_y))
+            inner_sections.append(_ring_to_xyz(float(xs[idx]), _rectangle_ring(float(widths[idx]), float(heights[idx]), outer=False), section_center_y))
+            outer_sections.append(_ring_to_xyz(float(xs[idx]), _rectangle_ring(float(widths[idx]), float(heights[idx]), outer=True), section_center_y))
     else:
-        throat_area = float(design['throat_area_actual_m2'])
         throat_x = float(layout['throat_x0'])
-        inner_sections.append(_ring_to_xyz(throat_x, _morph_ring(throat_area, 0.0, outer=False), duct_center_y))
-        outer_sections.append(_ring_to_xyz(throat_x, _morph_ring(throat_area, 0.0, outer=True), duct_center_y))
+        inner_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=False), duct_center_y))
+        outer_sections.append(_ring_to_xyz(throat_x, _rectangle_ring(throat_w, throat_h, outer=True), duct_center_y))
         if const_area_len > 0.0:
-            inner_sections.append(_ring_to_xyz(diffuser_entry_x, _morph_ring(throat_area, 0.0, outer=False), duct_center_y))
-            outer_sections.append(_ring_to_xyz(diffuser_entry_x, _morph_ring(throat_area, 0.0, outer=True), duct_center_y))
+            inner_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w, throat_h, outer=False), duct_center_y))
+            outer_sections.append(_ring_to_xyz(diffuser_entry_x, _rectangle_ring(throat_w, throat_h, outer=True), duct_center_y))
 
-    inner_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius, ring_points), duct_center_y))
-    outer_sections.append(_ring_to_xyz(duct_x1, _circle_ring(duct_radius + t, ring_points), duct_center_y))
+    inner_sections.append(_ring_to_xyz(duct_x1, _rectangle_ring(duct_width, duct_height, outer=False), duct_center_y))
+    outer_sections.append(_ring_to_xyz(duct_x1, _rectangle_ring(duct_width, duct_height, outer=True), duct_center_y))
 
     nozzle_idx = np.linspace(0, len(bx) - 1, nozzle_section_count, dtype=int).tolist()
     nozzle_idx = sorted(set(nozzle_idx))
     if nozzle_idx[-1] != len(bx) - 1:
         nozzle_idx.append(len(bx) - 1)
     for idx in nozzle_idx[1:]:
-        inner_sections.append(_ring_to_xyz(float(bx[idx]), _circle_ring(float(nozzle_r[idx]), ring_points), duct_center_y))
-        outer_sections.append(_ring_to_xyz(float(bx[idx]), _circle_ring(float(nozzle_r[idx]) + t, ring_points), duct_center_y))
+        section_center_y = duct_center_y
+        inner_sections.append(_ring_to_xyz(float(bx[idx]), _rectangle_ring(duct_width, float(nozzle_h[idx]), outer=False), section_center_y))
+        outer_sections.append(_ring_to_xyz(float(bx[idx]), _rectangle_ring(duct_width, float(nozzle_h[idx]), outer=True), section_center_y))
 
     meshes = []
     for ring_a, ring_b in zip(outer_sections[:-1], outer_sections[1:]):
@@ -919,10 +921,19 @@ def fig_cad_model(
     engine.visual.face_colors = CAD_SILVER_RGBA
     engine.visual.vertex_colors = CAD_SILVER_RGBA
 
+    export_paths = []
     if output_path is None:
         output_path = os.path.join(OUTDIR, 'engine_cad.stl')
-    engine.export(output_path)
-    print(f'  wrote {output_path}')
+    export_paths.append(output_path)
+    for path in (extra_output_paths or []):
+        if path is None:
+            continue
+        if path not in export_paths:
+            export_paths.append(path)
+
+    for path in export_paths:
+        engine.export(path)
+        print(f'  wrote {path}')
     return engine
 
 
@@ -1686,12 +1697,18 @@ def main():
         combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     )
 
+
+
+
     # Mach sweep
-    sweep_altitude_m = INLET_DESIGN_ALT_M
+    sweep_altitude_m = INLET_DESIGN_ALT_M #######################################################
     mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 15)
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
-    results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT)
+    results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT) #########################
+
+
+
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
     alt_range = np.linspace(INLET_DESIGN_ALT_M - 1_000.0,
@@ -1716,19 +1733,19 @@ def main():
         phi=PHI_DEFAULT,
     )
 
-    """
+
     # 2-D (M0, altitude) sweep for the φ operability map.
-    phi_mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 6)
-    phi_alt_range  = np.linspace(INLET_DESIGN_ALT_M - 2_000.0,
-                                 INLET_DESIGN_ALT_M + 2_000.0, 5)
+    phi_mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 4)
+    phi_alt_range  = np.linspace(INLET_DESIGN_ALT_M - 1_000.0,
+                                 INLET_DESIGN_ALT_M + 3_000.0, 4)
     print(f'  φ map over {len(phi_mach_range)}×{len(phi_alt_range)} '
           f'(M0, alt) points at α={INLET_DESIGN_ALPHA_DEG}°, '
           f'φ_request={PHI_DEFAULT}')
     phi_map_results = mach_alt_sweep(
         phi_mach_range, phi_alt_range,
-        alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,         ########################
     )
-    """
+
     print('\n  writing figures:')
     fig_flowpath(
         design,
@@ -1741,6 +1758,8 @@ def main():
         n_points=NOZZLE_BELL_POINTS_DEFAULT,
     )
     fig_performance(results, mach_range)
+
+
     fig_performance_vs_alt(
         alt_results, alt_range,
         M0=INLET_DESIGN_M0, alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
@@ -1749,12 +1768,13 @@ def main():
         aoa_results, alpha_range,
         M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT,
     )
-    """
+
+
     fig_phi_vs_mach_alt(
         phi_map_results, phi_mach_range, phi_alt_range,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi_request=PHI_DEFAULT,
     )
-    """
+
     #fig_mass_flows(results, mach_range)
     #fig_station_T(results, mach_range)
     #fig_station_Pt(results, mach_range)
@@ -1766,10 +1786,13 @@ def main():
 
     print(f'\n  generating 3D CAD model (wall={cad_wall_thickness_m*1e3:.1f} mm) ...')
     try:
+        cad_base = os.path.join(OUTDIR, 'engine_cad')
         fig_cad_model(
             design,
             design_cycle,
             wall_thickness_m=cad_wall_thickness_m,
+            output_path=cad_base + '.stl',
+            extra_output_paths=[cad_base + '.obj', cad_base + '.ply'],
             combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
             converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
             diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,

@@ -129,14 +129,14 @@ DESIGN PARAMETERS
 
 INLET_DESIGN_M0                    = 4.0
 INLET_DESIGN_ALT_M                 = 16_000.0   # mid of 19–21 km envelope
-INLET_DESIGN_ALPHA_DEG             = 0        # worst-α design anchor
+INLET_DESIGN_ALPHA_DEG             = 4        # worst-α design anchor
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 8
 INLET_DESIGN_MDOT_KGS              = 8     # design-point air mass flow [kg/s]
 INLET_DESIGN_WIDTH_M               = 0.3   # inlet spanwise width [m] (hard req)
 INLET_FOREBODY_SEP_MARGIN          = 0.6
-INLET_RAMP_SEP_MARGIN              = 0.1
-INLET_KANTROWITZ_MARGIN            = 0.8
-INLET_SHOCK_FOCUS_FACTOR           = 1.3
+INLET_RAMP_SEP_MARGIN              = 0.2
+INLET_KANTROWITZ_MARGIN            = 0.80
+INLET_SHOCK_FOCUS_FACTOR           = 1.25
 
 # Air properties used by 402inlet2's cold-air oblique/normal-shock solver
 # (freestream-temperature relations). The thermally-perfect path uses
@@ -152,33 +152,39 @@ AIR_X_O2      = 0.21      # air mole fraction O2 (frozen-chemistry shock)
 INLET_LEGACY_FOREBODY_SEP_MARGIN = 0.95
 INLET_LEGACY_RAMP_SEP_MARGIN     = 0.95
 INLET_LEGACY_KANTROWITZ_MARGIN   = 0.95
-INLET_LEGACY_SHOCK_FOCUS_FACTOR  = 1.25
+INLET_LEGACY_SHOCK_FOCUS_FACTOR  = 1.1
 
 # 402inlet2 plotting knobs (visual only — do not affect flow solution)
-INLET_SHOCK_EXTENSION_FACTOR = 1.20   # how far shocks are drawn past the inlet
-INLET_COWL_EXTENSION_FACTOR  = 1.35   # cowl length scale in plots
+INLET_SHOCK_EXTENSION_FACTOR = 1.40   # how far shocks are drawn past the inlet
+INLET_COWL_EXTENSION_FACTOR  = 1.25   # cowl length scale in plots
 INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
-INLET_CONSTANT_AREA_LENGTH_M = 0.1    # visual-only constant-area section ahead of diffuser [m]
+INLET_CONSTANT_AREA_LENGTH_M = 0.3    # visual-only constant-area section ahead of diffuser [m]
 
-DIFFUSER_AREA_RATIO = 3
+DIFFUSER_AREA_RATIO = 3.5
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 12
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 1.5
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 1.0
 
 
-COMBUSTOR_LENGTH_M_DEFAULT = 0.5
-NOZZLE_AR                = 8  # nozzle Ae/At committed design knob
+COMBUSTOR_LENGTH_M_DEFAULT = 0.75
+COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
+NOZZLE_AR                = 9  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Efficiencies
-ETA_COMBUSTOR        = 0.92   # combustion efficiency
+ETA_COMBUSTOR        = 0.85   # combustion efficiency
 ETA_NOZZLE_CV        = 0.97   # nozzle velocity coefficient (Cv)
 ETA_NOZZLE           = ETA_NOZZLE_CV   # legacy alias
 NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV', or 'CD_CV'
-ISOLATOR_PT_RECOVERY = 0.97   # isolator total-pressure recovery (both modes)
-ETA_DIFFUSER         = 0.98   # subsonic diffuser total-pressure recovery (friction)
+ISOLATOR_PT_RECOVERY = 0.90   # isolator total-pressure recovery (both modes)
+ETA_DIFFUSER         = 0.95   # subsonic diffuser total-pressure recovery (friction)
 
-PHI_DEFAULT = 0.9
+PHI_DEFAULT = 0.75
+
+# Upper edge of the φ search bracket used by _solve_phi_envelope when inverting
+# the Tt4 / thermal-choke / inlet-expulsion caps. Decoupled from PHI_DEFAULT so
+# physical caps remain detectable at any requested φ.
+PHI_SEARCH_MAX = 3.0
 
 # RAM combustor exit Mach for pyCycle design mode
 # Fixed-geometry approximation used across the Mach sweep.
@@ -190,8 +196,8 @@ M_MAX = 5.0
 
 
 # Path-constraint thresholds for optimization
-M4_MAX         = 0.90
-TT4_MAX_K      = 3000.0
+M4_MAX         = 0.85
+TT4_MAX_K      = 2800.0
 Q_MAX_PA       = 120_000.0
 PHI_MIN        = 0.30
 PHI_MAX        = 0.90

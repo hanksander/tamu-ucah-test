@@ -495,6 +495,7 @@ def size_diffuser_length_physics_based(
     A_exit,
     throat_width_m,
     throat_height_m,
+    exit_width_m=None,
     max_equiv_half_angle_deg=DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG,
     min_shock_accommodation_dh=DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
 ):
@@ -514,16 +515,23 @@ def size_diffuser_length_physics_based(
         raise ValueError("Diffuser areas must be positive.")
     if throat_width_m <= 0.0 or throat_height_m <= 0.0:
         raise ValueError("Throat dimensions must be positive.")
+    if exit_width_m is None:
+        exit_width_m = throat_width_m
+    if exit_width_m <= 0.0:
+        raise ValueError("exit_width_m must be positive.")
     if max_equiv_half_angle_deg <= 0.0:
         raise ValueError("max_equiv_half_angle_deg must be positive.")
     if min_shock_accommodation_dh <= 0.0:
         raise ValueError("min_shock_accommodation_dh must be positive.")
 
-    r_throat = math.sqrt(A_throat / math.pi)
-    r_exit = math.sqrt(A_exit / math.pi)
-    radius_change = max(r_exit - r_throat, 0.0)
+    exit_height_m = A_exit / exit_width_m
+    wall_offset_change = max(
+        0.5 * abs(float(exit_width_m) - float(throat_width_m)),
+        0.5 * abs(float(exit_height_m) - float(throat_height_m)),
+        0.0,
+    )
 
-    length_from_angle = radius_change / math.tan(math.radians(max_equiv_half_angle_deg))
+    length_from_angle = wall_offset_change / math.tan(math.radians(max_equiv_half_angle_deg))
     dh_throat = hydraulic_diameter_rect(throat_width_m, throat_height_m)
     length_from_shock = min_shock_accommodation_dh * dh_throat
 
@@ -540,8 +548,13 @@ def size_diffuser_length_physics_based(
         "length_from_angle_m": float(length_from_angle),
         "length_from_shock_m": float(length_from_shock),
         "throat_hydraulic_diameter_m": float(dh_throat),
-        "throat_equivalent_radius_m": float(r_throat),
-        "exit_equivalent_radius_m": float(r_exit),
+        "throat_width_m": float(throat_width_m),
+        "throat_height_m": float(throat_height_m),
+        "exit_width_m": float(exit_width_m),
+        "exit_height_m": float(exit_height_m),
+        "wall_offset_change_m": float(wall_offset_change),
+        "throat_equivalent_radius_m": float(math.sqrt(A_throat / math.pi)),
+        "exit_equivalent_radius_m": float(math.sqrt(A_exit / math.pi)),
     }
 
 def solve_forebody_stage(
@@ -1232,6 +1245,7 @@ def build_d2r_result(fs,A_capture_required,h_req_normal,
 # ----------------------------------------------------------------------------
 def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
                             area_ratio_exit_to_throat,
+                            exit_width_m=None,
                             half_angle_deg=None, length_m=None,
                             min_shock_accommodation_dh=None,
                             n_stations=201):
@@ -1243,12 +1257,13 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
 
     if area_ratio_exit_to_throat <= 1.0:
         raise ValueError("Diffuser exit/throat area ratio must exceed 1.")
+    if exit_width_m is None:
+        exit_width_m = width_m
+    if exit_width_m <= 0.0:
+        raise ValueError("Diffuser exit width must be positive.")
     A_throat = h_throat * width_m
     A_exit   = area_ratio_exit_to_throat * A_throat
-    exit_radius_m = math.sqrt(A_exit / math.pi)
-    exit_diameter_m = 2.0 * exit_radius_m
-
-    throat_equiv_radius_m = math.sqrt(A_throat / math.pi)
+    h_exit = A_exit / exit_width_m
     length_sizing = None
     if length_m is None and half_angle_deg is None:
         length_sizing = size_diffuser_length_physics_based(
@@ -1256,6 +1271,7 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
             A_exit=A_exit,
             throat_width_m=width_m,
             throat_height_m=h_throat,
+            exit_width_m=exit_width_m,
             min_shock_accommodation_dh=(
                 DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH
                 if min_shock_accommodation_dh is None
@@ -1264,8 +1280,12 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
         )
         length_m = length_sizing["length_m"]
     elif length_m is None:
-        radius_change = max(exit_radius_m - throat_equiv_radius_m, 0.0)
-        length_m = radius_change / math.tan(math.radians(half_angle_deg))
+        wall_offset_change = max(
+            0.5 * abs(float(exit_width_m) - float(width_m)),
+            0.5 * abs(float(h_exit) - float(h_throat)),
+            0.0,
+        )
+        length_m = wall_offset_change / math.tan(math.radians(half_angle_deg))
     elif half_angle_deg is not None:
         raise ValueError("Specify either half_angle_deg or length_m, not both.")
 
@@ -1276,18 +1296,10 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
     xs = np.linspace(x0, x_exit, n_stations)
     s  = (xs - x0) / length_m
     smooth_s = np.array([_quintic_smoothstep(si) for si in s], dtype=float)
-    r_of_x = throat_equiv_radius_m + smooth_s * (exit_radius_m - throat_equiv_radius_m)
-    A_of_x = math.pi * r_of_x**2
-    section_half_heights = np.empty_like(A_of_x)
-    for i, (Ai, si) in enumerate(zip(A_of_x, smooth_s)):
-        section = morphed_rectangle_to_circle_section(
-            area_m2=Ai,
-            blend=si,
-            rect_width_m=width_m,
-            rect_height_m=h_throat,
-            circle_radius_m=exit_radius_m,
-        )
-        section_half_heights[i] = np.max(np.abs(section[:, 1]))
+    width_stations = width_m + smooth_s * (float(exit_width_m) - float(width_m))
+    height_stations = h_throat + smooth_s * (float(h_exit) - float(h_throat))
+    A_of_x = width_stations * height_stations
+    section_half_heights = 0.5 * height_stations
 
     upper_wall = np.column_stack([xs, y_mid + section_half_heights])
     lower_wall = np.column_stack([xs, y_mid - section_half_heights])
@@ -1302,26 +1314,29 @@ def build_subsonic_diffuser(T_upper, T_lower, h_throat, width_m,
         "A_throat":      float(A_throat),
         "A_exit":        float(A_exit),
         "h_throat":      float(h_throat),
-        "h_exit":        float(2.0 * exit_radius_m),
+        "h_exit":        float(h_exit),
         "area_ratio":    float(area_ratio_exit_to_throat),
         "width_m":       float(width_m),
         "throat_shape":  "rectangular",
-        "exit_shape":    "circular",
-        "shape_transition": "rectangle_to_circle",
+        "exit_shape":    "rectangular",
+        "shape_transition": "rectangle_to_rectangle",
         "throat_width_m": float(width_m),
         "throat_height_m": float(h_throat),
-        "throat_equivalent_radius_m": float(throat_equiv_radius_m),
-        "exit_radius_m": float(exit_radius_m),
-        "exit_diameter_m": float(exit_diameter_m),
+        "throat_equivalent_radius_m": float(math.sqrt(A_throat / math.pi)),
+        "exit_width_m": float(exit_width_m),
+        "exit_height_m": float(h_exit),
+        "exit_radius_m": float(math.sqrt(A_exit / math.pi)),
+        "exit_diameter_m": float(math.sqrt(4.0 * A_exit / math.pi)),
         "y_centerline":  float(y_mid),
         "x_stations":    xs,
         "A_stations":    A_of_x,
-        "radius_stations": r_of_x,
+        "radius_stations": np.sqrt(A_of_x / math.pi),
+        "width_stations": width_stations,
         "h_stations":    2.0 * section_half_heights,
         "section_half_height_stations": section_half_heights,
         "section_blend_stations": smooth_s,
         "section_axial_fraction_stations": s,
-        "profile_type": "quintic_smooth_radius",
+        "profile_type": "quintic_smooth_rectangular",
         "length_sizing": length_sizing,
         "upper_wall_xy": upper_wall,
         "lower_wall_xy": lower_wall,
@@ -1761,7 +1776,8 @@ def print_d2r_report(result):
         print(f"Diffuser length                 = {diffuser.get('length_m', float('nan')):.6f} m")
         print(f"Diffuser exit area              = {diffuser.get('A_exit', float('nan')):.6f} m^2")
         print(f"Diffuser exit shape             = {diffuser.get('exit_shape', 'n/a')}")
-        print(f"Diffuser exit diameter          = {diffuser.get('exit_diameter_m', float('nan')):.6f} m")
+        print(f"Diffuser exit width             = {diffuser.get('exit_width_m', float('nan')):.6f} m")
+        print(f"Diffuser exit height            = {diffuser.get('exit_height_m', float('nan')):.6f} m")
         length_sizing = diffuser.get("length_sizing")
         if isinstance(length_sizing, dict):
             print(f"Diffuser length basis           = {length_sizing.get('governing_mode', 'n/a')}")
@@ -2539,7 +2555,7 @@ else:
 
         
         mach_grid = [4.0, 4.5, 5.0]
-        alpha_grid = [-2.0, 2.0, 5.0]
+        alpha_grid = [-1.0, 2.0, 4.0]
 
         plot_fixed_geometry_3x3_grid(
             result=result,

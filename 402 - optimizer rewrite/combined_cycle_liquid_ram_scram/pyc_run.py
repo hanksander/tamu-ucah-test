@@ -48,9 +48,11 @@ from pyc_config import (
     INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
     NOZZLE_TYPE,
     TT4_MAX_K, M4_MAX, COMBUSTOR_LENGTH_M_DEFAULT,
+    COMBUSTOR_WIDTH_M_DEFAULT,
     DIFFUSER_AREA_RATIO, NOZZLE_AR, NOZZLE_AR_DEFAULT,
     DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
-    PHI_DEFAULT,
+    INLET_CONSTANT_AREA_LENGTH_M,
+    PHI_DEFAULT, PHI_SEARCH_MAX,
 )
 from pyc_ram_cycle   import RamCycle
 import nozzle_design
@@ -78,7 +80,7 @@ def build_design(
     forebody_separation_margin=None, ramp_separation_margin=None,
     kantrowitz_margin=None, shock_focus_factor=None,
     diffuser_area_ratio=None, diffuser_min_shock_accommodation_dh=None,
-    combustor_length_m=None, nozzle_AR=None, design_phi=None,
+    combustor_length_m=None, combustor_width_m=None, nozzle_AR=None, design_phi=None,
 ):
     """Build an inlet+geometry design dict. Any arg left as None falls
     back to the pyc_config default."""
@@ -112,6 +114,7 @@ def build_design(
         h_throat=float(design["throat_height_m"]),
         width_m=pick(width_m, INLET_DESIGN_WIDTH_M),
         area_ratio_exit_to_throat=diffuser_area_ratio_eff,
+        exit_width_m=pick(combustor_width_m, COMBUSTOR_WIDTH_M_DEFAULT),
         min_shock_accommodation_dh=diffuser_min_shock_accommodation_dh_eff,
     )
     # attach the extras not consumed by the 2-ramp solver. alpha_deg is stored
@@ -127,6 +130,7 @@ def build_design(
     design['diffuser_area_ratio'] = diffuser_area_ratio_eff
     design['diffuser_min_shock_accommodation_dh'] = diffuser_min_shock_accommodation_dh_eff
     design['combustor_length_m']  = float(pick(combustor_length_m, COMBUSTOR_LENGTH_M_DEFAULT))
+    design['combustor_width_m']   = float(pick(combustor_width_m, COMBUSTOR_WIDTH_M_DEFAULT))
     design['nozzle_AR']           = float(pick(nozzle_AR, NOZZLE_AR))
 
     # Commit A_noz_throat analytically at the design point. The choked-nozzle
@@ -348,6 +352,7 @@ def compute_inlet_conditions(M0, alt_m, ramp_angles=None, alpha_deg=0.0):
 #       ram_recovery = Pt3_deliverable / Pt0 and MN = M3_diffuser_exit.
 
 from scipy.interpolate import PchipInterpolator as _Pchip
+from scipy.optimize    import brentq            as _brentq
 
 _SOFTMIN_K = 15.0  # larger → sharper soft-min (closer to true min)               #LOWER
 
@@ -444,7 +449,10 @@ def _solve_phi_envelope(capability, A_noz_throat, W_air,
     M3  = float(capability['M3_diffuser_exit'])
 
     PHI_LO = 0.02
-    phi_top = max(0.95, float(phi_request) + 0.10)
+    # Cap-search bracket is fixed by the physical envelope, NOT by phi_request.
+    # Tying phi_top to phi_request previously hid Tt4 / choke / inlet caps
+    # whenever phi_request sat below the true cap, silently uncapping the cycle.
+    phi_top = float(PHI_SEARCH_MAX)
 
     def _obs_at(phi):
         face = combustor_face_response(
@@ -584,7 +592,7 @@ def compute_combustor_geometry(
     Size a constant-area combustor from a user-supplied chamber length.
 
     Cross-section is taken from the diffuser exit area when a diffuser block
-    is attached to `design` (circular). A rectangular fallback is retained
+    is attached to `design` (rectangular). A rectangular fallback is retained
     for designs without a diffuser. Volume = A_cc · L_cc.
     """
     if combustor_length_m <= 0.0:
@@ -595,10 +603,17 @@ def compute_combustor_geometry(
         if diff is not None:
             cross_section_area_m2 = float(diff["A_exit"])
             if cross_section_shape is None:
-                cross_section_shape = "circular"
+                cross_section_shape = "rectangular"
+            if width_m is None:
+                width_m = float(diff.get("exit_width_m", COMBUSTOR_WIDTH_M_DEFAULT))
+            if height_m is None:
+                height_m = float(diff.get("exit_height_m", cross_section_area_m2 / width_m))
         else:
             if width_m is None:
-                width_m = INLET_DESIGN_WIDTH_M
+                if isinstance(design, dict):
+                    width_m = float(design.get("combustor_width_m", COMBUSTOR_WIDTH_M_DEFAULT))
+                else:
+                    width_m = COMBUSTOR_WIDTH_M_DEFAULT
             if height_m is None:
                 if design is None:
                     raise ValueError("geometry inputs or design must be provided.")
@@ -621,7 +636,7 @@ def compute_combustor_geometry(
     combustor_volume = combustor_area * combustor_length
 
     geometry = {
-        "cross_section_shape": str(cross_section_shape or "circular"),
+        "cross_section_shape": str(cross_section_shape or "rectangular"),
         "cross_section_area_m2": float(combustor_area),
         "volume_m3": float(combustor_volume),
         "length_m": float(combustor_length),
@@ -657,6 +672,8 @@ def _build_inlet_geometry_summary(design: dict) -> dict:
         "throat_height_m": float(design["throat_height_m"]),
         "width_m": width_m,
         "diffuser_exit_shape": str(design.get("diffuser", {}).get("exit_shape", "unknown")),
+        "diffuser_exit_width_m": float(design.get("diffuser", {}).get("exit_width_m", np.nan)),
+        "diffuser_exit_height_m": float(design.get("diffuser", {}).get("exit_height_m", np.nan)),
         "diffuser_exit_diameter_m": float(design.get("diffuser", {}).get("exit_diameter_m", np.nan)),
         "forebody_length_m": float(design["forebody_length_m"]),
         "ramp1_length_m": float(design["ramp1_length_m"]),
@@ -678,24 +695,35 @@ def _build_combustor_section_summary(combustor_geometry: dict) -> dict:
 def _estimate_nozzle_geometry(
     throat_area_m2: float,
     nozzle_AR: float,
-    combustor_diameter_m: float | None = None,
+    nozzle_width_m: float | None = None,
+    combustor_height_m: float | None = None,
     half_angle_deg: float = 12.0,
 ) -> dict:
     if throat_area_m2 <= 0.0:
         raise ValueError("throat_area_m2 must be positive.")
     if nozzle_AR <= 0.0:
         raise ValueError("nozzle_AR must be positive.")
+    if nozzle_width_m is None:
+        nozzle_width_m = COMBUSTOR_WIDTH_M_DEFAULT
+    if nozzle_width_m <= 0.0:
+        raise ValueError("nozzle_width_m must be positive.")
 
     exit_area_m2 = throat_area_m2 * nozzle_AR
+    throat_height_m = throat_area_m2 / nozzle_width_m
+    exit_height_m = exit_area_m2 / nozzle_width_m
     throat_radius_m = float(np.sqrt(throat_area_m2 / np.pi))
     exit_radius_m = float(np.sqrt(exit_area_m2 / np.pi))
-    length_m = (exit_radius_m - throat_radius_m) / max(np.tan(np.radians(half_angle_deg)), 1.0e-12)
-    if combustor_diameter_m is not None:
-        length_m = max(length_m, 0.25 * float(combustor_diameter_m))
+    half_height_change = 0.5 * max(exit_height_m - throat_height_m, 0.0)
+    length_m = half_height_change / max(np.tan(np.radians(half_angle_deg)), 1.0e-12)
+    if combustor_height_m is not None:
+        length_m = max(length_m, 0.25 * float(combustor_height_m))
 
     return {
         "throat_area_m2": float(throat_area_m2),
         "exit_area_m2": float(exit_area_m2),
+        "width_m": float(nozzle_width_m),
+        "throat_height_m": float(throat_height_m),
+        "exit_height_m": float(exit_height_m),
         "throat_radius_m": float(throat_radius_m),
         "throat_diameter_m": float(2.0 * throat_radius_m),
         "exit_radius_m": float(exit_radius_m),
@@ -716,15 +744,29 @@ def _compute_diffuser_volume_m3(diffuser: dict | None) -> float:
     return float(np.trapezoid(areas, xs))
 
 
-def _compute_nozzle_converging_volume_m3(inlet_area_m2: float, throat_area_m2: float) -> float:
-    if inlet_area_m2 <= 0.0 or throat_area_m2 <= 0.0:
+def _compute_constant_area_section_volume_m3(design: dict | None) -> float:
+    if not isinstance(design, dict):
+        return 0.0
+    throat_area_m2 = float(design.get("throat_area_actual_m2", 0.0))
+    length_m = float(INLET_CONSTANT_AREA_LENGTH_M)
+    if throat_area_m2 <= 0.0 or length_m <= 0.0:
+        return 0.0
+    return float(throat_area_m2 * length_m)
+
+
+def _compute_nozzle_converging_volume_m3(
+    inlet_area_m2: float,
+    throat_area_m2: float,
+    nozzle_width_m: float,
+) -> float:
+    if inlet_area_m2 <= 0.0 or throat_area_m2 <= 0.0 or nozzle_width_m <= 0.0:
         return 0.0
     converging_length_m = float(
-        nozzle_design.default_bell_converging_length(inlet_area_m2, throat_area_m2)
+        nozzle_design.default_bell_converging_length(
+            inlet_area_m2, throat_area_m2, width_m=nozzle_width_m
+        )
     )
-    r_in = float(np.sqrt(inlet_area_m2 / np.pi))
-    r_th = float(np.sqrt(throat_area_m2 / np.pi))
-    return float((np.pi * converging_length_m / 3.0) * (r_in * r_in + r_in * r_th + r_th * r_th))
+    return float(0.5 * (inlet_area_m2 + throat_area_m2) * converging_length_m)
 
 
 def _build_geometry_packaging_summary(
@@ -751,17 +793,16 @@ def _build_geometry_packaging_summary(
     max_width_m = max(
         float(inlet_geometry.get("width_m", 0.0)),
         float(combustor_section.get("width_m", 0.0)),
-        float(nozzle_geometry.get("exit_diameter_m", 0.0)),
+        float(nozzle_geometry.get("width_m", 0.0)),
     )
     max_height_m = max(
         float(design.get("opening_normal_to_ramp2_m", 0.0)),
         float(design.get("post_cowl_height_m", 0.0)),
         float(design.get("throat_height_m", 0.0)),
-        float(inlet_geometry.get("diffuser_exit_diameter_m", 0.0)),
+        float(inlet_geometry.get("diffuser_exit_height_m", 0.0)),
         float(combustor_section.get("height_m", 0.0)),
-        float(combustor_section.get("diameter_m", 0.0)),
-        float(nozzle_geometry.get("throat_diameter_m", 0.0)),
-        float(nozzle_geometry.get("exit_diameter_m", 0.0)),
+        float(nozzle_geometry.get("throat_height_m", 0.0)),
+        float(nozzle_geometry.get("exit_height_m", 0.0)),
     )
     return {
         "total_length_m": float(total_length_m),
@@ -797,15 +838,19 @@ def build_geometry_summary(design: dict) -> dict:
     nozzle_geometry = _estimate_nozzle_geometry(
         throat_area_m2=nozzle_throat_area,
         nozzle_AR=nozzle_AR,
-        combustor_diameter_m=combustor_section["diameter_m"],
+        nozzle_width_m=combustor_section["width_m"],
+        combustor_height_m=combustor_section["height_m"],
     )
+    constant_area_section_volume_m3 = _compute_constant_area_section_volume_m3(design)
     diffuser_volume_m3 = _compute_diffuser_volume_m3(design.get("diffuser"))
     nozzle_converging_volume_m3 = _compute_nozzle_converging_volume_m3(
         inlet_area_m2=float(combustor_geometry["cross_section_area_m2"]),
         throat_area_m2=float(nozzle_throat_area),
+        nozzle_width_m=float(combustor_section["width_m"]),
     )
     internal_precombustion_volume_m3 = (
         float(combustor_geometry["volume_m3"])
+        + constant_area_section_volume_m3
         + diffuser_volume_m3
         + nozzle_converging_volume_m3
     )
@@ -831,6 +876,7 @@ def build_geometry_summary(design: dict) -> dict:
         "max_width_m": float(packaging["max_width_m"]),
         "max_height_m": float(packaging["max_height_m"]),
         "combustor_volume_m3": float(combustor_geometry["volume_m3"]),
+        "constant_area_section_volume_m3": float(constant_area_section_volume_m3),
         "diffuser_volume_m3": float(diffuser_volume_m3),
         "nozzle_converging_volume_m3": float(nozzle_converging_volume_m3),
         "internal_precombustion_volume_m3": float(internal_precombustion_volume_m3),
@@ -1079,13 +1125,19 @@ def analyze(
 
     combustor_section = _build_combustor_section_summary(combustor_geometry)
     inlet_geometry = _build_inlet_geometry_summary(design)
+    nozzle_width_m = float(combustor_geometry["width_m"])
     nozzle_length_m = (
-        float(np.sqrt(float(nozzle_exit["area"]) / np.pi))
-        - float(np.sqrt(float(nozzle_throat["area"]) / np.pi))
+        0.5 * max(
+            (float(nozzle_exit["area"]) - float(nozzle_throat["area"])) / nozzle_width_m,
+            0.0,
+        )
     ) / max(np.tan(np.radians(12.0)), 1.0e-12)
     nozzle_geometry = {
         "throat_area_m2": float(nozzle_throat["area"]),
         "exit_area_m2": float(nozzle_exit["area"]),
+        "width_m": nozzle_width_m,
+        "throat_height_m": float(nozzle_throat["area"]) / nozzle_width_m,
+        "exit_height_m": float(nozzle_exit["area"]) / nozzle_width_m,
         "throat_radius_m": float(np.sqrt(float(nozzle_throat["area"]) / np.pi)),
         "throat_diameter_m": float(np.sqrt(4.0 * float(nozzle_throat["area"]) / np.pi)),
         "exit_radius_m": float(np.sqrt(float(nozzle_exit["area"]) / np.pi)),
@@ -1094,13 +1146,16 @@ def analyze(
         "expansion_state": nozzle_perf["expansion_state"],
         "length_m": float(max(nozzle_length_m, 0.3)),
     }
+    constant_area_section_volume_m3 = _compute_constant_area_section_volume_m3(design)
     diffuser_volume_m3 = _compute_diffuser_volume_m3(design.get("diffuser"))
     nozzle_converging_volume_m3 = _compute_nozzle_converging_volume_m3(
         inlet_area_m2=float(combustor_geometry["cross_section_area_m2"]),
         throat_area_m2=float(nozzle_throat["area"]),
+        nozzle_width_m=nozzle_width_m,
     )
     internal_precombustion_volume_m3 = (
         float(combustor_geometry["volume_m3"])
+        + constant_area_section_volume_m3
         + diffuser_volume_m3
         + nozzle_converging_volume_m3
     )
@@ -1175,6 +1230,7 @@ def analyze(
         combustor_geometry=combustor_geometry,
         nozzle_geometry=nozzle_geometry,
         geometry=packaging,
+        constant_area_section_volume_m3=float(constant_area_section_volume_m3),
         diffuser_volume_m3=float(diffuser_volume_m3),
         nozzle_converging_volume_m3=float(nozzle_converging_volume_m3),
         internal_precombustion_volume_m3=float(internal_precombustion_volume_m3),
@@ -1238,7 +1294,8 @@ def _print_cycle(r):
     print(f"  throat height    = {inlet_geom.get('throat_height_m', float('nan')):>8.5f} m")
     print(f"  width            = {inlet_geom.get('width_m', float('nan')):>8.5f} m")
     print(f"  diffuser exit    = {inlet_geom.get('diffuser_exit_shape', 'n/a')}")
-    print(f"  diffuser exit dia= {inlet_geom.get('diffuser_exit_diameter_m', float('nan')):>8.5f} m")
+    print(f"  diffuser exit w  = {inlet_geom.get('diffuser_exit_width_m', float('nan')):>8.5f} m")
+    print(f"  diffuser exit h  = {inlet_geom.get('diffuser_exit_height_m', float('nan')):>8.5f} m")
     print(f"  diffuser volume  = {r.get('diffuser_volume_m3', float('nan')):>8.5f} m^3")
     print(f"  forebody length  = {inlet_geom.get('forebody_length_m', float('nan')):>8.5f} m")
     print(f"  ramp1 length     = {inlet_geom.get('ramp1_length_m', float('nan')):>8.5f} m")
@@ -1248,8 +1305,6 @@ def _print_cycle(r):
     print(f"  section shape    = {combustor_section.get('shape', 'n/a')}")
     print(f"  section width    = {combustor_section.get('width_m', float('nan')):>8.5f} m")
     print(f"  section height   = {combustor_section.get('height_m', float('nan')):>8.5f} m")
-    print(f"  section radius   = {combustor_section.get('radius_m', float('nan')):>8.5f} m")
-    print(f"  section diameter = {combustor_section.get('diameter_m', float('nan')):>8.5f} m")
     print(f"  section area     = {combustor_section.get('area_m2', float('nan')):>8.5f} m^2")
     if combustor_geom is not None:
         print(f"  chamber length   = {combustor_geom.get('length_m', float('nan')):>8.5f} m")
@@ -1257,13 +1312,15 @@ def _print_cycle(r):
     print()
     print("  Nozzle geometry")
     print(f"  throat area At   = {nozzle_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
-    print(f"  throat diameter  = {nozzle_geom.get('throat_diameter_m', float('nan')):>8.5f} m")
+    print(f"  nozzle width     = {nozzle_geom.get('width_m', float('nan')):>8.5f} m")
+    print(f"  throat height    = {nozzle_geom.get('throat_height_m', float('nan')):>8.5f} m")
     print(f"  exit area Ae     = {nozzle_geom.get('exit_area_m2', float('nan')):>8.5f} m^2")
-    print(f"  exit diameter    = {nozzle_geom.get('exit_diameter_m', float('nan')):>8.5f} m")
+    print(f"  exit height      = {nozzle_geom.get('exit_height_m', float('nan')):>8.5f} m")
     print(f"  area ratio Ae/At = {nozzle_geom.get('area_ratio', float('nan')):>8.5f}")
     print(f"  expansion state  = {nozzle_geom.get('expansion_state', 'n/a')}")
+    print(f"  const-area volume= {r.get('constant_area_section_volume_m3', float('nan')):>8.5f} m^3")
     print(f"  conv. sec volume = {r.get('nozzle_converging_volume_m3', float('nan')):>8.5f} m^3")
-    print(f"  sum vol (cc+diff+conv) = {r.get('internal_precombustion_volume_m3', float('nan')):>8.5f} m^3")
+    print(f"  sum vol (cc+const+diff+conv) = {r.get('internal_precombustion_volume_m3', float('nan')):>8.5f} m^3")
     print()
     print("  Performance")
     print(f"  Isp       = {r['Isp']:>8.1f} s")
@@ -1285,11 +1342,12 @@ if __name__ == '__main__':
 
     off_design_M0 = 5.0
     off_design_altitude_m = 19_000.0
-    off_design_alpha_deg = 3
+    off_design_alpha_deg = 2
     off_design_phi = PHI_DEFAULT
 
     print("\n--- Design Point Performance")
     design = _get_inlet_design()
+
     design_result = analyze(
         M0=INLET_DESIGN_M0,
         altitude_m=INLET_DESIGN_ALT_M,
@@ -1298,8 +1356,8 @@ if __name__ == '__main__':
         verbose=True,
     )
 
-    """
 
+    """
     print("\n--- Off-Design Point Performance")
     off_design_result = analyze(
         M0=off_design_M0,
@@ -1308,14 +1366,14 @@ if __name__ == '__main__':
         alpha_deg=off_design_alpha_deg,
         verbose=True,
     )
-
+    
     print("\n--- Off-Design Delta vs Design")
     print(f"  dThrust   = {(off_design_result['thrust'] - design_result['thrust'])/1e3:>8.2f} kN")
     print(f"  dIsp      = {off_design_result['Isp'] - design_result['Isp']:>8.1f} s")
     print(f"  dmdot_air = {off_design_result['mdot_air'] - design_result['mdot_air']:>8.3f} kg/s")
     print(f"  deta_pt   = {off_design_result['eta_pt'] - design_result['eta_pt']:>8.4f}")
-    
     """
+
 
     print("\n--- Design Point Flowpath Plot")
     try:

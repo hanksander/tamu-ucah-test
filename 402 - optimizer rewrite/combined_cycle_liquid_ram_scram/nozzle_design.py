@@ -1247,6 +1247,7 @@ def print_results(results):
 def default_bell_diverging_length(
     throat_area,
     exit_area,
+    width_m=INLET_DESIGN_WIDTH_M,
     throat_angle_deg=25.0,
     exit_angle_deg=12.0,
     bell_fraction=0.80,
@@ -1263,9 +1264,10 @@ def default_bell_diverging_length(
     converge/diverge oscillation seen with a raw cubic Hermite.
     """
 
-    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
-    r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
-    radius_change = max(r_exit - r_throat, 1.0e-6)
+    width_m = float(width_m)
+    h_throat = max(throat_area, 1.0e-12) / width_m
+    h_exit = max(exit_area, 1.0e-12) / width_m
+    radius_change = max(0.5 * (h_exit - h_throat), 1.0e-6)
 
     L_nominal = bell_fraction * radius_change / np.tan(np.radians(15.0))
 
@@ -1276,7 +1278,7 @@ def default_bell_diverging_length(
     return float(np.clip(L_nominal, L_min, L_max))
 
 
-def default_bell_converging_length(inlet_area, throat_area):
+def default_bell_converging_length(inlet_area, throat_area, width_m=INLET_DESIGN_WIDTH_M):
     """
     Estimate converging length from the actual area contraction.
 
@@ -1284,9 +1286,10 @@ def default_bell_converging_length(inlet_area, throat_area):
     size the axial length from the inlet and throat radii.
     """
 
-    r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
-    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
-    radius_change = max(r_inlet - r_throat, 1.0e-6)
+    width_m = float(width_m)
+    h_inlet = max(inlet_area, 1.0e-12) / width_m
+    h_throat = max(throat_area, 1.0e-12) / width_m
+    radius_change = max(0.5 * (h_inlet - h_throat), 1.0e-6)
     reference_angle = np.radians(30.0)
     return max(0.02, radius_change / np.tan(reference_angle))
 
@@ -1301,6 +1304,7 @@ def size_bell_nozzle_for_vehicle(
     nozzle_length_fraction,
     nozzle_length,
     vehicle_radius,
+    width_m=INLET_DESIGN_WIDTH_M,
 ):
     """
     Choose bell-contour lengths that fit a missile packaging budget.
@@ -1316,16 +1320,21 @@ def size_bell_nozzle_for_vehicle(
     if nozzle_length is not None and nozzle_length <= 0.0:
         raise ValueError("nozzle_length must be positive.")
 
-    r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
-    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
-    r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
+    width_m = float(width_m)
+    r_inlet = 0.5 * max(inlet_area, 1.0e-12) / width_m
+    r_throat = 0.5 * max(throat_area, 1.0e-12) / width_m
+    r_exit = 0.5 * max(exit_area, 1.0e-12) / width_m
 
     length_budget = nozzle_length if nozzle_length is not None else missile_length * nozzle_length_fraction
     if length_budget <= 0.0:
         raise ValueError("Nozzle length budget must be positive.")
 
-    unconstrained_converging_length = default_bell_converging_length(inlet_area, throat_area)
-    unconstrained_diverging_length = default_bell_diverging_length(throat_area, exit_area)
+    unconstrained_converging_length = default_bell_converging_length(
+        inlet_area, throat_area, width_m=width_m
+    )
+    unconstrained_diverging_length = default_bell_diverging_length(
+        throat_area, exit_area, width_m=width_m
+    )
     notes = []
 
     if converging_length is None:
@@ -1515,18 +1524,20 @@ def generate_bell_contour(
     throat_angle_deg,
     exit_angle_deg,
     n_points,
+    width_m=INLET_DESIGN_WIDTH_M,
 ):
     """
     Rao-style bell-nozzle wall contour from pyCycle station areas.
 
-    pyCycle gives station areas, not wall shape.  This builds an
-    axisymmetric Rao bell for visualization and preliminary geometry;
+    pyCycle gives station areas, not wall shape.  This builds a
+    rectangular-width Rao bell sidewall contour for visualization and
+    preliminary geometry;
     performance still comes from the pyCycle station solution.
 
-    Profile (all joins C¹, whole contour monotone in radius):
-      1. Cosine-eased convergent section r_inlet → r_throat, zero wall
+    Profile (all joins C¹, whole contour monotone in half-height):
+      1. Cosine-eased convergent section h_inlet/2 → h_throat/2, zero wall
          slope at both endpoints.
-      2. Downstream throat circular arc of radius R_d = 0.382·r_throat,
+      2. Downstream throat circular arc of radius 0.382·(h_throat/2),
          sweeping α ∈ [0, θ_N].  Slope 0 at the throat (matches the
          converger), slope tan(θ_N) at the tangent point N.
       3. Rao parabola (quadratic Bezier) from N with slope tan(θ_N) to
@@ -1536,21 +1547,27 @@ def generate_bell_contour(
          `default_bell_diverging_length` already clamps into this window.
     """
 
-    r_inlet = np.sqrt(max(inlet_area, 1.0e-12) / np.pi)
-    r_throat = np.sqrt(max(throat_area, 1.0e-12) / np.pi)
-    r_exit = np.sqrt(max(exit_area, 1.0e-12) / np.pi)
+    width = float(width_m)
+    if width <= 0.0:
+        raise ValueError("width_m must be positive.")
+    r_inlet = 0.5 * max(inlet_area, 1.0e-12) / width
+    r_throat = 0.5 * max(throat_area, 1.0e-12) / width
+    r_exit = 0.5 * max(exit_area, 1.0e-12) / width
 
     if n_points < 90:
         raise ValueError("n_points must be at least 90 for a smooth bell contour.")
 
     if converging_length is None:
-        converging_length = default_bell_converging_length(inlet_area, throat_area)
+        converging_length = default_bell_converging_length(
+            inlet_area, throat_area, width_m=width
+        )
     elif converging_length <= 0.0:
         raise ValueError("converging_length must be positive.")
 
     if diverging_length is None:
         diverging_length = default_bell_diverging_length(
             throat_area, exit_area,
+            width_m=width,
             throat_angle_deg=throat_angle_deg,
             exit_angle_deg=exit_angle_deg,
         )
@@ -1600,15 +1617,14 @@ def generate_bell_contour(
     # arc end == bell start == N).
     x = np.concatenate([x_conv, x_arc[1:], x_bell[1:]])
     r = np.concatenate([r_conv, r_arc[1:], r_bell[1:]])
-    area = np.pi * r**2
-    width = float(INLET_DESIGN_WIDTH_M)
-    height = area / width
+    height = 2.0 * r
+    area = width * height
     half_height = 0.5 * height
 
     return {
         "x": x,
         "radius": r,
-        "diameter": 2.0 * r,
+        "diameter": height,
         "area": area,
         "width": width,
         "height": height,
