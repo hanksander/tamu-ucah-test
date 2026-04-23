@@ -43,9 +43,10 @@ from pyc_config import (
     ETA_NOZZLE_CV,
     INLET_DESIGN_M0, INLET_DESIGN_ALT_M,
     INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
-    INLET_DESIGN_MDOT_KGS, INLET_DESIGN_WIDTH_M,
+    INLET_DESIGN_MDOT_KGS, INLET_DESIGN_WIDTH_M, INLET_FOREBODY_LENGTH_M,
     INLET_FOREBODY_SEP_MARGIN, INLET_RAMP_SEP_MARGIN,
     INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
+    INLET_CAPTURE_RATIO_CORRECTION,
     NOZZLE_TYPE,
     TT4_MAX_K, M4_MAX, COMBUSTOR_LENGTH_M_DEFAULT,
     COMBUSTOR_WIDTH_M_DEFAULT,
@@ -73,10 +74,23 @@ M2FT    = 3.28084
 KG2LBM  = 2.20462
 
 
+def _corrected_capture_area(required_area_m2, raw_area_m2,
+                            correction_coeff=INLET_CAPTURE_RATIO_CORRECTION):
+    required_area_m2 = float(required_area_m2)
+    raw_area_m2 = float(raw_area_m2)
+    coeff = float(np.clip(correction_coeff, 0.0, 1.0))
+    if required_area_m2 <= 0.0:
+        return max(0.0, raw_area_m2)
+    raw_ratio = raw_area_m2 / required_area_m2
+    corrected_ratio = 1.0 + coeff * (raw_ratio - 1.0)
+    return required_area_m2 * max(0.0, corrected_ratio)
+
+
 # --- New: parameterized design builder ---
 def build_design(
     M0=None, altitude_m=None, alpha_deg=None,
     leading_edge_angle_deg=None, mdot_required=None, width_m=None,
+    forebody_length_m=None,
     forebody_separation_margin=None, ramp_separation_margin=None,
     kantrowitz_margin=None, shock_focus_factor=None,
     diffuser_area_ratio=None, diffuser_min_shock_accommodation_dh=None,
@@ -96,6 +110,7 @@ def build_design(
                                     INLET_DESIGN_LEADING_EDGE_ANGLE_DEG),
         mdot_required=pick(mdot_required, INLET_DESIGN_MDOT_KGS),
         width_m=pick(width_m, INLET_DESIGN_WIDTH_M),
+        forebody_length_m=pick(forebody_length_m, INLET_FOREBODY_LENGTH_M),
         forebody_separation_margin=pick(forebody_separation_margin,
                                         INLET_FOREBODY_SEP_MARGIN),
         ramp_separation_margin=pick(ramp_separation_margin,
@@ -169,7 +184,16 @@ def _compute_design_point_A_noz_throat(design: dict) -> dict:
     T0   = float(atm.temperature[0])
     rho0 = float(atm.density[0])
     V0   = M0_des * np.sqrt(AIR_GAM * AIR_R * T0)
-    A_capture = float(design['A_capture_required_m2'])
+    # Legacy mass-flow model kept for reference:
+    # A_capture = float(design['A_capture_required_m2'])
+    A_capture_raw = float(
+        design.get('A_swallowed_m2',
+                   design.get('A_capture_effective_m2',
+                              design['A_capture_required_m2']))
+    )
+    A_capture = _corrected_capture_area(
+        design['A_capture_required_m2'], A_capture_raw,
+    )
     W_air = rho0 * V0 * A_capture
 
     face = combustor_face_response(
@@ -666,7 +690,20 @@ def _build_inlet_geometry_summary(design: dict) -> dict:
         design.get("width_m", design.get("diffuser", {}).get("width_m", INLET_DESIGN_WIDTH_M))
     )
     return {
-        "capture_area_m2": float(design["A_capture_required_m2"]),
+        "capture_area_m2": float(design.get("A_swallowed_m2",
+                                            design.get("A_capture_effective_m2",
+                                                       design["A_capture_required_m2"]))),
+        "capture_area_required_m2": float(design["A_capture_required_m2"]),
+        "capture_area_effective_m2": float(design.get("A_capture_effective_m2", np.nan)),
+        "capture_area_swallowed_m2": float(design.get("A_swallowed_m2", np.nan)),
+        "capture_area_corrected_m2": float(_corrected_capture_area(
+            design["A_capture_required_m2"],
+            design.get("A_swallowed_m2",
+                       design.get("A_capture_effective_m2",
+                                  design["A_capture_required_m2"]))
+        )),
+        "mdot_capture_effective_kgs": float(design.get("mdot_capture_effective_kgs", np.nan)),
+        "mdot_swallowed_kgs": float(design.get("mdot_swallowed_kgs", np.nan)),
         "post_cowl_area_m2": float(design["post_cowl_area_m2"]),
         "throat_area_m2": float(design["throat_area_actual_m2"]),
         "throat_height_m": float(design["throat_height_m"]),
@@ -934,9 +971,24 @@ def analyze(
 
     V0      = M0 * np.sqrt(AIR_GAM * AIR_R * T0)
     # Capture area from the frozen 2-ramp inlet geometry (402inlet2.py).
-    # design['A_capture_required_m2'] is the geometric opening sized at the
-    # design point; mass flow at off-design scales as rho0*V0*A_capture.
-    A_capture_m2 = float(design['A_capture_required_m2'])
+    # Legacy model kept for reference:
+    # A_capture_m2 = float(design['A_capture_required_m2'])
+    capability = _get_capability(design, M0, altitude_m, eval_alpha_deg)
+    if not capability.get('ok', False):
+        raise RuntimeError(
+            f"Inlet capability failed at M0={M0}, alt={altitude_m}: "
+            f"{capability.get('reason','unknown')}"
+        )
+    A_capture_raw_m2 = float(
+        capability.get('A_swallowed_m2',
+                       capability.get('A_capture_effective_m2',
+                                      design.get('A_swallowed_m2',
+                                                 design.get('A_capture_effective_m2',
+                                                            design['A_capture_required_m2']))))
+    )
+    A_capture_m2 = _corrected_capture_area(
+        design['A_capture_required_m2'], A_capture_raw_m2,
+    )
     W_kgs   = rho0 * V0 * A_capture_m2         # kg/s
     W_lbms  = W_kgs * KG2LBM                   # lbm/s
 
@@ -966,12 +1018,6 @@ def analyze(
     prob.set_val("burner.area_ratio", 1.0)
 
     # ── Inlet capability + φ envelope (cascade-only) ─────────────────────────
-    capability = _get_capability(design, M0, altitude_m, eval_alpha_deg)
-    if not capability.get('ok', False):
-        raise RuntimeError(
-            f"Inlet capability failed at M0={M0}, alt={altitude_m}: "
-            f"{capability.get('reason','unknown')}"
-        )
     A_noz_throat = float(design['A_noz_throat'])
     envelope_info = _solve_phi_envelope(
         capability=capability,
@@ -1289,6 +1335,10 @@ def _print_cycle(r):
     print()
     print("  Inlet geometry")
     print(f"  capture area     = {inlet_geom.get('capture_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  capture area req = {inlet_geom.get('capture_area_required_m2', float('nan')):>8.5f} m^2")
+    print(f"  capture area eff = {inlet_geom.get('capture_area_effective_m2', float('nan')):>8.5f} m^2")
+    print(f"  capture area swl = {inlet_geom.get('capture_area_swallowed_m2', float('nan')):>8.5f} m^2")
+    print(f"  capture area cor = {inlet_geom.get('capture_area_corrected_m2', float('nan')):>8.5f} m^2")
     print(f"  post-cowl area   = {inlet_geom.get('post_cowl_area_m2', float('nan')):>8.5f} m^2")
     print(f"  throat area      = {inlet_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
     print(f"  throat height    = {inlet_geom.get('throat_height_m', float('nan')):>8.5f} m")
@@ -1357,7 +1407,6 @@ if __name__ == '__main__':
     )
 
 
-    """
     print("\n--- Off-Design Point Performance")
     off_design_result = analyze(
         M0=off_design_M0,
@@ -1372,7 +1421,7 @@ if __name__ == '__main__':
     print(f"  dIsp      = {off_design_result['Isp'] - design_result['Isp']:>8.1f} s")
     print(f"  dmdot_air = {off_design_result['mdot_air'] - design_result['mdot_air']:>8.3f} kg/s")
     print(f"  deta_pt   = {off_design_result['eta_pt'] - design_result['eta_pt']:>8.4f}")
-    """
+
 
 
     print("\n--- Design Point Flowpath Plot")

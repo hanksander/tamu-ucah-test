@@ -423,6 +423,476 @@ def required_opening_from_mdot(mdot_required, rho0, V0, width_m):
     return A_capture_required, h_req_normal
 
 
+def compute_effective_capture_area(result, M0, altitude_m, alpha_deg):
+    """
+    Estimate the effective external capture area for the current frozen inlet
+    geometry at a given flight condition.
+
+    Important modeling assumption for the current inlet family:
+      - The forebody shock does NOT define the cowl-lip focus.
+      - The cowl / ramp-2 entrance geometry is still set by the ramp-shock
+        system.
+      - This helper only asks: at the cowl-lip axial station, what external
+        streamtube height is available between the forebody shock and the
+        lower compression surface?
+
+    First-pass definition:
+      - Capture plane: vertical plane x = cowl_lip_x.
+      - Upper boundary: forebody shock ray evaluated at x = cowl_lip_x.
+      - Lower boundary: lower inlet/body surface evaluated at x = cowl_lip_x.
+      - Effective capture height: y_upper - y_lower, clipped at zero.
+      - Effective capture area: width_m * effective capture height.
+
+    Notes:
+      - This is a geometry-based swallowed-area surrogate only.
+      - It does NOT yet include external spillage, cowl external drag, or
+        density/velocity changes across the external compression field.
+      - It is still the correct first step because it replaces the current
+        fixed required-area assumption with a condition-dependent geometric
+        capture area.
+    """
+    fs = freestream_state(M0, altitude_m)
+
+    theta_fore = float(result["theta_fore_deg"])
+    width_m = float(result.get("width_m", np.nan))
+    if not np.isfinite(width_m) or width_m <= 0.0:
+        raise ValueError("Frozen geometry must carry a positive width_m.")
+
+    P_fore = np.asarray(result["forebody_xy"], dtype=float)
+    P0 = np.asarray(result["nose_xy"], dtype=float)
+    P1 = np.asarray(result["break2_xy"], dtype=float)
+    F = np.asarray(result["ramp2_normal_foot_xy"], dtype=float)
+    C = np.asarray(result["cowl_lip_xy"], dtype=float)
+
+    x_cap = float(C[0])
+
+    # Forebody effective turn at the requested condition.
+    dtheta_fore_eff = theta_fore + float(alpha_deg)
+    if dtheta_fore_eff <= 0.0:
+        return {
+            "ok": False,
+            "reason": "Non-positive forebody effective turn",
+            "capture_plane_x_m": x_cap,
+            "h_capture_effective_m": 0.0,
+            "A_capture_effective_m2": 0.0,
+            "mdot_capture_effective_kgs": 0.0,
+        }
+
+    # Recompute the forebody shock for the requested condition. The absolute
+    # shock angle is measured from the freestream direction because the
+    # incoming flow is still aligned with x.
+    shf = oblique_shock_tpg(M0, dtheta_fore_eff, fs["T0"])
+    if shf is None:
+        return {
+            "ok": False,
+            "reason": "Forebody shock unattached",
+            "capture_plane_x_m": x_cap,
+            "h_capture_effective_m": 0.0,
+            "A_capture_effective_m2": 0.0,
+            "mdot_capture_effective_kgs": 0.0,
+        }
+
+    beta_fore_rel_deg = float(shf[0])
+    beta_fore_abs_rad = math.radians(beta_fore_rel_deg)
+    c_beta = math.cos(beta_fore_abs_rad)
+    s_beta = math.sin(beta_fore_abs_rad)
+    if c_beta <= 1.0e-12:
+        return {
+            "ok": False,
+            "reason": "Forebody shock nearly vertical at capture plane",
+            "capture_plane_x_m": x_cap,
+            "h_capture_effective_m": 0.0,
+            "A_capture_effective_m2": 0.0,
+            "mdot_capture_effective_kgs": 0.0,
+        }
+
+    # Upper streamtube boundary: forebody shock ray at the cowl-lip x.
+    lam_cap = (x_cap - P_fore[0]) / c_beta
+    if lam_cap < 0.0:
+        return {
+            "ok": False,
+            "reason": "Capture plane lies upstream of forebody leading edge",
+            "capture_plane_x_m": x_cap,
+            "h_capture_effective_m": 0.0,
+            "A_capture_effective_m2": 0.0,
+            "mdot_capture_effective_kgs": 0.0,
+        }
+    y_upper = P_fore[1] + lam_cap * s_beta
+    upper_xy = np.array([x_cap, y_upper], dtype=float)
+
+    # Lower streamtube boundary: lower compression surface at the same x.
+    # For the current geometry, the lower surface up to the cowl-lip station
+    # is piecewise linear through forebody -> ramp1 -> ramp2.
+    lower_poly = np.vstack([P_fore, P0, P1, F])
+
+    def _polyline_y_at_x_local(polyline_xy, xq):
+        for i in range(polyline_xy.shape[0] - 1):
+            a = polyline_xy[i]
+            b = polyline_xy[i + 1]
+            x1 = float(a[0])
+            x2 = float(b[0])
+            if x1 <= xq <= x2 or x2 <= xq <= x1:
+                dx = x2 - x1
+                if abs(dx) <= 1.0e-12:
+                    return float(max(a[1], b[1]))
+                t = (xq - x1) / dx
+                return float(a[1] + t * (b[1] - a[1]))
+        raise ValueError("Capture plane x is outside lower-surface polyline.")
+
+    try:
+        y_lower = _polyline_y_at_x_local(lower_poly, x_cap)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "reason": str(exc),
+            "capture_plane_x_m": x_cap,
+            "h_capture_effective_m": 0.0,
+            "A_capture_effective_m2": 0.0,
+            "mdot_capture_effective_kgs": 0.0,
+        }
+
+    lower_xy = np.array([x_cap, y_lower], dtype=float)
+    h_capture_effective = max(0.0, y_lower - y_upper)  #y_upper - y_lower
+    A_capture_effective = width_m * h_capture_effective
+
+    # First-pass mass-flow estimate: use freestream rho and V through the
+    # geometric effective area. A later refinement can replace this with a
+    # shocked-streamtube density/velocity estimate if needed.
+    mdot_capture_effective = fs["rho0"] * fs["V0"] * A_capture_effective
+
+    return {
+        "ok": True,
+        "reason": "",
+        "capture_plane_x_m": x_cap,
+        "beta_fore_abs_deg": beta_fore_rel_deg,
+        "capture_upper_xy": upper_xy,
+        "capture_lower_xy": lower_xy,
+        "h_capture_effective_m": h_capture_effective,
+        "A_capture_effective_m2": A_capture_effective,
+        "mdot_capture_effective_kgs": mdot_capture_effective,
+        "A_capture_required_m2": float(result.get("A_capture_required_m2", np.nan)),
+    }
+
+
+def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
+                                 x_capture=None,
+                                 upstream_margin_m=0.25,
+                                 use_shocked_density=True):
+    """
+    Estimate the actual swallowed streamtube by tracing the inlet mouth back
+    upstream to a capture plane ahead of the external shocks.
+
+    Core definition:
+      - Choose a freestream entrance plane x = x_capture. By default this is
+        the forebody leading-edge station, not an arbitrary plane upstream of
+        the geometry.
+      - Lower boundary: the forebody start at the entrance plane.
+      - Upper boundary: a cowl-side streamline traced backward from the cowl
+        lip. The streamline bends as it crosses the external shocks, so it is
+        piecewise aligned with the local flow directions:
+            post-ramp2 -> post-ramp1 -> post-forebody -> freestream.
+      - Swallowed streamtube height is the gap between the lower and upper
+        entrance points on the freestream plane.
+      - Because the entrance plane is upstream of compression, swallowed mass
+        uses the freestream rho0 and V0 by default.
+    """
+    fs = freestream_state(M0, altitude_m)
+    P_fore = np.asarray(result["forebody_xy"], dtype=float)
+    P0 = np.asarray(result["nose_xy"], dtype=float)
+    P1 = np.asarray(result["break2_xy"], dtype=float)
+    C = np.asarray(result["cowl_lip_xy"], dtype=float)
+    width_m = float(result.get("width_m", np.nan))
+    theta_fore = float(result["theta_fore_deg"])
+    theta1 = float(result["theta1_deg"])
+    theta2 = float(result["theta2_deg"])
+
+    if not np.isfinite(width_m) or width_m <= 0.0:
+        raise ValueError("Frozen geometry must carry a positive width_m.")
+
+    def _ray_y_at_x(origin_xy, angle_deg, xq):
+        origin_xy = np.asarray(origin_xy, dtype=float)
+        ang = math.radians(float(angle_deg))
+        c = math.cos(ang)
+        if abs(c) <= 1.0e-12:
+            raise ValueError("Ray is nearly vertical; cannot evaluate y(x).")
+        return float(origin_xy[1] + (xq - origin_xy[0]) * math.tan(ang))
+
+    def _ray_infinite_line_intersection(origin_xy, direction_xy,
+                                        line_point_xy, line_dir_xy):
+        origin_xy = np.asarray(origin_xy, dtype=float)
+        direction_xy = np.asarray(direction_xy, dtype=float)
+        line_point_xy = np.asarray(line_point_xy, dtype=float)
+        line_dir_xy = np.asarray(line_dir_xy, dtype=float)
+        denom = cross2(direction_xy, line_dir_xy)
+        if abs(denom) <= 1.0e-12:
+            return None
+        delta = line_point_xy - origin_xy
+        lam = cross2(delta, line_dir_xy) / denom
+        if lam < -1.0e-12:
+            return None
+        return origin_xy + lam * direction_xy
+
+    if x_capture is None:
+        x_capture = float(P_fore[0])
+    x_capture = float(x_capture)
+    if x_capture > float(P_fore[0]) + 1.0e-12:
+        return {
+            "ok": False,
+            "reason": "Capture plane must not lie downstream of the forebody start",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+
+    dtheta_fore_eff = theta_fore + float(alpha_deg)
+    if dtheta_fore_eff <= 0.0:
+        return {
+            "ok": False,
+            "reason": "Non-positive forebody effective turn",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+
+    shf = oblique_shock_tpg(M0, dtheta_fore_eff, fs["T0"])
+    if shf is None:
+        return {
+            "ok": False,
+            "reason": "Forebody shock unattached",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+    beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio, _, T_fore, _ = shf
+
+    dtheta1 = theta1 - theta_fore
+    if dtheta1 <= 0.0:
+        return {
+            "ok": False,
+            "reason": "Invalid ramp 1 turn from frozen geometry",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+    sh1 = oblique_shock_tpg(M_fore, dtheta1, T_fore)
+    if sh1 is None:
+        return {
+            "ok": False,
+            "reason": "Ramp 1 shock unattached",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+    beta1_rel, M1, p21, pt21, _, T1_s, _ = sh1
+
+    dtheta2 = theta2 - theta1
+    if dtheta2 <= 0.0:
+        return {
+            "ok": False,
+            "reason": "Invalid ramp 2 turn from frozen geometry",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+    sh2 = oblique_shock_tpg(M1, dtheta2, T1_s)
+    if sh2 is None:
+        return {
+            "ok": False,
+            "reason": "Ramp 2 shock unattached",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+    beta2_rel, M2, p32, pt32, _, T2_s, _ = sh2
+
+    shock_rays = [
+        {
+            "name": "forebody",
+            "origin_xy": P_fore,
+            "angle_deg": float(beta_fore_rel),
+            "dir_xy": unit_from_angle_deg(float(beta_fore_rel)),
+            "flow_angle_deg": float(theta_fore),
+            "M_down": float(M_fore),
+            "T_down": float(T_fore),
+            "p_ratio_cumulative": float(p_fore_ratio),
+        },
+        {
+            "name": "ramp1",
+            "origin_xy": P0,
+            "angle_deg": float(theta_fore + beta1_rel),
+            "dir_xy": unit_from_angle_deg(float(theta_fore + beta1_rel)),
+            "flow_angle_deg": float(theta1),
+            "M_down": float(M1),
+            "T_down": float(T1_s),
+            "p_ratio_cumulative": float(p_fore_ratio * p21),
+        },
+        {
+            "name": "ramp2",
+            "origin_xy": P1,
+            "angle_deg": float(theta1 + beta2_rel),
+            "dir_xy": unit_from_angle_deg(float(theta1 + beta2_rel)),
+            "flow_angle_deg": float(theta2),
+            "M_down": float(M2),
+            "T_down": float(T2_s),
+            "p_ratio_cumulative": float(p_fore_ratio * p21 * p32),
+        },
+    ]
+
+    lower_capture_xy = np.array([x_capture, P_fore[1]], dtype=float)
+
+    current_point = np.asarray(C, dtype=float)
+    swallowed_path = [current_point.copy()]
+    bend_points = {}
+
+    stages = [
+        ("post_ramp2", theta2, "ramp2"),
+        ("post_ramp1", theta1, "ramp1"),
+        ("post_forebody", theta_fore, "forebody"),
+    ]
+
+    for stage_name, flow_angle_deg, shock_name in stages:
+        upstream_dir = -unit_from_angle_deg(flow_angle_deg)
+        shock = next((r for r in shock_rays if r["name"] == shock_name), None)
+        if shock is None:
+            continue
+        hit = _ray_infinite_line_intersection(
+            current_point,
+            upstream_dir,
+            shock["origin_xy"],
+            shock["dir_xy"],
+        )
+        if hit is None:
+            continue
+        if hit[0] <= x_capture + 1.0e-12:
+            if abs(upstream_dir[0]) <= 1.0e-12:
+                return {
+                    "ok": False,
+                    "reason": "Backward streamline is nearly vertical at the entrance plane",
+                    "x_capture_m": x_capture,
+                    "h_swallowed_m": 0.0,
+                    "A_swallowed_m2": 0.0,
+                    "mdot_swallowed_kgs": 0.0,
+                }
+            lam = (x_capture - current_point[0]) / upstream_dir[0]
+            current_point = current_point + lam * upstream_dir
+            swallowed_path.append(current_point.copy())
+            break
+        current_point = hit
+        swallowed_path.append(current_point.copy())
+        bend_points[shock_name] = hit.copy()
+    else:
+        current_point = np.array([x_capture, current_point[1]], dtype=float)
+        swallowed_path.append(current_point.copy())
+
+    upper_capture_xy = np.asarray(swallowed_path[-1], dtype=float)
+    y_upper = float(upper_capture_xy[1])
+
+    if y_upper < lower_capture_xy[1] - 1.0e-12:
+        return {
+            "ok": False,
+            "reason": "Computed cowl-side boundary lies above the lower entrance boundary",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+
+    h_swallowed = max(0.0, y_upper - lower_capture_xy[1])
+    A_swallowed = width_m * h_swallowed
+
+    region_tag = "freestream"
+    rho_capture = float(fs["rho0"])
+    Vx_capture = float(fs["V0"])
+
+    if use_shocked_density and x_capture > float(P_fore[0]) + 1.0e-12:
+        p_fore = float(fs["p0"] * p_fore_ratio)
+        gamma_fore = gamma_air(T_fore)
+        a_fore = math.sqrt(gamma_fore * R * T_fore)
+        V_fore = M_fore * a_fore
+        rho_fore = p_fore / (R * T_fore)
+        Vx_fore = V_fore * math.cos(math.radians(theta_fore))
+
+        p1 = float(fs["p0"] * p_fore_ratio * p21)
+        gamma1 = gamma_air(T1_s)
+        a1 = math.sqrt(gamma1 * R * T1_s)
+        V1 = M1 * a1
+        rho1 = p1 / (R * T1_s)
+        Vx1 = V1 * math.cos(math.radians(theta1))
+
+        p2 = float(fs["p0"] * p_fore_ratio * p21 * p32)
+        gamma2 = gamma_air(T2_s)
+        a2 = math.sqrt(gamma2 * R * T2_s)
+        V2 = M2 * a2
+        rho2 = p2 / (R * T2_s)
+        Vx2 = V2 * math.cos(math.radians(theta2))
+
+        y_mid = 0.5 * (y_upper + lower_capture_xy[1])
+        y_fore = _ray_y_at_x(P_fore, float(beta_fore_rel), x_capture)
+        y_s1 = _ray_y_at_x(P0, float(theta_fore + beta1_rel), x_capture)
+        y_s2 = _ray_y_at_x(P1, float(theta1 + beta2_rel), x_capture)
+
+        if y_mid >= y_s2:
+            region_tag = "post_ramp2"
+            rho_capture = rho2
+            Vx_capture = Vx2
+        elif y_mid >= y_s1:
+            region_tag = "post_ramp1"
+            rho_capture = rho1
+            Vx_capture = Vx1
+        elif y_mid >= y_fore:
+            region_tag = "post_forebody"
+            rho_capture = rho_fore
+            Vx_capture = Vx_fore
+        else:
+            region_tag = "freestream"
+            rho_capture = float(fs["rho0"])
+            Vx_capture = float(fs["V0"])
+    else:
+        y_fore = float(P_fore[1])
+        y_s1 = float("nan")
+        y_s2 = float("nan")
+
+    mdot_swallowed = max(0.0, rho_capture * Vx_capture * A_swallowed)
+
+    return {
+        "ok": True,
+        "reason": "",
+        "x_capture_m": x_capture,
+        "lower_boundary_name": "forebody_start",
+        "upper_boundary_name": "piecewise_cowl_streamline",
+        "upper_boundary_selection_reason": "traced backward from cowl lip across external flow-turn regions",
+        "lower_capture_xy": lower_capture_xy,
+        "upper_capture_xy": upper_capture_xy,
+        "swallowed_boundary_xy": np.asarray(swallowed_path, dtype=float),
+        "h_swallowed_m": h_swallowed,
+        "A_swallowed_m2": A_swallowed,
+        "region_tag": region_tag,
+        "rho_capture_kgm3": float(rho_capture),
+        "Vx_capture_ms": float(Vx_capture),
+        "mdot_swallowed_kgs": mdot_swallowed,
+        "shock_intersections": {
+            "forebody_y_m": float(y_fore),
+            "ramp1_y_m": float(y_s1),
+            "ramp2_y_m": float(y_s2),
+        },
+        "streamtube_meta": {
+            "capture_plane_definition": "forebody_leading_edge_plane",
+            "upper_boundary_model": "piecewise_reverse_streamline",
+            "lower_boundary_model": "forebody_start_point",
+            "uses_shocked_density": bool(use_shocked_density),
+            "upstream_margin_m": float(upstream_margin_m),
+            "bend_points": bend_points,
+        },
+    }
+
+
 def _rectangle_polar_boundary(theta, half_width, half_height):
     c = math.cos(theta)
     s = math.sin(theta)
@@ -742,6 +1212,22 @@ def solve_forebody_start_from_focus(focus_point, theta_fore, shock_fore_abs):
         raise ValueError("Computed forebody start is not upstream of the nose.")
 
     return -s_fore * forebody_dir
+
+def solve_forebody_from_length(theta_fore, forebody_length_m):
+    forebody_length_m = float(forebody_length_m)
+    if forebody_length_m <= 0.0:
+        raise ValueError("forebody_length_m must be positive.")
+
+    P_fore = np.array([0.0, 0.0], dtype=float)
+    P0 = forebody_length_m * unit_from_angle_deg(theta_fore)
+    return P_fore, P0
+
+def translate_external_geometry(geom, delta_xy):
+    delta_xy = np.asarray(delta_xy, dtype=float)
+    translated = dict(geom)
+    for key in ("P0", "P1", "C", "F", "focus_point"):
+        translated[key] = np.asarray(geom[key], dtype=float) + delta_xy
+    return translated
 
 def solve_cowl_stage(M2, theta2, leading_edge_angle_deg, T2=None):
     theta_cowl = -leading_edge_angle_deg
@@ -1169,6 +1655,7 @@ def build_d2r_result(fs,A_capture_required,h_req_normal,
 
         "rho0_kgm3": fs["rho0"],
         "V0_ms": fs["V0"],
+        "width_m": width_m,
         "A_capture_required_m2": A_capture_required,
         "opening_normal_to_ramp2_m": h_req_normal,
 
@@ -1457,7 +1944,7 @@ def _diffuser_subsonic_exit_state(diffuser, M_in, T_in, Pt_in, Tt0,
 def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
     mdot_required,width_m,forebody_separation_margin=_LEG_FB_MARGIN,
     ramp_separation_margin=_LEG_RP_MARGIN,kantrowitz_margin=_LEG_KZ_MARGIN,
-    shock_focus_factor=_LEG_FOCUS_FACTOR,):
+    shock_focus_factor=_LEG_FOCUS_FACTOR,forebody_length_m=None,):
 
     validate_d2r_inputs(
         M0=M0,
@@ -1511,11 +1998,26 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         shock_focus_factor=shock_focus_factor,
     )
 
-    P_fore = solve_forebody_start_from_focus(
-        focus_point=geom["focus_point"],
-        theta_fore=forebody["theta_fore"],
-        shock_fore_abs=forebody["shock_fore_abs"],
-    )
+    # Legacy behavior kept for reference: the forebody start is back-solved so
+    # the forebody shock passes through the common external-shock focus.
+    # P_fore = solve_forebody_start_from_focus(
+    #     focus_point=geom["focus_point"],
+    #     theta_fore=forebody["theta_fore"],
+    #     shock_fore_abs=forebody["shock_fore_abs"],
+    # )
+
+    if forebody_length_m is None:
+        P_fore = solve_forebody_start_from_focus(
+            focus_point=geom["focus_point"],
+            theta_fore=forebody["theta_fore"],
+            shock_fore_abs=forebody["shock_fore_abs"],
+        )
+    else:
+        P_fore, P0_target = solve_forebody_from_length(
+            theta_fore=forebody["theta_fore"],
+            forebody_length_m=forebody_length_m,
+        )
+        geom = translate_external_geometry(geom, P0_target - geom["P0"])
 
     # 1) Size throat from Kantrowitz using pre-cowl-shock Mach M2
     throat_k = size_throat_from_kantrowitz(
@@ -1593,11 +2095,12 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
     pt_frac_after_shock1 = forebody["pt_fore_ratio"] * ramp1["pt_ratio"]
     pt_frac_after_shock2 = forebody["pt_fore_ratio"] * ramp1["pt_ratio"] * ramp2["pt_ratio"]
 
-    return {
+    result = {
         "success": True,
 
         "rho0_kgm3": fs["rho0"],
         "V0_ms": fs["V0"],
+        "width_m": width_m,
         "A_capture_required_m2": A_capture_required,
         "opening_normal_to_ramp2_m": h_req_normal,
 
@@ -1687,6 +2190,37 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         "A_combustor_face": diffuser["A_exit"],
     }
 
+    capture = compute_effective_capture_area(
+        result, M0=M0, altitude_m=altitude_m, alpha_deg=alpha_deg,
+    )
+    swallowed = compute_swallowed_streamtube(
+        result, M0=M0, altitude_m=altitude_m, alpha_deg=alpha_deg,
+    )
+    result.update({
+        "effective_capture_ok": bool(capture.get("ok", False)),
+        "effective_capture_reason": str(capture.get("reason", "")),
+        "capture_plane_x_m": float(capture.get("capture_plane_x_m", np.nan)),
+        "capture_upper_xy": np.asarray(capture.get("capture_upper_xy", [np.nan, np.nan]), dtype=float),
+        "capture_lower_xy": np.asarray(capture.get("capture_lower_xy", [np.nan, np.nan]), dtype=float),
+        "h_capture_effective_m": float(capture.get("h_capture_effective_m", 0.0)),
+        "A_capture_effective_m2": float(capture.get("A_capture_effective_m2", 0.0)),
+        "mdot_capture_effective_kgs": float(capture.get("mdot_capture_effective_kgs", 0.0)),
+        "swallowed_ok": bool(swallowed.get("ok", False)),
+        "swallowed_reason": str(swallowed.get("reason", "")),
+        "x_capture_swallowed_m": float(swallowed.get("x_capture_m", np.nan)),
+        "lower_capture_swallowed_xy": np.asarray(swallowed.get("lower_capture_xy", [np.nan, np.nan]), dtype=float),
+        "upper_capture_swallowed_xy": np.asarray(swallowed.get("upper_capture_xy", [np.nan, np.nan]), dtype=float),
+        "swallowed_boundary_xy": np.asarray(swallowed.get("swallowed_boundary_xy", [[np.nan, np.nan]]), dtype=float),
+        "h_swallowed_m": float(swallowed.get("h_swallowed_m", 0.0)),
+        "A_swallowed_m2": float(swallowed.get("A_swallowed_m2", 0.0)),
+        "rho_capture_swallowed_kgm3": float(swallowed.get("rho_capture_kgm3", np.nan)),
+        "Vx_capture_swallowed_ms": float(swallowed.get("Vx_capture_ms", np.nan)),
+        "mdot_swallowed_kgs": float(swallowed.get("mdot_swallowed_kgs", 0.0)),
+        "swallowed_region_tag": str(swallowed.get("region_tag", "")),
+        "swallowed_upper_boundary_name": str(swallowed.get("upper_boundary_name", "")),
+    })
+    return result
+
 def print_d2r_report(result):
     if not result.get("success", False):
         print("FAILED")
@@ -1704,6 +2238,10 @@ def print_d2r_report(result):
     print(f"Density                         = {result['rho0_kgm3']:.4f} kg/m^3")
     print(f"Velocity                        = {result['V0_ms']:.2f} m/s")
     print(f"Capture area required           = {result['A_capture_required_m2']:.6f} m^2")
+    print(f"Capture area effective          = {result.get('A_capture_effective_m2', float('nan')):.6f} m^2")
+    print(f"Capture mdot effective          = {result.get('mdot_capture_effective_kgs', float('nan')):.6f} kg/s")
+    print(f"Swallowed area                  = {result.get('A_swallowed_m2', float('nan')):.6f} m^2")
+    print(f"Swallowed mdot                  = {result.get('mdot_swallowed_kgs', float('nan')):.6f} kg/s")
     print(f"Opening normal to Ramp 2        = {result['opening_normal_to_ramp2_m']:.6f} m")
 
     print("\nGEOMETRY / PANEL ANGLES")
@@ -1869,6 +2407,10 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
         linewidth=2, label="Throat Shock", linestyle= "--")
 
     # Shocks
+    # Legacy plotting kept for reference: force the forebody shock through the
+    # common focus.
+    # ax.plot([P_fore[0], focus[0]], [P_fore[1], focus[1]],
+    #     linestyle="--", linewidth=1.5, label="Forebody shock")
     ax.plot([P_fore[0], x_end], [P_fore[1], y_fore_end],
         linestyle="--", linewidth=1.5, label="Forebody shock")
     ax.plot([P0[0], x_end], [P0[1], y_s1_end],
@@ -1933,7 +2475,8 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
 
 def sweep_d2r_margins(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
     mdot_required,width_m,forebody_margin_values,ramp_margin_values,
-    kantrowitz_margin=_LEG_KZ_MARGIN,shock_focus_factor=_LEG_FOCUS_FACTOR,verbose=True,):
+    kantrowitz_margin=_LEG_KZ_MARGIN,shock_focus_factor=_LEG_FOCUS_FACTOR,
+    forebody_length_m=None,verbose=True,):
 
     best_result = None
     best_forebody_margin = None
@@ -1955,6 +2498,7 @@ def sweep_d2r_margins(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
                     ramp_separation_margin=rp_margin,
                     kantrowitz_margin=kantrowitz_margin,
                     shock_focus_factor=shock_focus_factor,
+                    forebody_length_m=forebody_length_m,
                 )
 
                 pt = result["pt_frac_after_immediate_normal_shock"]
@@ -2101,6 +2645,13 @@ def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
     pt_frac_after_cascade = float(cascade["pt_frac_after_cascade"])
     Pt_after_cascade      = Pt0 * pt_frac_after_cascade
 
+    capture = compute_effective_capture_area(
+        result, M0=M0, altitude_m=altitude_m, alpha_deg=alpha_deg,
+    )
+    swallowed = compute_swallowed_streamtube(
+        result, M0=M0, altitude_m=altitude_m, alpha_deg=alpha_deg,
+    )
+
     return {
         "ok":             True,
         "T0":             T0,        "p0": p0,      "rho0": rho0, "a0": a0,
@@ -2126,6 +2677,8 @@ def _upstream_shock_chain(result, M0, altitude_m, alpha_deg):
         "shock2_abs_deg":     theta1 + beta2_rel,
         "cowl_shock_abs_deg": theta2 - beta_cowl_rel,
         "cascade":            cascade,
+        "effective_capture":  capture,
+        "swallowed_streamtube": swallowed,
     }
 
 
@@ -2164,6 +2717,8 @@ def compute_inlet_capability(result, M0, altitude_m, alpha_deg):
     Pt_after_cowl    = up["Pt_after_cowl"]
     Pt_after_cascade = up["Pt_after_cascade"]
     Tt0              = up["Tt0"]
+    capture          = up.get("effective_capture", {})
+    swallowed        = up.get("swallowed_streamtube", {})
 
     diff = _diffuser_subsonic_exit_state(
         diffuser,
@@ -2195,6 +2750,27 @@ def compute_inlet_capability(result, M0, altitude_m, alpha_deg):
         "pt_frac_deliverable":    float(pt_frac_deliverable),
         "A_throat":               float(diff["A_throat"]),
         "A_exit":                 float(diff["A_exit"]),
+        "effective_capture_ok":   bool(capture.get("ok", False)),
+        "effective_capture_reason": str(capture.get("reason", "")),
+        "capture_plane_x_m":      float(capture.get("capture_plane_x_m", np.nan)),
+        "capture_upper_xy":       np.asarray(capture.get("capture_upper_xy", [np.nan, np.nan]), dtype=float),
+        "capture_lower_xy":       np.asarray(capture.get("capture_lower_xy", [np.nan, np.nan]), dtype=float),
+        "h_capture_effective_m":  float(capture.get("h_capture_effective_m", 0.0)),
+        "A_capture_effective_m2": float(capture.get("A_capture_effective_m2", 0.0)),
+        "mdot_capture_effective_kgs": float(capture.get("mdot_capture_effective_kgs", 0.0)),
+        "swallowed_ok":           bool(swallowed.get("ok", False)),
+        "swallowed_reason":       str(swallowed.get("reason", "")),
+        "x_capture_swallowed_m":  float(swallowed.get("x_capture_m", np.nan)),
+        "lower_capture_swallowed_xy": np.asarray(swallowed.get("lower_capture_xy", [np.nan, np.nan]), dtype=float),
+        "upper_capture_swallowed_xy": np.asarray(swallowed.get("upper_capture_xy", [np.nan, np.nan]), dtype=float),
+        "swallowed_boundary_xy": np.asarray(swallowed.get("swallowed_boundary_xy", [[np.nan, np.nan]]), dtype=float),
+        "h_swallowed_m":          float(swallowed.get("h_swallowed_m", 0.0)),
+        "A_swallowed_m2":         float(swallowed.get("A_swallowed_m2", 0.0)),
+        "rho_capture_swallowed_kgm3": float(swallowed.get("rho_capture_kgm3", np.nan)),
+        "Vx_capture_swallowed_ms": float(swallowed.get("Vx_capture_ms", np.nan)),
+        "mdot_swallowed_kgs":     float(swallowed.get("mdot_swallowed_kgs", 0.0)),
+        "swallowed_region_tag":   str(swallowed.get("region_tag", "")),
+        "swallowed_upper_boundary_name": str(swallowed.get("upper_boundary_name", "")),
     }
 
 
@@ -2223,6 +2799,8 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg):
     Pt_after_cascade = up["Pt_after_cascade"]
     Tt0              = up["Tt0"]
     cascade          = up["cascade"]
+    capture          = up.get("effective_capture", {})
+    swallowed        = up.get("swallowed_streamtube", {})
 
     diff = _diffuser_subsonic_exit_state(
         result["diffuser"],
@@ -2290,6 +2868,27 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg):
         "Pt_after_cascade":    Pt_after_cascade,
         "Pt3_deliverable":     diff["Pt3"],
         "Tt0":                 Tt0,
+        "effective_capture_ok":   bool(capture.get("ok", False)),
+        "effective_capture_reason": str(capture.get("reason", "")),
+        "capture_plane_x_m":      float(capture.get("capture_plane_x_m", np.nan)),
+        "capture_upper_xy":       np.asarray(capture.get("capture_upper_xy", [np.nan, np.nan]), dtype=float),
+        "capture_lower_xy":       np.asarray(capture.get("capture_lower_xy", [np.nan, np.nan]), dtype=float),
+        "h_capture_effective_m":  float(capture.get("h_capture_effective_m", 0.0)),
+        "A_capture_effective_m2": float(capture.get("A_capture_effective_m2", 0.0)),
+        "mdot_capture_effective_kgs": float(capture.get("mdot_capture_effective_kgs", 0.0)),
+        "swallowed_ok":           bool(swallowed.get("ok", False)),
+        "swallowed_reason":       str(swallowed.get("reason", "")),
+        "x_capture_swallowed_m":  float(swallowed.get("x_capture_m", np.nan)),
+        "lower_capture_swallowed_xy": np.asarray(swallowed.get("lower_capture_xy", [np.nan, np.nan]), dtype=float),
+        "upper_capture_swallowed_xy": np.asarray(swallowed.get("upper_capture_xy", [np.nan, np.nan]), dtype=float),
+        "swallowed_boundary_xy": np.asarray(swallowed.get("swallowed_boundary_xy", [[np.nan, np.nan]]), dtype=float),
+        "h_swallowed_m":          float(swallowed.get("h_swallowed_m", 0.0)),
+        "A_swallowed_m2":         float(swallowed.get("A_swallowed_m2", 0.0)),
+        "rho_capture_swallowed_kgm3": float(swallowed.get("rho_capture_kgm3", np.nan)),
+        "Vx_capture_swallowed_ms": float(swallowed.get("Vx_capture_ms", np.nan)),
+        "mdot_swallowed_kgs":     float(swallowed.get("mdot_swallowed_kgs", 0.0)),
+        "swallowed_region_tag":   str(swallowed.get("region_tag", "")),
+        "swallowed_upper_boundary_name": str(swallowed.get("upper_boundary_name", "")),
     }
 
 def plot_fixed_geometry_case(ax,case,shock_extension_factor=_SHOCK_EXT_FACTOR,
@@ -2356,6 +2955,9 @@ def plot_fixed_geometry_case(ax,case,shock_extension_factor=_SHOCK_EXT_FACTOR,
     ax.plot(cowl_curve[:, 0], cowl_curve[:, 1], linewidth=1.5)
     ax.plot([T_lower[0], T_upper[0]], [T_lower[1], T_upper[1]], linewidth=1.5, linestyle=":")
 
+    # Legacy plotting kept for reference: force the forebody shock through the
+    # common focus.
+    # ax.plot([P_fore[0], focus[0]], [P_fore[1], focus[1]], linestyle="--", linewidth=1.0)
     ax.plot([P_fore[0], x_end], [P_fore[1], y_fore_end], linestyle="--", linewidth=1.0)
     ax.plot([P0[0], x_end], [P0[1], y_s1_end], linestyle="--", linewidth=1.0)
     ax.plot([P1[0], x_end], [P1[1], y_s2_end], linestyle="--", linewidth=1.0)
@@ -2502,7 +3104,7 @@ from pyc_config import (
     INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
     INLET_DESIGN_MDOT_KGS, INLET_FOREBODY_SEP_MARGIN,
     INLET_RAMP_SEP_MARGIN, INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
-    INLET_DESIGN_WIDTH_M
+    INLET_DESIGN_WIDTH_M, INLET_FOREBODY_LENGTH_M
 )
 ##SWEEP METHOD TO FIND BEST GEOMETRY
 Sweep = True
@@ -2523,6 +3125,7 @@ if Sweep:
             ramp_margin_values=ramp_margin_values,
             kantrowitz_margin=INLET_KANTROWITZ_MARGIN,
             shock_focus_factor=INLET_SHOCK_FOCUS_FACTOR,
+            forebody_length_m=INLET_FOREBODY_LENGTH_M,
             verbose=True,
         )
 
@@ -2541,6 +3144,7 @@ else:
             leading_edge_angle_deg=INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
             mdot_required=INLET_DESIGN_MDOT_KGS,
             width_m=INLET_DESIGN_WIDTH_M,
+            forebody_length_m=INLET_FOREBODY_LENGTH_M,
             forebody_separation_margin=INLET_FOREBODY_SEP_MARGIN,
             ramp_separation_margin=INLET_RAMP_SEP_MARGIN,
             kantrowitz_margin=INLET_KANTROWITZ_MARGIN,

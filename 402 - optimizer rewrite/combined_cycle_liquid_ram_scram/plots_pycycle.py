@@ -638,6 +638,12 @@ def fig_flowpath(
     brk2             = _sh(brk2)
     cowl             = _sh(cowl)
     foot             = _sh(foot)
+    swallowed_boundary = _sh(np.asarray(
+        design.get('swallowed_boundary_xy', [[np.nan, np.nan]]), dtype=float))
+    swallowed_upper  = _sh(np.asarray(
+        design.get('upper_capture_swallowed_xy', [np.nan, np.nan]), dtype=float))
+    swallowed_lower  = _sh(np.asarray(
+        design.get('lower_capture_swallowed_xy', [np.nan, np.nan]), dtype=float))
     duct_x0       -= origin_x
     duct_x1       -= origin_x
     duct_bottom_y -= origin_y
@@ -660,9 +666,10 @@ def fig_flowpath(
             color='gray', lw=1.2, label='Throat')
 
     # ── Primary compression shocks (forebody, ramp1, ramp2) + cowl shock ───
-    # Forebody/ramp1/ramp2 shocks all converge at the shock focus point (by
-    # design). The cowl shock emanates from the cowl lip and impinges on the
-    # ramp-2 line at the focus (shock-on-lip) or at F.
+    # Ramp-1 and ramp-2 shocks still converge at the stored external-shock
+    # focus. The forebody shock is now drawn as its own ray from the forebody
+    # leading edge so an explicit forebody length can decouple it from that
+    # common focus.
     focus  = _sh(np.asarray(design['shock_focus_xy'], dtype=float))
     lower_wall = np.vstack([brk2, t_lo])
     shock_segments = _inlet2.build_internal_shock_segments(
@@ -675,17 +682,43 @@ def fig_flowpath(
         lower_wall_xy=lower_wall,
         upper_wall_xy=inlet_upper,
     )
-    shock_origins = [
-        (fore, design['shock_fore_abs_deg'], 'Forebody shock'),
-        (nose, design['shock1_abs_deg'],     'Ramp-1 shock'),
-        (brk2, design['shock2_abs_deg'],     'Ramp-2 shock'),
-    ]
-    shock_label_used = False
-    for origin, ang_deg, lbl in shock_origins:
-        ax.plot([origin[0], focus[0]], [origin[1], focus[1]],
-                '-.', color='crimson', lw=1.1,
-                label='Compression shocks' if not shock_label_used else None)
-        shock_label_used = True
+    x_end = 1.05 * max(
+        float(np.max(inlet_upper[:, 0])),
+        float(np.max(inlet_lower[:, 0])),
+        float(focus[0]),
+    )
+    fore_shock_dir = _inlet2.unit_from_angle_deg(design['shock_fore_abs_deg'])
+    lam_fore_end = (x_end - fore[0]) / fore_shock_dir[0]
+    fore_shock_end = fore + lam_fore_end * fore_shock_dir
+
+    # Legacy plotting kept for reference: all three compression shocks were
+    # drawn to the common external-shock focus.
+    # shock_origins = [
+    #     (fore, design['shock_fore_abs_deg'], 'Forebody shock'),
+    #     (nose, design['shock1_abs_deg'],     'Ramp-1 shock'),
+    #     (brk2, design['shock2_abs_deg'],     'Ramp-2 shock'),
+    # ]
+    # shock_label_used = False
+    # for origin, ang_deg, lbl in shock_origins:
+    #     ax.plot([origin[0], focus[0]], [origin[1], focus[1]],
+    #             '-.', color='crimson', lw=1.1,
+    #             label='Compression shocks' if not shock_label_used else None)
+    #     shock_label_used = True
+
+    ax.plot([fore[0], fore_shock_end[0]], [fore[1], fore_shock_end[1]],
+            '-.', color='crimson', lw=1.1, label='Compression shocks')
+    ax.plot([nose[0], focus[0]], [nose[1], focus[1]],
+            '-.', color='crimson', lw=1.1)
+    ax.plot([brk2[0], focus[0]], [brk2[1], focus[1]],
+            '-.', color='crimson', lw=1.1)
+
+    if swallowed_boundary.ndim == 2 and swallowed_boundary.shape[0] >= 2 and np.all(np.isfinite(swallowed_boundary)):
+        ax.plot(swallowed_boundary[:, 0], swallowed_boundary[:, 1],
+                '--', color='teal', lw=1.6, label='Swallowed streamtube boundary')
+    if np.all(np.isfinite(swallowed_upper)) and np.all(np.isfinite(swallowed_lower)):
+        ax.plot([swallowed_lower[0], swallowed_upper[0]],
+                [swallowed_lower[1], swallowed_upper[1]],
+                '-', color='teal', lw=2.0, alpha=0.9, label='Freestream capture segment')
 
     cowl_label_used = False
     cascade_label_used = False
@@ -1155,6 +1188,67 @@ def fig_performance_vs_aoa(results, alpha_range,
     fig.suptitle(f'pyc_run AoA sweep  '
                  f'(M0={M0}, alt={altitude_m/1e3:.1f} km, phi={phi})')
     _save(fig, 'performance_vs_aoa')
+
+
+def fig_performance_along_climb_path(design, phi=PHI_DEFAULT,
+                                     mach_start=4.0, mach_end=5.0,
+                                     alt_start_m=16_000.0, alt_end_m=19_000.0,
+                                     alpha_deg=2.0, n_points=7):
+    """
+    Fixed-geometry performance map along a straight (M0, altitude) path.
+
+    Geometry is frozen at the supplied design point; only the flight condition
+    changes from (mach_start, alt_start_m) to (mach_end, alt_end_m).
+    """
+    mach_values = np.linspace(float(mach_start), float(mach_end), int(n_points))
+    alt_values_m = np.linspace(float(alt_start_m), float(alt_end_m), int(n_points))
+
+    results = []
+    for M0, altitude_m in zip(mach_values, alt_values_m):
+        try:
+            r = pyc_run.analyze(
+                M0=float(M0),
+                altitude_m=float(altitude_m),
+                phi=phi,
+                alpha_deg=float(alpha_deg),
+                design=design,
+            )
+        except Exception as exc:
+            print(f'  [warn] climb-path point failed at M0={M0:.3f}, alt={altitude_m/1e3:.3f} km: '
+                  f'{type(exc).__name__}: {exc}')
+            r = None
+        results.append(r)
+
+    fig, ax = plt.subplots(figsize=(9.5, 6.5))
+
+    mach_ok = []
+    alt_ok_km = []
+    thrust_ok_kn = []
+    isp_ok = []
+    for M0, altitude_m, r in zip(mach_values, alt_values_m, results):
+        if r is None:
+            continue
+        mach_ok.append(float(M0))
+        alt_ok_km.append(float(altitude_m) / 1e3)
+        thrust_ok_kn.append(float(r['thrust']) / 1e3)
+        isp_ok.append(float(r['Isp']))
+
+    ax.plot(mach_values, alt_values_m / 1e3, '--', color='lightgray', lw=1.2,
+            label='Requested path')
+    ax.scatter(mach_ok, alt_ok_km, s=56, color='navy', zorder=3,
+               label='Fixed-geometry evaluations')
+
+    for x, y, thrust_kn, isp_s in zip(mach_ok, alt_ok_km, thrust_ok_kn, isp_ok):
+        ax.annotate(f'{thrust_kn:.1f} kN\n{isp_s:.0f} s',
+                    xy=(x, y), xytext=(0, 9), textcoords='offset points',
+                    ha='center', va='bottom', fontsize=8,
+                    bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='0.7', alpha=0.9))
+
+    ax.set_xlabel('M0')
+    ax.set_ylabel('Altitude [km]')
+    ax.set_title(f'Fixed-Geometry Performance Along Climb Path (α={alpha_deg:.1f}°)')
+    ax.legend(loc='best', fontsize=8)
+    _save(fig, 'performance_along_climb_path')
 
 
 def fig_phi_vs_mach_alt(results_2d, mach_range, alt_range,
@@ -1807,8 +1901,8 @@ def main():
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT) #########################
-
-
+    """
+    """
 
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
@@ -1821,7 +1915,8 @@ def main():
         alt_range, M0=INLET_DESIGN_M0,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
     )
-
+    """
+    """
     # AoA sweep at fixed design Mach and altitude.
     alpha_range = np.linspace(-3.0, 6.0, 9   )
     print(f'  AoA sweep over {len(alpha_range)} points '
@@ -1833,7 +1928,8 @@ def main():
         altitude_m=INLET_DESIGN_ALT_M,
         phi=PHI_DEFAULT,
     )
-
+    """
+    """
 
     # 2-D (M0, altitude) sweep for the φ operability map.
     phi_mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 4)
@@ -1847,6 +1943,7 @@ def main():
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,         ########################
     )
     """
+
     print('\n  writing figures:')
     fig_flowpath(
         design,
@@ -1858,19 +1955,34 @@ def main():
         exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
         n_points=NOZZLE_BELL_POINTS_DEFAULT,
     )
+
+    fig_performance_along_climb_path(
+        design,
+        phi=PHI_DEFAULT,
+        mach_start=4.0,
+        mach_end=5.0,
+        alt_start_m=16_000.0,
+        alt_end_m=19_000.0,
+        alpha_deg=2.0,
+        n_points=7,
+    )
+
+    #fig_performance(results, mach_range)
+
+
     """
-    fig_performance(results, mach_range)
-
-
     fig_performance_vs_alt(
         alt_results, alt_range,
         M0=INLET_DESIGN_M0, alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,
     )
+    """
+    """
     fig_performance_vs_aoa(
         aoa_results, alpha_range,
         M0=INLET_DESIGN_M0, altitude_m=INLET_DESIGN_ALT_M, phi=PHI_DEFAULT,
     )
-
+    """
+    """
 
     fig_phi_vs_mach_alt(
         phi_map_results, phi_mach_range, phi_alt_range,
@@ -1883,8 +1995,8 @@ def main():
     fig_ram_diagnostics(results, mach_range)
     #fig_engine_pressure_profile(design, design_cycle)
     #fig_engine_temperature_profile(design, design_cycle)
+    
     """
-
 
     print(f'\n  generating 3D CAD model (wall={cad_wall_thickness_m*1e3:.1f} mm) ...')
     try:
