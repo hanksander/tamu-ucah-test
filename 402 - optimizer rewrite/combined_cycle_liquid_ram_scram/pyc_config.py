@@ -171,6 +171,13 @@ COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
 NOZZLE_AR                = 9  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
+# Vertical offset (in plot/data y) applied to the combustor + nozzle relative
+# to the throat top. Positive shifts the combustor away from the body axis
+# (downward in the inverted-y display). The diffuser walls are re-lofted to
+# meet the offset combustor face; the inlet, ramps, throat, and constant-area
+# section are left untouched.
+COMBUSTOR_Y_OFFSET_M = 0.16
+
 # Efficiencies
 ETA_COMBUSTOR        = 0.85   # combustion efficiency
 ETA_NOZZLE_CV        = 0.97   # nozzle velocity coefficient (Cv)
