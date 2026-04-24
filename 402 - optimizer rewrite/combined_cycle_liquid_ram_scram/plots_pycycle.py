@@ -662,8 +662,6 @@ def fig_flowpath(
             label='Cowl')
 
     # Throat line (drawn between upper and lower xy)
-    ax.plot([t_up[0], t_lo[0]], [t_up[1], t_lo[1]], '--',
-            color='gray', lw=1.2, label='Throat')
 
     # ── Primary compression shocks (forebody, ramp1, ramp2) + cowl shock ───
     # Ramp-1 and ramp-2 shocks still converge at the stored external-shock
@@ -671,16 +669,28 @@ def fig_flowpath(
     # leading edge so an explicit forebody length can decouple it from that
     # common focus.
     focus  = _sh(np.asarray(design['shock_focus_xy'], dtype=float))
-    lower_wall = np.vstack([brk2, t_lo])
+    lower_wall_parts = [inlet_floor]
+    if layout['const_area_len'] > 0.0:
+        lower_wall_parts.append(const_area_lower[1:])
+    if layout['diff_len'] > 0.0:
+        lower_wall_parts.append(diff_lower[1:])
+    lower_wall = np.vstack(lower_wall_parts)
+
+    upper_wall_parts = [inlet_upper]
+    if layout['const_area_len'] > 0.0:
+        upper_wall_parts.append(const_area_upper[1:])
+    if layout['diff_len'] > 0.0:
+        upper_wall_parts.append(diff_upper[1:])
+    upper_wall = np.vstack(upper_wall_parts)
+
     shock_segments = _inlet2.build_internal_shock_segments(
         C=cowl,
         F=foot,
         T_upper=t_up,
         T_lower=t_lo,
         cowl_shock_abs_deg=design['cowl_shock_abs_deg'],
-        reflection_list=design.get('reflection_list') or [],
         lower_wall_xy=lower_wall,
-        upper_wall_xy=inlet_upper,
+        upper_wall_xy=upper_wall,
     )
     x_end = 1.05 * max(
         float(np.max(inlet_upper[:, 0])),
@@ -721,8 +731,6 @@ def fig_flowpath(
                 '-', color='teal', lw=2.0, alpha=0.9, label='Freestream capture segment')
 
     cowl_label_used = False
-    cascade_label_used = False
-    terminal_label_used = False
     for seg in shock_segments:
         start = seg['start']
         end = seg['end']
@@ -731,35 +739,20 @@ def fig_flowpath(
                     '-.', color='darkred', lw=1.3,
                     label='Cowl shock' if not cowl_label_used else None)
             cowl_label_used = True
-        elif seg['kind'] == 'reflection':
-            ax.plot([start[0], end[0]], [start[1], end[1]],
-                    '-.', color='coral', lw=1.0,
-                    label='Reflected shocks' if not cascade_label_used else None)
-            cascade_label_used = True
-        elif seg['kind'] == 'terminal':
-            ax.plot([start[0], end[0]], [start[1], end[1]],
-                    '-', color='black', lw=1.4,
-                    label='Terminal normal shock' if not terminal_label_used else None)
-            terminal_label_used = True
 
     # ── Subsonic diffuser walls (throat -> combustor face) ─────────────────
     ax.plot(inlet_floor[:, 0], inlet_floor[:, 1],
             '-', color='slateblue', lw=2.0, label='Inlet floor closure')
     if layout['const_area_len'] > 0.0:
         ax.plot(const_area_upper[:, 0], const_area_upper[:, 1],
-                '-', color='mediumpurple', lw=2.0, label='Constant-area section')
+                '-', color='slateblue', lw=2.0)
         ax.plot(const_area_lower[:, 0], const_area_lower[:, 1],
-                '-', color='mediumpurple', lw=2.0)
-        ax.fill_between(const_area_upper[:, 0],
-                        const_area_lower[:, 1], const_area_upper[:, 1],
-                        color='mediumpurple', alpha=0.08)
+                '-', color='slateblue', lw=2.0)
     if layout['diff_len'] > 0.0:
         ax.plot(diff_upper[:, 0], diff_upper[:, 1],
                 '-', color='slateblue', lw=2.0, label='Diffuser')
         ax.plot(diff_lower[:, 0], diff_lower[:, 1],
                 '-', color='slateblue', lw=2.0)
-        ax.fill_between(diff_upper[:, 0], diff_lower[:, 1], diff_upper[:, 1],
-                        color='slateblue', alpha=0.06)
 
     # ── Combustor duct ──────────────────────────────────────────────────────
     duct = Rectangle((duct_x0, duct_bottom_y), duct_len, duct_height,
@@ -785,6 +778,49 @@ def fig_flowpath(
 # ---------------------------------------------------------------------------
 # 3D CAD export (trimesh) — inlet + diffuser + combustor + nozzle shell
 # ---------------------------------------------------------------------------
+
+def _export_step_from_trimesh_mesh(mesh, output_path):
+    """
+    Export a triangulated trimesh mesh to STEP via an optional cadquery/OCP
+    backend by wrapping each triangle as a planar B-rep face.
+
+    This is intentionally a best-effort path: it preserves geometry for CAD
+    interchange when a STEP-capable backend is installed, while keeping the
+    default mesh-export workflow dependency-light.
+    """
+    try:
+        import cadquery as cq
+    except Exception as exc:
+        raise RuntimeError(
+            "STEP export requires cadquery with its OCP/OpenCascade backend "
+            "installed. STL/OBJ/PLY export is still available."
+        ) from exc
+
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    cq_faces = []
+
+    for tri in faces:
+        pts = [cq.Vector(*vertices[int(idx)]) for idx in tri]
+        edges = [
+            cq.Edge.makeLine(pts[0], pts[1]),
+            cq.Edge.makeLine(pts[1], pts[2]),
+            cq.Edge.makeLine(pts[2], pts[0]),
+        ]
+        wire = cq.Wire.assembleEdges(edges)
+        cq_faces.append(cq.Face.makeFromWires(wire))
+
+    shape = cq.Compound.makeCompound(cq_faces)
+    cq.exporters.export(shape, output_path)
+
+
+def _export_cad_mesh(engine, output_path):
+    ext = os.path.splitext(str(output_path))[1].lower()
+    if ext in ('.stp', '.step'):
+        _export_step_from_trimesh_mesh(engine, output_path)
+        return
+    engine.export(output_path)
+
 
 def fig_cad_model(
     design,
@@ -816,7 +852,8 @@ def fig_cad_model(
     design            : dict from 402inlet2.design_2ramp_shock_matched_inlet.
     design_cycle      : dict returned by pyc_run.analyze at the design point.
     wall_thickness_m  : shell wall thickness [m].
-    output_path       : primary destination file ('.stl', '.obj', '.ply', '.glb');
+    output_path       : primary destination file ('.stl', '.obj', '.ply', '.glb',
+                        '.stp', '.step');
                         defaults to <OUTDIR>/engine_cad.stl.
     extra_output_paths: optional iterable of additional export paths.
 
@@ -1066,8 +1103,11 @@ def fig_cad_model(
             export_paths.append(path)
 
     for path in export_paths:
-        engine.export(path)
-        print(f'  wrote {path}')
+        try:
+            _export_cad_mesh(engine, path)
+            print(f'  wrote {path}')
+        except Exception as exc:
+            print(f'  [warn] CAD export skipped for {path}: {type(exc).__name__}: {exc}')
     return engine
 
 
@@ -1892,8 +1932,6 @@ def main():
         combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     )
 
-
-
     """
     # Mach sweep
     sweep_altitude_m = INLET_DESIGN_ALT_M #######################################################
@@ -1901,8 +1939,8 @@ def main():
     print(f'  Mach sweep over {len(mach_range)} points '
           f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
     results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT) #########################
-    """
-    """
+
+    
 
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
@@ -1929,8 +1967,8 @@ def main():
         phi=PHI_DEFAULT,
     )
     """
-    """
 
+    """
     # 2-D (M0, altitude) sweep for the φ operability map.
     phi_mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 4)
     phi_alt_range  = np.linspace(INLET_DESIGN_ALT_M - 1_000.0,
@@ -1983,16 +2021,18 @@ def main():
     )
     """
     """
-
+    
     fig_phi_vs_mach_alt(
         phi_map_results, phi_mach_range, phi_alt_range,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi_request=PHI_DEFAULT,
     )
-
+    
     #fig_mass_flows(results, mach_range)
     #fig_station_T(results, mach_range)
     #fig_station_Pt(results, mach_range)
-    fig_ram_diagnostics(results, mach_range)
+    """
+    #fig_ram_diagnostics(results, mach_range)
+    """
     #fig_engine_pressure_profile(design, design_cycle)
     #fig_engine_temperature_profile(design, design_cycle)
     
@@ -2006,7 +2046,7 @@ def main():
             design_cycle,
             wall_thickness_m=cad_wall_thickness_m,
             output_path=cad_base + '.stl',
-            extra_output_paths=[cad_base + '.obj', cad_base + '.ply'],
+            extra_output_paths=[cad_base + '.obj', cad_base + '.ply', cad_base + '.stp'],
             combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
             converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
             diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,

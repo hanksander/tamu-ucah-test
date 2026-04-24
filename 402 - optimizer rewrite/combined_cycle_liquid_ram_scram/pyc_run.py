@@ -53,7 +53,7 @@ from pyc_config import (
     DIFFUSER_AREA_RATIO, NOZZLE_AR, NOZZLE_AR_DEFAULT,
     DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH,
     INLET_CONSTANT_AREA_LENGTH_M,
-    PHI_DEFAULT, PHI_SEARCH_MAX,
+    PHI_DEFAULT, PHI_SEARCH_MAX, PS3_BIAS,
 )
 from pyc_ram_cycle   import RamCycle
 import nozzle_design
@@ -165,8 +165,8 @@ def build_design(
 
 
 def _compute_design_point_A_noz_throat(design: dict) -> dict:
-    """Analytic A_noz_throat at the design (M0, alt, alpha, phi) from the
-    cascade+diffuser + Rayleigh + choked-nozzle balance."""
+    """Analytic A_noz_throat at the design point from the inlet + Rayleigh +
+    choked-nozzle balance."""
     M0_des   = float(design['design_M0'])
     alt_des  = float(design['design_altitude_m'])
     alpha_des = float(design['alpha_deg'])
@@ -352,28 +352,19 @@ def compute_inlet_conditions(M0, alt_m, ramp_angles=None, alpha_deg=0.0):
 
 
 # ---------------------------------------------------------------------------
-# Cascade-only inlet-limited RAM closure
+# RAM closure with diffuser terminal shock
 # ---------------------------------------------------------------------------
 #
-# The old v2 closure swept Ps_back through the diffuser and picked a terminal
-# shock station — doubly counting Pt losses that the reflection cascade was
-# already applying. The new model is cascade-only:
+# The active RAM-mode closure now uses the diffuser terminal-shock model from
+# 402inlet2. A target combustor-face static pressure is chosen inside the
+# admissible in-diffuser range [Ps_min, Ps_max] using PS3_BIAS, then:
 #
-#   (a) _inlet2.compute_inlet_capability returns one number for Pt3 delivered
-#       to the combustor face (cascade Pt-loss + diffuser friction).
-#   (b) _solve_phi_envelope sweeps φ through the combustor at fixed (Pt3,
-#       Tt3, M3), then enforces three caps:
-#         – phi_Tt4          : material Tt4_max
-#         – phi_choke        : thermal-choke margin on M4
-#         – phi_inlet_limit  : the φ at which Pt3_req(φ) = Pt3_deliverable,
-#                              where Pt3_req is inverted from the choked
-#                              nozzle + Rayleigh chain given the frozen
-#                              A_noz_throat. Beyond this φ, the combustor
-#                              needs more Pt3 than the inlet can deliver
-#                              → inlet-expulsion unstart.
-#       All three are soft-minned with phi_request.
-#   (c) analyze() runs pyCycle exactly once at the clipped φ with
-#       ram_recovery = Pt3_deliverable / Pt0 and MN = M3_diffuser_exit.
+#   (a) _inlet2.compute_inlet_capability(..., p_back=Ps_target) solves the
+#       terminal shock location and returns Pt3/M3 delivered to the combustor.
+#   (b) _solve_phi_envelope sweeps φ through the combustor at that inlet
+#       operating point and enforces Tt4, thermal-choke, and inlet-Pt caps.
+#   (c) analyze() runs pyCycle once at the clipped φ with the terminal-shock
+#       inlet state.
 
 from scipy.interpolate import PchipInterpolator as _Pchip
 from scipy.optimize    import brentq            as _brentq
@@ -429,6 +420,55 @@ def _get_capability(design, M0, altitude_m, alpha_deg):
         if len(_inlet_cap_cache) >= _INLET_CAP_CACHE_MAX:
             _inlet_cap_cache.clear()
         _inlet_cap_cache[key] = cap
+    return cap
+
+
+def _solve_terminal_target_capability(design, M0, altitude_m, alpha_deg):
+    """
+    Solve the inlet at a target combustor-face static pressure chosen from the
+    diffuser's admissible [Ps_min, Ps_max] range.
+
+    PS3_BIAS = 0 keeps the terminal shock near diffuser exit, 1 keeps it near
+    the throat. This preserves the existing "keep the shock in the diffuser"
+    control concept without hard-coding an absolute backpressure.
+    """
+    base = _get_capability(design, M0, altitude_m, alpha_deg)
+    if not base.get('ok', False):
+        return base
+
+    Pt_after_cowl = float(base['Pt_after_cowl'])
+    Tt0 = float(base['Tt0'])
+
+    # Probe once to recover the admissible static-pressure window.
+    probe = _inlet2.solve_terminal_shock_position(
+        design,
+        p_back=0.5 * max(Pt_after_cowl, 1.0),
+        Pt_after_cowl=Pt_after_cowl,
+        Tt0=Tt0,
+    )
+    Ps_min = float(probe['Ps_min'])
+    Ps_max = float(probe['Ps_max'])
+    if not (np.isfinite(Ps_min) and np.isfinite(Ps_max) and Ps_max > Ps_min > 0.0):
+        return {
+            'ok': False,
+            'reason': 'Invalid terminal-shock pressure bracket.',
+            'terminal_probe': probe,
+            'base_capability': base,
+        }
+
+    p_back_target = Ps_min + float(np.clip(PS3_BIAS, 0.0, 1.0)) * (Ps_max - Ps_min)
+    cap = _inlet2.compute_inlet_capability(
+        design,
+        M0=M0,
+        altitude_m=altitude_m,
+        alpha_deg=alpha_deg,
+        p_back=p_back_target,
+    )
+    if not cap.get('ok', False):
+        return cap
+    cap['terminal_probe'] = probe
+    cap['p_back_target'] = float(p_back_target)
+    cap['shock_target_bias'] = float(PS3_BIAS)
     return cap
 
 
@@ -973,7 +1013,9 @@ def analyze(
     # Capture area from the frozen 2-ramp inlet geometry (402inlet2.py).
     # Legacy model kept for reference:
     # A_capture_m2 = float(design['A_capture_required_m2'])
-    capability = _get_capability(design, M0, altitude_m, eval_alpha_deg)
+    capability = _solve_terminal_target_capability(
+        design, M0, altitude_m, eval_alpha_deg,
+    )
     if not capability.get('ok', False):
         raise RuntimeError(
             f"Inlet capability failed at M0={M0}, alt={altitude_m}: "
@@ -1017,7 +1059,7 @@ def analyze(
     prob.set_val('fc.W',   W_lbms, units='lbm/s')
     prob.set_val("burner.area_ratio", 1.0)
 
-    # ── Inlet capability + φ envelope (cascade-only) ─────────────────────────
+    # Inlet capability + phi envelope
     A_noz_throat = float(design['A_noz_throat'])
     envelope_info = _solve_phi_envelope(
         capability=capability,
@@ -1037,7 +1079,8 @@ def analyze(
     FAR = phi_effective * F_STOICH_JP10
     prob.set_val("burner.Fl_I:FAR", FAR)
 
-    # Inlet inputs: ram_recovery and MN3 come straight from cascade+diffuser.
+    # Inlet inputs: ram_recovery and MN3 come from the terminal-shock diffuser
+    # solution at the target combustor-face pressure bias.
     Pt0 = float(capability['Pt0'])
     ram_recovery = float(capability['Pt3_deliverable']) / max(Pt0, 1.0e-12)
     inlet_MN = float(np.clip(capability['M3_diffuser_exit'], 0.05, 0.95))
@@ -1057,10 +1100,12 @@ def analyze(
         'ram_recovery':   ram_recovery,
         'MN_exit':        inlet_MN,
         'Pt_after_cowl':  float(capability['Pt_after_cowl']),
-        'M_after_cowl':   float(capability['M3_cascade_inlet']),
+        'M_after_cowl':   float(capability['M3_post_cowl']),
         'Tt_after_cowl':  float(capability['Tt0']),
         'unstart_flag':   unstart_flag,
-        'status':         'cascade',
+        'status':         str(capability.get('status', 'normal')),
+        'p_back_target':  float(capability.get('p_back_target', np.nan)),
+        'x_terminal_shock': float(capability.get('x_terminal_shock', np.nan)),
     }
     ram_closure = {
         'envelope':     envelope_info,
@@ -1227,6 +1272,10 @@ def analyze(
         eta_pt=ram_closure['inlet_inputs']['ram_recovery'],
         choked=choked,
         unstart_flag=ram_closure['inlet_inputs']['unstart_flag'],
+        p_back_target=float(capability.get('p_back_target', np.nan)),
+        Ps_min_terminal=float(capability.get('Ps_min', np.nan)),
+        Ps_max_terminal=float(capability.get('Ps_max', np.nan)),
+        x_terminal_shock=float(capability.get('x_terminal_shock', np.nan)),
         T_stations={
             0: _K('fc.Fl_O:stat:T'),
             2: (float(diffuser_entry_station.T)
@@ -1320,8 +1369,10 @@ def _print_cycle(r):
     print(f"\n{'='*70}")
     print(f"  RAM  |  M0={r['M0']:.2f}  "
           f"|  alt={r['altitude']/1e3:.1f} km  "
-          f"|  phi={r['phi']:.2f}")
+          f"|  phi_eff={r.get('phi_effective', r['phi']):.2f}")
     print(f"{'='*70}")
+    print(f"  phi_request={r.get('phi_request', r['phi']):.4f}  "
+          f"phi_effective={r.get('phi_effective', r['phi']):.4f}")
     print("  Station states")
     print(f"  {'Stn':>8}  {'M':>7}  {'Ts [K]':>8}  {'Tt [K]':>8}  "
           f"{'Ps [kPa]':>10}  {'Pt [kPa]':>10}")
@@ -1378,6 +1429,8 @@ def _print_cycle(r):
     print(f"  Thrust    = {r['thrust']/1e3:>8.2f} kN ")
     print(f"  mdot_air  = {r['mdot_air']:>7.3f} kg/s")
     print(f"  mdot_fuel = {r['mdot_fuel']*1e3:>7.3f} g/s")
+    print(f"  phi_req   = {r.get('phi_request', r['phi']):>8.4f}")
+    print(f"  phi_eff   = {r.get('phi_effective', r['phi']):>8.4f}")
     print(f"  eta_pt    = {r['eta_pt']:.4f}   choked={r['choked']}")
 
 
@@ -1406,7 +1459,7 @@ if __name__ == '__main__':
         verbose=True,
     )
 
-
+    """
     print("\n--- Off-Design Point Performance")
     off_design_result = analyze(
         M0=off_design_M0,
@@ -1421,7 +1474,7 @@ if __name__ == '__main__':
     print(f"  dIsp      = {off_design_result['Isp'] - design_result['Isp']:>8.1f} s")
     print(f"  dmdot_air = {off_design_result['mdot_air'] - design_result['mdot_air']:>8.3f} kg/s")
     print(f"  deta_pt   = {off_design_result['eta_pt'] - design_result['eta_pt']:>8.4f}")
-
+    """
 
 
     print("\n--- Design Point Flowpath Plot")
@@ -1456,3 +1509,4 @@ if __name__ == '__main__':
 
 #mach 4-5
 #altitude 15-24km
+

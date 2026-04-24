@@ -178,17 +178,17 @@ INLET_LEGACY_SHOCK_FOCUS_FACTOR  = 1.1
 INLET_SHOCK_EXTENSION_FACTOR = 1.40   # how far shocks are drawn past the inlet
 INLET_COWL_EXTENSION_FACTOR  = 1.25   # cowl length scale in plots
 INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
-INLET_CONSTANT_AREA_LENGTH_M = 0.25    # visual-only constant-area section ahead of diffuser [m]
+INLET_CONSTANT_AREA_LENGTH_M = 0.05    # visual-only constant-area section ahead of diffuser [m]
 
 DIFFUSER_AREA_RATIO = 4
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 12
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 1.0
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 5
 
 
 COMBUSTOR_LENGTH_M_DEFAULT = 1.05
 COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
-NOZZLE_AR                = 6  # nozzle Ae/At committed design knob
+NOZZLE_AR                = 5.243  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Vertical offset (in plot/data y) applied to the combustor + nozzle relative
@@ -241,7 +241,7 @@ ENGINE_MIN_THRUST_N         = 6_000.0
 # 1.0 → shock at throat (weak, least diffusion, safest start margin).
 # 0.7 is a conservative design-intent default — weak shock near throat,
 # mimicking typical started-mode operation.
-PS3_BIAS = 0.75
+PS3_BIAS = 0.6
 
 
 #0.14 m^3
