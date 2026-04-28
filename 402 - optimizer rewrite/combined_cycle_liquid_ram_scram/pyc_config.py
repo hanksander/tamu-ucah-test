@@ -224,7 +224,7 @@ NOZZLE_TYPE          = 'CD'   # nozzle_design.py pyCycle nozzle type: 'CD', 'CV'
 ISOLATOR_PT_RECOVERY = 0.90   # isolator total-pressure recovery (both modes)
 ETA_DIFFUSER         = 0.95   # subsonic diffuser total-pressure recovery (friction)
 
-PHI_DEFAULT = 0.9
+PHI_DEFAULT = 0.8
 
 # Upper edge of the φ search bracket used by _solve_phi_envelope when inverting
 # the Tt4 / thermal-choke / inlet-expulsion caps. Decoupled from PHI_DEFAULT so

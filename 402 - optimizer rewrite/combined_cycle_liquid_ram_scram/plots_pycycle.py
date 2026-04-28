@@ -2027,8 +2027,8 @@ def main():
     sweep_alpha_deg = 2.0
     PHI_SCHEDULE_M_LO   = 4.0
     PHI_SCHEDULE_M_HI   = 5.0
-    PHI_SCHEDULE_PHI_LO = 0.9
-    PHI_SCHEDULE_PHI_HI = 0.4
+    PHI_SCHEDULE_PHI_LO = 0.8
+    PHI_SCHEDULE_PHI_HI = 0.2
     phi_schedule_fn = lambda M: phi_schedule(
         M, PHI_SCHEDULE_M_LO, PHI_SCHEDULE_M_HI,
         PHI_SCHEDULE_PHI_LO, PHI_SCHEDULE_PHI_HI,
