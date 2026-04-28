@@ -1157,6 +1157,8 @@ def analyze(
         V9     = 0.0
         Fg_N   = 0.0
         Fn_N   = -ram_drag_N
+        nozzle_eta_Pt = 1.0
+        Pt9_Pa = Pt4_Pa
     else:
         M9 = float(_inlet2.invert_area_mach_ratio_supersonic(area_ratio_frozen,
                                                               gamma=gamma4_K))
@@ -1166,13 +1168,26 @@ def analyze(
         M9 = float(_inlet2.invert_area_mach_ratio_supersonic(area_ratio_frozen,
                                                               gamma=gamma9))
         T9 = Tt4_K / (1.0 + 0.5 * (gamma9 - 1.0) * M9 * M9)
-        Ps9 = Pt4_Pa / (1.0 + 0.5 * (gamma9 - 1.0) * M9 * M9) ** (gamma9 / (gamma9 - 1.0))
+        # Nozzle Pt-loss equivalent to velocity coefficient Cv. The diverging
+        # section generates entropy, so Pt drops between the burner exit and
+        # the nozzle exit. Modeling Pt9 = Pt4 · Cv² makes Ps9 consistent with
+        # V9 = Cv · V9_ideal — both reflect the same lumped nozzle loss.
+        nozzle_eta_Pt = ETA_NOZZLE_CV * ETA_NOZZLE_CV
+        Pt9_Pa = Pt4_Pa * nozzle_eta_Pt
+        Ps9 = Pt9_Pa / (1.0 + 0.5 * (gamma9 - 1.0) * M9 * M9) ** (gamma9 / (gamma9 - 1.0))
         V9_ideal = M9 * np.sqrt(gamma9 * R9 * T9)
         V9 = ETA_NOZZLE_CV * V9_ideal
         Fg_N = mdot_tot_kgs * V9 + (Ps9 - P0) * exit_area_m2
         Fn_N = Fg_N - ram_drag_N
     F_sp = Fn_N / max(W_kgs, 1.0e-12)
     Isp  = Fn_N / max(Wfuel * G0, 1.0e-12)
+
+    # Thrust decomposition for diagnostics (see fig_thrust_decomposition).
+    F_momentum_N = float(mdot_tot_kgs * V9)
+    F_pressure_N = float((Ps9 - P0) * exit_area_m2)
+    p_crit_ratio = float(((gamma9 + 1.0) / 2.0) ** (gamma9 / (gamma9 - 1.0)))
+    nozzle_choked = bool(Pt4_Pa / max(P0, 1.0) >= p_crit_ratio
+                         and area_ratio_frozen >= 1.0 + 1.0e-9)
 
     nozzle_throat = {
         "area":  throat_area_m2,
@@ -1275,6 +1290,19 @@ def analyze(
         capability=capability,
         Isp=Isp, F_sp=F_sp, thrust=Fn_N,
         mdot_air=W_kgs, mdot_fuel=Wfuel,
+        # Thrust-decomposition diagnostics
+        Fg=float(Fg_N),
+        ram_drag=float(ram_drag_N),
+        F_momentum=F_momentum_N,
+        F_pressure=F_pressure_N,
+        V9=float(V9),
+        mdot_total=float(mdot_tot_kgs),
+        Pt4_over_P0=float(Pt4_Pa / max(P0, 1.0e-12)),
+        Pt9=float(Pt9_Pa),
+        Pt9_over_P0=float(Pt9_Pa / max(P0, 1.0e-12)),
+        nozzle_eta_Pt=float(nozzle_eta_Pt),
+        p_crit_ratio=p_crit_ratio,
+        nozzle_choked=nozzle_choked,
         eta_pt=ram_closure['inlet_inputs']['ram_recovery'],
         choked=choked,
         unstart_flag=ram_closure['inlet_inputs']['unstart_flag'],

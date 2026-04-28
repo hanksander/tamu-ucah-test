@@ -1203,6 +1203,85 @@ def fig_performance(results, mach_range,
     _save(fig, 'performance_vs_mach')
 
 
+def fig_thrust_decomposition(results, mach_range,
+                             altitude_m=ALT_DEFAULT,
+                             alpha_deg=INLET_DESIGN_ALPHA_DEG,
+                             phi_command=None):
+    """Decompose net thrust into momentum, pressure, and ram-drag contributions.
+
+    At lean-φ / high-Mach, F_momentum and ram_drag both grow large while their
+    difference (F_net) shrinks — making Isp = F_net / (Wfuel·g0) blow up. The
+    bottom panel plots |F_net| / ram_drag as a "useful-thrust ratio" so it's
+    obvious when the engine is in the cancellation regime.
+    """
+    F_mom   = _arr(results, 'F_momentum')
+    F_pres  = _arr(results, 'F_pressure')
+    Fg      = _arr(results, 'Fg')
+    Fram    = _arr(results, 'ram_drag')
+    Fnet    = _arr(results, 'thrust')
+    Pt4_P0  = _arr(results, 'Pt4_over_P0')
+    p_crit  = _arr(results, 'p_crit_ratio')
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        useful_ratio = np.abs(Fnet) / np.maximum(Fram, 1.0e-12)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8.5), sharex=True)
+
+    ax = axes[0, 0]
+    ax.plot(mach_range, F_mom / 1e3, 'o-', color='steelblue',
+            label='F_momentum = ṁ_tot · V9')
+    ax.plot(mach_range, Fram / 1e3, 's-', color='firebrick',
+            label='ram_drag (subtracted)')
+    ax.plot(mach_range, Fg / 1e3, '^-', color='darkgreen',
+            label='F_gross = F_mom + F_pressure')
+    ax.plot(mach_range, Fnet / 1e3, 'd-', color='black', lw=2.0,
+            label='F_net = F_gross − ram_drag')
+    ax.axhline(0.0, color='0.5', lw=0.8, ls=':')
+    ax.set_ylabel('Force [kN]')
+    ax.set_title('Thrust decomposition')
+    ax.legend(loc='best', fontsize=8)
+
+    ax = axes[0, 1]
+    ax.plot(mach_range, F_pres / 1e3, 'o-', color='darkorange',
+            label='F_pressure = (Ps9 − P0)·Ae')
+    ax.axhline(0.0, color='0.5', lw=0.8, ls=':')
+    ax.set_ylabel('Pressure-term thrust [kN]')
+    ax.set_title('Nozzle expansion contribution')
+    ax.legend(loc='best', fontsize=8)
+
+    ax = axes[1, 0]
+    ax.plot(mach_range, useful_ratio, 'o-', color='purple')
+    ax.axhline(0.05, color='red', lw=1.0, ls='--',
+               label='5% threshold (Isp unreliable below)')
+    ax.set_ylabel('|F_net| / ram_drag  [-]')
+    ax.set_xlabel('M0')
+    ax.set_title('Useful-thrust ratio (cancellation indicator)')
+    ax.set_yscale('log')
+    ax.legend(loc='best', fontsize=8)
+
+    ax = axes[1, 1]
+    ax.plot(mach_range, Pt4_P0, 'o-', color='navy', label='Pt4 / P0')
+    ax.plot(mach_range, p_crit, '--', color='gray',
+            label='p_crit (choking threshold)')
+    ax.set_ylabel('Pressure ratio [-]')
+    ax.set_xlabel('M0')
+    ax.set_title('Nozzle choking margin')
+    ax.legend(loc='best', fontsize=8)
+
+    if phi_command is None:
+        phi_text = ''
+    else:
+        phi_command = np.asarray(phi_command, dtype=float)
+        if np.allclose(phi_command, phi_command[0]):
+            phi_text = f', φ={phi_command[0]:.2f}'
+        else:
+            phi_text = (f', φ: {phi_command[0]:.2f}→{phi_command[-1]:.2f}')
+    fig.suptitle(f'Thrust decomposition  (alt={altitude_m/1e3:.1f} km, '
+                 f'α={alpha_deg:+.1f}°{phi_text})')
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    _save(fig, 'thrust_decomposition_vs_mach')
+
+
 def fig_performance_vs_alt(results, alt_range,
                            M0=INLET_DESIGN_M0,
                            alpha_deg=INLET_DESIGN_ALPHA_DEG,
@@ -2028,7 +2107,7 @@ def main():
     PHI_SCHEDULE_M_LO   = 4.0
     PHI_SCHEDULE_M_HI   = 5.0
     PHI_SCHEDULE_PHI_LO = 0.8
-    PHI_SCHEDULE_PHI_HI = 0.2
+    PHI_SCHEDULE_PHI_HI = 0.5
     phi_schedule_fn = lambda M: phi_schedule(
         M, PHI_SCHEDULE_M_LO, PHI_SCHEDULE_M_HI,
         PHI_SCHEDULE_PHI_LO, PHI_SCHEDULE_PHI_HI,
@@ -2113,6 +2192,11 @@ def main():
                     altitude_m=sweep_altitude_m,
                     alpha_deg=sweep_alpha_deg,
                     phi_command=phi_command_array)
+
+    fig_thrust_decomposition(results, mach_range,
+                             altitude_m=sweep_altitude_m,
+                             alpha_deg=sweep_alpha_deg,
+                             phi_command=phi_command_array)
 
 
     """
