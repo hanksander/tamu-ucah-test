@@ -1093,7 +1093,8 @@ def solve_ramp_stage(M_up, theta_base, ramp_separation_margin, stage_name,
     }
 
 def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
-    shock_focus_factor,):
+    shock_focus_factor,cowl_lip_axial_offset_m=0.0,
+    cowl_lip_normal_offset_m=0.0,):
 
     P0 = np.array([0.0, 0.0], dtype=float)
 
@@ -1130,9 +1131,15 @@ def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
     if abs(cross2(focus_point - P0,shock1_dir)) > 1e-6:
         raise ValueError("Internal geometry check failed: focus point is not on Ramp 1 shock.")
 
-    # Put cowl lip below focus along the opening normal
+    # Put cowl lip below focus along the opening normal. Optional offsets let
+    # off-design studies move the lip without changing the shock-matched focus.
     focus_to_lip_normal = (shock_focus_factor - 1.0) * h_req_normal
     C = focus_point - focus_to_lip_normal * n2
+    C = (
+        C
+        + float(cowl_lip_axial_offset_m) * ramp2_dir
+        - float(cowl_lip_normal_offset_m) * n2
+    )
 
     # Foot of opening on Ramp 2
     F = C - h_req_normal * n2
@@ -1153,6 +1160,8 @@ def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
         "lam2_lip": lam2_lip,
         "lam2_focus": lam2_focus,
         "focus_point": focus_point,
+        "cowl_lip_axial_offset_m": float(cowl_lip_axial_offset_m),
+        "cowl_lip_normal_offset_m": float(cowl_lip_normal_offset_m),
     }
 
 def solve_forebody_start_from_focus(focus_point, theta_fore, shock_fore_abs):
@@ -1936,7 +1945,8 @@ def _diffuser_subsonic_exit_state(diffuser, M_in, T_in, Pt_in, Tt0,
 def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
     mdot_required,width_m,forebody_separation_margin=_LEG_FB_MARGIN,
     ramp_separation_margin=_LEG_RP_MARGIN,kantrowitz_margin=_LEG_KZ_MARGIN,
-    shock_focus_factor=_LEG_FOCUS_FACTOR,forebody_length_m=None,):
+    shock_focus_factor=_LEG_FOCUS_FACTOR,forebody_length_m=None,
+    cowl_lip_axial_offset_m=0.0,cowl_lip_normal_offset_m=0.0,):
 
     validate_d2r_inputs(
         M0=M0,
@@ -1988,6 +1998,8 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         shock2_abs=ramp2["shock_abs"],
         h_req_normal=h_req_normal,
         shock_focus_factor=shock_focus_factor,
+        cowl_lip_axial_offset_m=cowl_lip_axial_offset_m,
+        cowl_lip_normal_offset_m=cowl_lip_normal_offset_m,
     )
 
     # Legacy behavior kept for reference: the forebody start is back-solved so
@@ -2155,6 +2167,8 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         "shock2_distance_from_break2_to_lip_m": geom["lam2_lip"],
         "shock2_distance_from_break2_to_focus_m": geom["lam2_focus"],
         "shock_focus_factor": shock_focus_factor,
+        "cowl_lip_axial_offset_m": geom["cowl_lip_axial_offset_m"],
+        "cowl_lip_normal_offset_m": geom["cowl_lip_normal_offset_m"],
 
         "diffuser": diffuser,
         "combustor_face_xy_upper": diffuser["exit_upper_xy"],
@@ -2441,7 +2455,8 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
 def sweep_d2r_margins(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
     mdot_required,width_m,forebody_margin_values,ramp_margin_values,
     kantrowitz_margin=_LEG_KZ_MARGIN,shock_focus_factor=_LEG_FOCUS_FACTOR,
-    forebody_length_m=None,verbose=True,):
+    forebody_length_m=None,cowl_lip_axial_offset_m=0.0,
+    cowl_lip_normal_offset_m=0.0,verbose=True,):
 
     best_result = None
     best_forebody_margin = None
@@ -2464,6 +2479,8 @@ def sweep_d2r_margins(M0,altitude_m,alpha_deg,leading_edge_angle_deg,
                     kantrowitz_margin=kantrowitz_margin,
                     shock_focus_factor=shock_focus_factor,
                     forebody_length_m=forebody_length_m,
+                    cowl_lip_axial_offset_m=cowl_lip_axial_offset_m,
+                    cowl_lip_normal_offset_m=cowl_lip_normal_offset_m,
                 )
 
                 pt = result["pt_frac_after_immediate_normal_shock"]
@@ -3127,6 +3144,7 @@ from pyc_config import (
     INLET_DESIGN_ALPHA_DEG, INLET_DESIGN_LEADING_EDGE_ANGLE_DEG,
     INLET_DESIGN_MDOT_KGS, INLET_FOREBODY_SEP_MARGIN,
     INLET_RAMP_SEP_MARGIN, INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
+    INLET_COWL_LIP_AXIAL_OFFSET_M, INLET_COWL_LIP_NORMAL_OFFSET_M,
     INLET_DESIGN_WIDTH_M, INLET_FOREBODY_LENGTH_M
 )
 ##SWEEP METHOD TO FIND BEST GEOMETRY
@@ -3148,6 +3166,8 @@ if Sweep:
             ramp_margin_values=ramp_margin_values,
             kantrowitz_margin=INLET_KANTROWITZ_MARGIN,
             shock_focus_factor=INLET_SHOCK_FOCUS_FACTOR,
+            cowl_lip_axial_offset_m=INLET_COWL_LIP_AXIAL_OFFSET_M,
+            cowl_lip_normal_offset_m=INLET_COWL_LIP_NORMAL_OFFSET_M,
             forebody_length_m=INLET_FOREBODY_LENGTH_M,
             verbose=True,
         )
@@ -3172,6 +3192,8 @@ else:
             ramp_separation_margin=INLET_RAMP_SEP_MARGIN,
             kantrowitz_margin=INLET_KANTROWITZ_MARGIN,
             shock_focus_factor=INLET_SHOCK_FOCUS_FACTOR,
+            cowl_lip_axial_offset_m=INLET_COWL_LIP_AXIAL_OFFSET_M,
+            cowl_lip_normal_offset_m=INLET_COWL_LIP_NORMAL_OFFSET_M,
         )
 
         print_d2r_report(result)
@@ -3181,8 +3203,8 @@ else:
 
 
         
-        mach_grid = [4.0, 4.5, 5.0]
-        alpha_grid = [-1.0, 2.0, 4.0]
+        mach_grid = [4.0, 4.5, 4.8]
+        alpha_grid = [-2.0, 0.0, 2.0]
 
         plot_fixed_geometry_3x3_grid(
             result=result,

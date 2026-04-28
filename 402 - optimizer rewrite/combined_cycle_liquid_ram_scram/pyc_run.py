@@ -46,6 +46,7 @@ from pyc_config import (
     INLET_DESIGN_MDOT_KGS, INLET_DESIGN_WIDTH_M, INLET_FOREBODY_LENGTH_M,
     INLET_FOREBODY_SEP_MARGIN, INLET_RAMP_SEP_MARGIN,
     INLET_KANTROWITZ_MARGIN, INLET_SHOCK_FOCUS_FACTOR,
+    INLET_COWL_LIP_AXIAL_OFFSET_M, INLET_COWL_LIP_NORMAL_OFFSET_M,
     INLET_CAPTURE_RATIO_CORRECTION,
     NOZZLE_TYPE,
     TT4_MAX_K, M4_MAX, COMBUSTOR_LENGTH_M_DEFAULT,
@@ -93,6 +94,7 @@ def build_design(
     forebody_length_m=None,
     forebody_separation_margin=None, ramp_separation_margin=None,
     kantrowitz_margin=None, shock_focus_factor=None,
+    cowl_lip_axial_offset_m=None, cowl_lip_normal_offset_m=None,
     diffuser_area_ratio=None, diffuser_min_shock_accommodation_dh=None,
     combustor_length_m=None, combustor_width_m=None, nozzle_AR=None, design_phi=None,
 ):
@@ -117,6 +119,10 @@ def build_design(
                                     INLET_RAMP_SEP_MARGIN),
         kantrowitz_margin=pick(kantrowitz_margin, INLET_KANTROWITZ_MARGIN),
         shock_focus_factor=pick(shock_focus_factor, INLET_SHOCK_FOCUS_FACTOR),
+        cowl_lip_axial_offset_m=pick(cowl_lip_axial_offset_m,
+                                     INLET_COWL_LIP_AXIAL_OFFSET_M),
+        cowl_lip_normal_offset_m=pick(cowl_lip_normal_offset_m,
+                                      INLET_COWL_LIP_NORMAL_OFFSET_M),
     )
     diffuser_area_ratio_eff = pick(diffuser_area_ratio, DIFFUSER_AREA_RATIO)
     diffuser_min_shock_accommodation_dh_eff = pick(
@@ -1455,7 +1461,7 @@ if __name__ == '__main__':
         M0=INLET_DESIGN_M0,
         altitude_m=INLET_DESIGN_ALT_M,
         phi=PHI_DEFAULT,
-        alpha_deg=INLET_DESIGN_ALPHA_DEG,
+        alpha_deg=2,
         verbose=True,
     )
 

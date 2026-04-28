@@ -771,7 +771,7 @@ def fig_flowpath(
                  f'alt={INLET_DESIGN_ALT_M/1e3:.0f} km')
     ax.set_aspect('equal')
     ax.invert_yaxis()
-    ax.legend(loc='upper left')
+    #ax.legend(loc='upper left')
     _save(fig, 'flowpath_geometry')
 
 
@@ -1994,6 +1994,7 @@ def main():
         n_points=NOZZLE_BELL_POINTS_DEFAULT,
     )
 
+    """
     fig_performance_along_climb_path(
         design,
         phi=PHI_DEFAULT,
@@ -2004,7 +2005,7 @@ def main():
         alpha_deg=2.0,
         n_points=7,
     )
-
+    """
     #fig_performance(results, mach_range)
 
 

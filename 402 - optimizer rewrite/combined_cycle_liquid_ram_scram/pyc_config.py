@@ -105,6 +105,22 @@ DESIGN PARAMETERS
   - Higher: pushes geometry toward tighter shock focusing / capture, can get more fragile.
   - Lower: safer/less aggressive placement, often better off-design robustness.
 
+  INLET_COWL_LIP_AXIAL_OFFSET_M
+
+  - Explicit cowl-lip translation along the ramp-2 wall direction after the
+    shock-matched baseline geometry is built.
+  - Positive moves the cowl lip downstream/aft.
+  - Useful for moving the lip out of an off-design forebody-shock path without
+    changing the shock-focus construction itself.
+
+  INLET_COWL_LIP_NORMAL_OFFSET_M
+
+  - Explicit cowl-lip translation along the cowl-side normal used by the inlet
+    geometry builder after the shock-matched baseline geometry is built.
+  - Positive moves the lip farther away from the ramp-2 shock focus in the same
+    direction as the existing focus-to-lip spacing.
+  - Useful for adding vertical/normal clearance at negative AoA.
+
   INLET_CAPTURE_RATIO_CORRECTION
 
   - Empirical correction applied to the raw geometric capture-area ratio used
@@ -147,16 +163,18 @@ DESIGN PARAMETERS
 
 INLET_DESIGN_M0                    = 4.0
 INLET_DESIGN_ALT_M                 = 16_000.0   # mid of 19–21 km envelope
-INLET_DESIGN_ALPHA_DEG             = 2        # worst-α design anchor
+INLET_DESIGN_ALPHA_DEG             = -2        # worst-α design anchor
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 8
-INLET_DESIGN_MDOT_KGS              = 8     # design-point air mass flow [kg/s]
-INLET_DESIGN_WIDTH_M               = 0.3   # inlet spanwise width [m] (hard req)
+INLET_DESIGN_MDOT_KGS              = 7.5     # design-point air mass flow [kg/s]
+INLET_DESIGN_WIDTH_M               = 0.25   # inlet spanwise width [m] (hard req)
 INLET_FOREBODY_LENGTH_M            = 0.65  # forebody leading edge -> nose [m]
 INLET_FOREBODY_SEP_MARGIN          = 0.7
-INLET_RAMP_SEP_MARGIN              = 0.15
-INLET_KANTROWITZ_MARGIN            = 0.8
-INLET_SHOCK_FOCUS_FACTOR           = 1.25
-INLET_CAPTURE_RATIO_CORRECTION     = 0.5
+INLET_RAMP_SEP_MARGIN              = 0.06
+INLET_KANTROWITZ_MARGIN            = 0.85
+INLET_SHOCK_FOCUS_FACTOR           = 1.45
+INLET_COWL_LIP_AXIAL_OFFSET_M      = 0.0
+INLET_COWL_LIP_NORMAL_OFFSET_M     = 0.0
+INLET_CAPTURE_RATIO_CORRECTION     = 0.6
 
 # Air properties used by 402inlet2's cold-air oblique/normal-shock solver
 # (freestream-temperature relations). The thermally-perfect path uses
@@ -178,17 +196,17 @@ INLET_LEGACY_SHOCK_FOCUS_FACTOR  = 1.1
 INLET_SHOCK_EXTENSION_FACTOR = 1.40   # how far shocks are drawn past the inlet
 INLET_COWL_EXTENSION_FACTOR  = 1.25   # cowl length scale in plots
 INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
-INLET_CONSTANT_AREA_LENGTH_M = 0.05    # visual-only constant-area section ahead of diffuser [m]
+INLET_CONSTANT_AREA_LENGTH_M = 0.025    # visual-only constant-area section ahead of diffuser [m]
 
-DIFFUSER_AREA_RATIO = 4
+DIFFUSER_AREA_RATIO = 4.5
 DIFFUSER_HALF_ANGLE_DEG = 7.0
 DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 12
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 5
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4
 
 
-COMBUSTOR_LENGTH_M_DEFAULT = 1.05
+COMBUSTOR_LENGTH_M_DEFAULT = 1
 COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
-NOZZLE_AR                = 5.243  # nozzle Ae/At committed design knob
+NOZZLE_AR                = 4  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Vertical offset (in plot/data y) applied to the combustor + nozzle relative
@@ -196,7 +214,7 @@ NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 # (downward in the inverted-y display). The diffuser walls are re-lofted to
 # meet the offset combustor face; the inlet, ramps, throat, and constant-area
 # section are left untouched.
-COMBUSTOR_Y_OFFSET_M = 0.065
+COMBUSTOR_Y_OFFSET_M = 0.125
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.85   # combustion efficiency
