@@ -84,18 +84,52 @@ def _save(fig, name):
 # Mach sweep through pyc_run
 # ---------------------------------------------------------------------------
 
-def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT):            #############################################################################
+def phi_schedule(M0, M_lo=4.0, M_hi=5.0, phi_lo=1.0, phi_hi=0.4):
+    """Linear φ-command schedule across a Mach range, clamped at the ends."""
+    if M_hi == M_lo:
+        return float(phi_lo)
+    t = (float(M0) - float(M_lo)) / (float(M_hi) - float(M_lo))
+    t = max(0.0, min(1.0, t))
+    return float(phi_lo) + t * (float(phi_hi) - float(phi_lo))
+
+
+def _resolve_phi_per_point(phi, mach_range):
+    """Return a length-N array of φ commands matching `mach_range`.
+
+    Accepts a scalar, a 1-D sequence of the same length, or a callable f(M0).
+    """
+    n = len(mach_range)
+    if callable(phi):
+        return np.array([float(phi(M)) for M in mach_range], dtype=float)
+    arr = np.asarray(phi, dtype=float)
+    if arr.ndim == 0:
+        return np.full(n, float(arr))
+    if arr.shape != (n,):
+        raise ValueError(
+            f'phi array length {arr.shape} does not match mach_range length {n}'
+        )
+    return arr
+
+
+def mach_sweep(mach_range, altitude=ALT_DEFAULT, phi=PHI_DEFAULT,
+               alpha_deg=INLET_DESIGN_ALPHA_DEG):
+    """Mach sweep at fixed altitude/α. `phi` may be scalar, array, or callable(M0)."""
+    phi_array = _resolve_phi_per_point(phi, mach_range)
     results = []
     total = len(mach_range)
-    for idx, M in enumerate(mach_range, start=1):
+    for idx, (M, phi_i) in enumerate(zip(mach_range, phi_array), start=1):
         t0 = time.perf_counter()
         try:
-            r = pyc_run.analyze(M0=float(M), altitude_m=altitude, phi=phi)
+            r = pyc_run.analyze(M0=float(M), altitude_m=altitude,
+                                phi=float(phi_i),
+                                alpha_deg=float(alpha_deg))
             dt = time.perf_counter() - t0
-            print(f'    [{idx:02d}/{total:02d}] M={M:.2f} in {dt:.1f}s')
+            print(f'    [{idx:02d}/{total:02d}] M={M:.2f} φ_cmd={phi_i:.2f} '
+                  f'in {dt:.1f}s')
         except Exception as e:
             dt = time.perf_counter() - t0
-            print(f'  [warn] [{idx:02d}/{total:02d}] M={M:.2f} failed after {dt:.1f}s: {e}')
+            print(f'  [warn] [{idx:02d}/{total:02d}] M={M:.2f} φ_cmd={phi_i:.2f} '
+                  f'failed after {dt:.1f}s: {e}')
             r = None
         results.append(r)
     return results
@@ -1115,13 +1149,27 @@ def fig_cad_model(
 # Figures driven by pyc_run Mach sweep
 # ---------------------------------------------------------------------------
 
-def fig_performance(results, mach_range):
-    """Isp, specific thrust, and net thrust vs Mach."""
+def fig_performance(results, mach_range,
+                    altitude_m=ALT_DEFAULT,
+                    alpha_deg=INLET_DESIGN_ALPHA_DEG,
+                    phi=PHI_DEFAULT,
+                    phi_command=None):
+    """Isp, specific thrust, net thrust, and φ schedule vs Mach.
+
+    `phi_command`, if supplied, is the per-point commanded φ (the schedule).
+    `phi_effective` is read from the result dicts to show clipping.
+    """
     Isp    = _arr(results, 'Isp')
     F_sp   = _arr(results, 'F_sp')
     thrust = _arr(results, 'thrust')
+    phi_eff = _arr(results, 'phi_effective')
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.0))
+    if phi_command is None:
+        phi_command = _resolve_phi_per_point(phi, mach_range)
+    else:
+        phi_command = np.asarray(phi_command, dtype=float)
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5.0))
     axes[0].plot(mach_range, Isp, 'o-', color='navy')
     axes[0].set_xlabel('M0'); axes[0].set_ylabel('Isp [s]')
     axes[0].set_title('Specific impulse')
@@ -1134,9 +1182,24 @@ def fig_performance(results, mach_range):
     axes[2].set_xlabel('M0'); axes[2].set_ylabel('Net thrust [kN]')
     axes[2].set_title('Net thrust')
 
+    axes[3].plot(mach_range, phi_command, '--', color='gray', lw=1.5,
+                 label='φ command (schedule)')
+    axes[3].plot(mach_range, phi_eff, 'd-', color='darkorange',
+                 label='φ effective (clipped)')
+    axes[3].set_xlabel('M0'); axes[3].set_ylabel('φ [-]')
+    axes[3].set_title('Equivalence ratio')
+    axes[3].set_ylim(0.0, max(1.05, float(np.nanmax(phi_command)) * 1.05))
+
     for ax in axes:
         ax.legend(loc='best', fontsize=8)
-    fig.suptitle(f'pyc_run sweep  (alt={ALT_DEFAULT/1e3:.0f} km, φ={PHI_DEFAULT})')
+
+    if np.allclose(phi_command, phi_command[0]):
+        phi_text = f'φ={phi_command[0]:.2f}'
+    else:
+        phi_text = (f'φ schedule: {phi_command[0]:.2f} @ M={mach_range[0]:.1f} '
+                    f'→ {phi_command[-1]:.2f} @ M={mach_range[-1]:.1f}')
+    fig.suptitle(f'pyc_run sweep  (alt={altitude_m/1e3:.1f} km, '
+                 f'α={alpha_deg:+.1f}°, {phi_text})')
     _save(fig, 'performance_vs_mach')
 
 
@@ -1233,23 +1296,31 @@ def fig_performance_vs_aoa(results, alpha_range,
 def fig_performance_along_climb_path(design, phi=PHI_DEFAULT,
                                      mach_start=4.0, mach_end=5.0,
                                      alt_start_m=16_000.0, alt_end_m=19_000.0,
-                                     alpha_deg=2.0, n_points=7):
+                                     alpha_deg=2.0, n_points=7,
+                                     phi_schedule_fn=None):
     """
     Fixed-geometry performance map along a straight (M0, altitude) path.
 
     Geometry is frozen at the supplied design point; only the flight condition
-    changes from (mach_start, alt_start_m) to (mach_end, alt_end_m).
+    changes from (mach_start, alt_start_m) to (mach_end, alt_end_m). If
+    `phi_schedule_fn` is provided, it is evaluated as `phi_schedule_fn(M0)`
+    at each point; otherwise the scalar `phi` is used everywhere.
     """
     mach_values = np.linspace(float(mach_start), float(mach_end), int(n_points))
     alt_values_m = np.linspace(float(alt_start_m), float(alt_end_m), int(n_points))
 
+    if phi_schedule_fn is not None:
+        phi_commands = np.array([float(phi_schedule_fn(M)) for M in mach_values])
+    else:
+        phi_commands = np.full(len(mach_values), float(phi))
+
     results = []
-    for M0, altitude_m in zip(mach_values, alt_values_m):
+    for M0, altitude_m, phi_i in zip(mach_values, alt_values_m, phi_commands):
         try:
             r = pyc_run.analyze(
                 M0=float(M0),
                 altitude_m=float(altitude_m),
-                phi=phi,
+                phi=float(phi_i),
                 alpha_deg=float(alpha_deg),
                 design=design,
             )
@@ -1265,28 +1336,44 @@ def fig_performance_along_climb_path(design, phi=PHI_DEFAULT,
     alt_ok_km = []
     thrust_ok_kn = []
     isp_ok = []
-    for M0, altitude_m, r in zip(mach_values, alt_values_m, results):
+    phi_cmd_ok = []
+    phi_eff_ok = []
+    for M0, altitude_m, phi_cmd, r in zip(mach_values, alt_values_m,
+                                          phi_commands, results):
         if r is None:
             continue
         mach_ok.append(float(M0))
         alt_ok_km.append(float(altitude_m) / 1e3)
         thrust_ok_kn.append(float(r['thrust']) / 1e3)
         isp_ok.append(float(r['Isp']))
+        phi_cmd_ok.append(float(phi_cmd))
+        phi_eff_ok.append(float(r.get('phi_effective',
+                                      r.get('phi', float('nan')))))
 
     ax.plot(mach_values, alt_values_m / 1e3, '--', color='lightgray', lw=1.2,
             label='Requested path')
     ax.scatter(mach_ok, alt_ok_km, s=56, color='navy', zorder=3,
                label='Fixed-geometry evaluations')
 
-    for x, y, thrust_kn, isp_s in zip(mach_ok, alt_ok_km, thrust_ok_kn, isp_ok):
-        ax.annotate(f'{thrust_kn:.1f} kN\n{isp_s:.0f} s',
+    for x, y, thrust_kn, isp_s, phi_cmd, phi_eff in zip(
+            mach_ok, alt_ok_km, thrust_ok_kn, isp_ok, phi_cmd_ok, phi_eff_ok):
+        if np.isfinite(phi_eff) and abs(phi_eff - phi_cmd) > 1e-3:
+            phi_label = f'φ={phi_cmd:.2f} (eff {phi_eff:.2f})'
+        else:
+            phi_label = f'φ={phi_cmd:.2f}'
+        ax.annotate(f'{phi_label}\n{thrust_kn:.1f} kN\n{isp_s:.0f} s',
                     xy=(x, y), xytext=(0, 9), textcoords='offset points',
                     ha='center', va='bottom', fontsize=8,
                     bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='0.7', alpha=0.9))
 
     ax.set_xlabel('M0')
     ax.set_ylabel('Altitude [km]')
-    ax.set_title(f'Fixed-Geometry Performance Along Climb Path (α={alpha_deg:.1f}°)')
+    if phi_schedule_fn is not None and len(phi_commands) >= 2:
+        title_phi = (f'φ: {phi_commands[0]:.2f}→{phi_commands[-1]:.2f}')
+    else:
+        title_phi = f'φ={float(phi):.2f}'
+    ax.set_title(f'Fixed-Geometry Performance Along Climb Path '
+                 f'(α={alpha_deg:.1f}°, {title_phi})')
     ax.legend(loc='best', fontsize=8)
     _save(fig, 'performance_along_climb_path')
 
@@ -1932,15 +2019,30 @@ def main():
         combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     )
 
-    """
-    # Mach sweep
-    sweep_altitude_m = INLET_DESIGN_ALT_M #######################################################
-    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 15)
-    print(f'  Mach sweep over {len(mach_range)} points '
-          f'at alt={sweep_altitude_m/1e3:.0f} km, phi={PHI_DEFAULT}')
-    results = mach_sweep(mach_range, altitude=sweep_altitude_m, phi=PHI_DEFAULT) #########################
 
-    
+    # Mach sweep with linear φ schedule:
+    #   φ = PHI_SCHEDULE_PHI_LO at M = PHI_SCHEDULE_M_LO  (rich → max thrust)
+    #   φ = PHI_SCHEDULE_PHI_HI at M = PHI_SCHEDULE_M_HI  (lean → max Isp)
+    sweep_altitude_m = 17_500.0
+    sweep_alpha_deg = 2.0
+    PHI_SCHEDULE_M_LO   = 4.0
+    PHI_SCHEDULE_M_HI   = 5.0
+    PHI_SCHEDULE_PHI_LO = 0.9
+    PHI_SCHEDULE_PHI_HI = 0.4
+    phi_schedule_fn = lambda M: phi_schedule(
+        M, PHI_SCHEDULE_M_LO, PHI_SCHEDULE_M_HI,
+        PHI_SCHEDULE_PHI_LO, PHI_SCHEDULE_PHI_HI,
+    )
+    mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 25)
+    phi_command_array = np.array([phi_schedule_fn(M) for M in mach_range])
+    print(f'  Mach sweep over {len(mach_range)} points '
+          f'at alt={sweep_altitude_m/1e3:.1f} km, alpha={sweep_alpha_deg:+.1f} deg, '
+          f'phi schedule {PHI_SCHEDULE_PHI_LO:.2f}→{PHI_SCHEDULE_PHI_HI:.2f} '
+          f'over M={PHI_SCHEDULE_M_LO:.1f}→{PHI_SCHEDULE_M_HI:.1f}')
+    results = mach_sweep(mach_range, altitude=sweep_altitude_m,
+                         phi=phi_command_array, alpha_deg=sweep_alpha_deg)
+
+    """
 
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
@@ -1994,7 +2096,7 @@ def main():
         n_points=NOZZLE_BELL_POINTS_DEFAULT,
     )
 
-    """
+
     fig_performance_along_climb_path(
         design,
         phi=PHI_DEFAULT,
@@ -2004,9 +2106,13 @@ def main():
         alt_end_m=19_000.0,
         alpha_deg=2.0,
         n_points=7,
+        phi_schedule_fn=phi_schedule_fn,
     )
-    """
-    #fig_performance(results, mach_range)
+
+    fig_performance(results, mach_range,
+                    altitude_m=sweep_altitude_m,
+                    alpha_deg=sweep_alpha_deg,
+                    phi_command=phi_command_array)
 
 
     """
@@ -2027,17 +2133,17 @@ def main():
         phi_map_results, phi_mach_range, phi_alt_range,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi_request=PHI_DEFAULT,
     )
+    """
+    fig_mass_flows(results, mach_range)
+    fig_station_T(results, mach_range)
+    fig_station_Pt(results, mach_range)
+
+    fig_ram_diagnostics(results, mach_range)
+
+    fig_engine_pressure_profile(design, design_cycle)
+    fig_engine_temperature_profile(design, design_cycle)
     
-    #fig_mass_flows(results, mach_range)
-    #fig_station_T(results, mach_range)
-    #fig_station_Pt(results, mach_range)
-    """
-    #fig_ram_diagnostics(results, mach_range)
-    """
-    #fig_engine_pressure_profile(design, design_cycle)
-    #fig_engine_temperature_profile(design, design_cycle)
-    
-    """
+
 
     print(f'\n  generating 3D CAD model (wall={cad_wall_thickness_m*1e3:.1f} mm) ...')
     try:
