@@ -26,7 +26,7 @@ MW_JP10        = 136.23    # molecular weight [g/mol]
 
 # Legacy (non-pyCycle) stack defaults.  Kept here so config.py can be removed
 # and every constant has one canonical source.
-A_CAPTURE                  = 0.1                 # legacy capture area [m^2]
+A_CAPTURE                  = 0.08                # legacy capture area [m^2]
 INLET_RAMPS_DEG            = [7.0, 10.0, 13.0]   # legacy 3-ramp deflections
 M_TRANSITION               = 5.5                 # ram <-> scram mode boundary
 ISOLATOR_PT_RECOVERY_SCRAM = 0.97                # scram isolator Pt ratio
@@ -163,15 +163,15 @@ DESIGN PARAMETERS
 
 INLET_DESIGN_M0                    = 4.0
 INLET_DESIGN_ALT_M                 = 16_000.0   # mid of 19–21 km envelope
-INLET_DESIGN_ALPHA_DEG             = -2        # worst-α design anchor
+INLET_DESIGN_ALPHA_DEG             = 0        # worst-α design anchor
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 8
-INLET_DESIGN_MDOT_KGS              = 7.5     # design-point air mass flow [kg/s]
+INLET_DESIGN_MDOT_KGS              = 5     # design-point air mass flow [kg/s]
 INLET_DESIGN_WIDTH_M               = 0.25   # inlet spanwise width [m] (hard req)
-INLET_FOREBODY_LENGTH_M            = 0.65  # forebody leading edge -> nose [m]
+INLET_FOREBODY_LENGTH_M            = 0.8  # forebody leading edge -> nose [m]
 INLET_FOREBODY_SEP_MARGIN          = 0.7
-INLET_RAMP_SEP_MARGIN              = 0.06
-INLET_KANTROWITZ_MARGIN            = 0.85
-INLET_SHOCK_FOCUS_FACTOR           = 1.45
+INLET_RAMP_SEP_MARGIN              = 0.25
+INLET_KANTROWITZ_MARGIN            = 0.95
+INLET_SHOCK_FOCUS_FACTOR           = 1.25
 INLET_COWL_LIP_AXIAL_OFFSET_M      = 0.0
 INLET_COWL_LIP_NORMAL_OFFSET_M     = 0.0
 INLET_CAPTURE_RATIO_CORRECTION     = 0.6
@@ -198,13 +198,13 @@ INLET_COWL_EXTENSION_FACTOR  = 1.25   # cowl length scale in plots
 INLET_COWL_MIN_LENGTH_M      = 0.1    # floor on drawn cowl length [m]
 INLET_CONSTANT_AREA_LENGTH_M = 0.025    # visual-only constant-area section ahead of diffuser [m]
 
-DIFFUSER_AREA_RATIO = 4.5
+DIFFUSER_AREA_RATIO = 6
 DIFFUSER_HALF_ANGLE_DEG = 7.0
-DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 12
-DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 4
+DIFFUSER_PHYSICS_EQUIV_HALF_ANGLE_DEG = 14
+DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 2.5
 
 
-COMBUSTOR_LENGTH_M_DEFAULT = 1
+COMBUSTOR_LENGTH_M_DEFAULT = 1.6
 COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
 NOZZLE_AR                = 4  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
@@ -214,7 +214,7 @@ NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 # (downward in the inverted-y display). The diffuser walls are re-lofted to
 # meet the offset combustor face; the inlet, ramps, throat, and constant-area
 # section are left untouched.
-COMBUSTOR_Y_OFFSET_M = 0.125
+COMBUSTOR_Y_OFFSET_M = 0.0
 
 # Efficiencies
 ETA_COMBUSTOR        = 0.85   # combustion efficiency

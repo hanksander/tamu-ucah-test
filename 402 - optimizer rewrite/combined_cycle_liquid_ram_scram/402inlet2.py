@@ -1131,8 +1131,9 @@ def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
     if abs(cross2(focus_point - P0,shock1_dir)) > 1e-6:
         raise ValueError("Internal geometry check failed: focus point is not on Ramp 1 shock.")
 
-    # Put cowl lip below focus along the opening normal. Optional offsets let
-    # off-design studies move the lip without changing the shock-matched focus.
+    # Keep the original shock-focus geometry: the ramp shocks focus at a
+    # point just above the cowl lip, with the lip offset along the Ramp-2
+    # normal by the prescribed capture margin.
     focus_to_lip_normal = (shock_focus_factor - 1.0) * h_req_normal
     C = focus_point - focus_to_lip_normal * n2
     C = (
@@ -1142,7 +1143,8 @@ def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
     )
 
     # Foot of opening on Ramp 2
-    F = C - h_req_normal * n2
+    capture_height_normal = float(np.dot(C - P1, n2))
+    F = C - capture_height_normal * n2
 
     # Diagnostic distance along Ramp 2 shock to the lip projection
     lam2_lip = np.dot(C - P1,shock2_dir)
@@ -1160,6 +1162,7 @@ def solve_external_geometry(theta1,theta2,shock1_abs,shock2_abs,h_req_normal,
         "lam2_lip": lam2_lip,
         "lam2_focus": lam2_focus,
         "focus_point": focus_point,
+        "capture_height_normal_m": capture_height_normal,
         "cowl_lip_axial_offset_m": float(cowl_lip_axial_offset_m),
         "cowl_lip_normal_offset_m": float(cowl_lip_normal_offset_m),
     }
@@ -1284,31 +1287,50 @@ def size_throat_from_post_cowl(M3, width_m, h_req_normal, throat_area_factor):
         "h_throat": h_throat,
     }
 
-def place_throat_on_cowl_and_cowl_shock(C, theta_cowl, cowl_shock_abs, h_throat, ramp2_end_point,leading_edge_angle_deg):
-    m_cowl = math.tan(math.radians(theta_cowl))
-    m_cs = math.tan(math.radians(cowl_shock_abs))
-    denom_gap = m_cowl - m_cs
-    if abs(denom_gap) < 1e-12:
-        raise ValueError("Cowl and cowl shock are nearly parallel. Cannot place throat.")
+def solve_lip_from_throat_and_cowl_shock(T_lower, h_throat, theta_cowl,
+    cowl_shock_abs, lower_wall_point, theta_lower_wall,
+    leading_edge_angle_deg):
+    T_lower = np.asarray(T_lower, dtype=float)
+    lower_wall_point = np.asarray(lower_wall_point, dtype=float)
+    T_upper = np.array([T_lower[0], T_lower[1] + h_throat], dtype=float)
 
-    x_throat = C[0] + h_throat / denom_gap
-    y_throat_upper = C[1] + m_cowl * (x_throat - C[0])
-    y_throat_lower = C[1] + m_cs * (x_throat - C[0])
+    cowl_dir = unit_from_angle_deg(theta_cowl)
+    shock_dir = unit_from_angle_deg(cowl_shock_abs)
+    lower_dir = unit_from_angle_deg(theta_lower_wall)
+    n_lower = np.array([-lower_dir[1], lower_dir[0]], dtype=float)
 
-    T_upper = np.array([x_throat, y_throat_upper], dtype=float)
-    T_lower = np.array([x_throat, y_throat_lower], dtype=float)
+    denom = cross2(cowl_dir, shock_dir)
+    if abs(denom) < 1e-12:
+        raise ValueError("Cowl wall and cowl shock are nearly parallel. Cannot solve lip.")
+
+    # Intersect the cowl wall through the throat upper point with the cowl
+    # shock through the throat lower point. This back-solves the lip.
+    a_cowl = cross2(T_lower - T_upper, shock_dir) / denom
+    C = T_upper + a_cowl * cowl_dir
+
+    if np.dot(T_upper - C, cowl_dir) <= 0.0:
+        raise ValueError("Solved cowl lip is not upstream of throat upper point.")
+    if np.dot(T_lower - C, shock_dir) <= 0.0:
+        raise ValueError("Solved cowl lip is not upstream of cowl shock impingement.")
+
+    capture_height_normal = float(np.dot(C - lower_wall_point, n_lower))
+    F = C - capture_height_normal * n_lower
     T_upper_body = point_in_body_frame(T_upper, leading_edge_angle_deg)
-    if x_throat <= ramp2_end_point[0]:
-        raise ValueError("Computed throat is not downstream of Ramp 2 lower endpoint.")
 
     return {
+        "C": C,
+        "F": F,
         "T_upper": T_upper,
         "T_lower": T_lower,
-        "x_throat": x_throat,
-        "y_throat_upper": y_throat_upper,
-        "y_throat_lower": y_throat_lower,
+        "x_throat": float(T_lower[0]),
+        "y_throat_upper": float(T_upper[1]),
+        "y_throat_lower": float(T_lower[1]),
+        "h_throat_actual": float(T_upper[1] - T_lower[1]),
+        "capture_height_normal_m": capture_height_normal,
+        "cowl_shock_impingement_xy": T_lower,
         "throat_upper_body_x_m": T_upper_body[0],
         "throat_upper_body_y_m": T_upper_body[1],
+        "lower_wall_angle_deg": float(theta_lower_wall),
     }
 
 def evaluate_kantrowitz(M3, width_m, h_req_normal, A_throat):
@@ -1507,6 +1529,241 @@ def solve_cowl_stage_for_target_postshock(M2,theta2,M3_target, T2=None,):
             best_err = cand["M3_error"]
             best = cand
 
+    return best
+
+def solve_cowl_stage_from_throat_and_capture(M2, theta2, h_throat,
+    h_capture_normal, throat_lower_point, lower_wall_point, T2=None,
+    leading_edge_angle_deg=0.0):
+    gamma_up = gamma_air(T2) if T2 is not None else GAMMA
+    theta_max = theta_max_attached(M2, gamma=gamma_up)
+    if theta_max is None:
+        raise ValueError("Could not determine attached-shock limit for cowl stage.")
+
+    def eval_candidate(turn_deg):
+        if T2 is None:
+            sh = oblique_shock(M2, turn_deg)
+            if sh is None:
+                return None
+            beta_rel, M3, p43, pt43 = sh
+            T3 = None
+            T_ratio = None
+            gamma_eff = GAMMA
+        else:
+            sh = oblique_shock_tpg(M2, turn_deg, T2)
+            if sh is None:
+                return None
+            beta_rel, M3, p43, pt43, T_ratio, T3, gamma_eff = sh
+
+        theta_cowl = theta2 - turn_deg
+        cowl_shock_abs = theta2 - beta_rel
+        try:
+            throat_geom = solve_lip_from_throat_and_cowl_shock(
+                T_lower=throat_lower_point,
+                h_throat=h_throat,
+                theta_cowl=theta_cowl,
+                cowl_shock_abs=cowl_shock_abs,
+                lower_wall_point=lower_wall_point,
+                theta_lower_wall=theta2,
+                leading_edge_angle_deg=leading_edge_angle_deg,
+            )
+        except ValueError:
+            return None
+
+        capture_error = throat_geom["capture_height_normal_m"] - h_capture_normal
+        return {
+            "theta_cowl": theta_cowl,
+            "cowl_turn_mag": turn_deg,
+            "beta_cowl_rel": beta_rel,
+            "M3": M3,
+            "p43": p43,
+            "pt43": pt43,
+            "T_ratio": T_ratio,
+            "T_down": T3,
+            "gamma_eff": gamma_eff,
+            "cowl_shock_abs": cowl_shock_abs,
+            "capture_height_error": capture_error,
+            "throat_height_error": throat_geom["h_throat_actual"] - h_throat,
+            "throat_geom": throat_geom,
+        }
+
+    turn_values = np.linspace(1e-3, theta_max * 0.999, 700)
+    candidates = [(turn, eval_candidate(turn)) for turn in turn_values]
+    candidates = [(turn, cand) for turn, cand in candidates if cand is not None]
+    if not candidates:
+        raise ValueError("Could not solve cowl stage from throat/capture geometry.")
+
+    bracket = None
+    for (turn_a, cand_a), (turn_b, cand_b) in zip(candidates[:-1], candidates[1:]):
+        err_a = cand_a["capture_height_error"]
+        err_b = cand_b["capture_height_error"]
+        if err_a == 0.0 or err_a * err_b <= 0.0:
+            bracket = (turn_a, turn_b)
+            break
+
+    if bracket is None:
+        best_turn, best = min(
+            candidates,
+            key=lambda item: abs(item[1]["capture_height_error"]),
+        )
+        raise ValueError(
+            "Could not bracket cowl angle for requested capture height. "
+            f"Best turn={best_turn:.6f} deg gives capture-height error "
+            f"{best['capture_height_error']:.6e} m."
+        )
+
+    lo, hi = bracket
+    best = None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        cand_lo = eval_candidate(lo)
+        cand_mid = eval_candidate(mid)
+        if cand_mid is None:
+            hi = mid
+            continue
+        best = cand_mid
+        if abs(cand_mid["capture_height_error"]) <= 1e-10:
+            break
+        if cand_lo is None:
+            lo = mid
+            continue
+        if cand_lo["capture_height_error"] * cand_mid["capture_height_error"] <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+
+    if best is None:
+        raise ValueError("Cowl throat/capture solve failed during refinement.")
+    return best
+
+def solve_cowl_stage_from_fixed_lip(M2, theta2, h_throat, C,
+    lower_wall_point, T2=None, leading_edge_angle_deg=0.0):
+    C = np.asarray(C, dtype=float)
+    lower_wall_point = np.asarray(lower_wall_point, dtype=float)
+    lower_dir = unit_from_angle_deg(theta2)
+    n_lower = np.array([-lower_dir[1], lower_dir[0]], dtype=float)
+
+    gamma_up = gamma_air(T2) if T2 is not None else GAMMA
+    theta_max = theta_max_attached(M2, gamma=gamma_up)
+    if theta_max is None:
+        raise ValueError("Could not determine attached-shock limit for cowl stage.")
+
+    def eval_candidate(turn_deg):
+        if T2 is None:
+            sh = oblique_shock(M2, turn_deg)
+            if sh is None:
+                return None
+            beta_rel, M3, p43, pt43 = sh
+            T3 = None
+            T_ratio = None
+            gamma_eff = GAMMA
+        else:
+            sh = oblique_shock_tpg(M2, turn_deg, T2)
+            if sh is None:
+                return None
+            beta_rel, M3, p43, pt43, T_ratio, T3, gamma_eff = sh
+
+        theta_cowl = theta2 - turn_deg
+        cowl_shock_abs = theta2 - beta_rel
+        cowl_dir = unit_from_angle_deg(theta_cowl)
+        shock_dir = unit_from_angle_deg(cowl_shock_abs)
+
+        denom = cross2(shock_dir, lower_dir)
+        if abs(denom) < 1e-12:
+            return None
+
+        delta = lower_wall_point - C
+        lam_shock = cross2(delta, lower_dir) / denom
+        lam_lower = cross2(delta, shock_dir) / denom
+        if lam_shock <= 0.0 or lam_lower <= 0.0:
+            return None
+
+        T_lower = C + lam_shock * shock_dir
+        T_upper = C + ((T_lower[0] - C[0]) / cowl_dir[0]) * cowl_dir
+        h_actual = T_upper[1] - T_lower[1]
+        if h_actual <= 0.0:
+            return None
+
+        T_upper_body = point_in_body_frame(T_upper, leading_edge_angle_deg)
+        capture_height_normal = float(np.dot(C - lower_wall_point, n_lower))
+        F = C - capture_height_normal * n_lower
+        throat_geom = {
+            "C": C,
+            "F": F,
+            "T_upper": T_upper,
+            "T_lower": T_lower,
+            "x_throat": float(T_lower[0]),
+            "y_throat_upper": float(T_upper[1]),
+            "y_throat_lower": float(T_lower[1]),
+            "h_throat_actual": float(h_actual),
+            "capture_height_normal_m": capture_height_normal,
+            "cowl_shock_impingement_xy": T_lower,
+            "throat_upper_body_x_m": T_upper_body[0],
+            "throat_upper_body_y_m": T_upper_body[1],
+            "lower_wall_angle_deg": float(theta2),
+        }
+
+        return {
+            "theta_cowl": theta_cowl,
+            "cowl_turn_mag": turn_deg,
+            "beta_cowl_rel": beta_rel,
+            "M3": M3,
+            "p43": p43,
+            "pt43": pt43,
+            "T_ratio": T_ratio,
+            "T_down": T3,
+            "gamma_eff": gamma_eff,
+            "cowl_shock_abs": cowl_shock_abs,
+            "throat_height_error": h_actual - h_throat,
+            "throat_geom": throat_geom,
+        }
+
+    turn_values = np.linspace(1e-3, theta_max * 0.999, 700)
+    candidates = [(turn, eval_candidate(turn)) for turn in turn_values]
+    candidates = [(turn, cand) for turn, cand in candidates if cand is not None]
+    if not candidates:
+        raise ValueError("Could not solve cowl stage from fixed shock-focus lip.")
+
+    bracket = None
+    for (turn_a, cand_a), (turn_b, cand_b) in zip(candidates[:-1], candidates[1:]):
+        err_a = cand_a["throat_height_error"]
+        err_b = cand_b["throat_height_error"]
+        if err_a == 0.0 or err_a * err_b <= 0.0:
+            bracket = (turn_a, turn_b)
+            break
+
+    if bracket is None:
+        best_turn, best = min(
+            candidates,
+            key=lambda item: abs(item[1]["throat_height_error"]),
+        )
+        raise ValueError(
+            "Could not bracket cowl angle for shock-focus lip. "
+            f"Best turn={best_turn:.6f} deg gives throat-height error "
+            f"{best['throat_height_error']:.6e} m."
+        )
+
+    lo, hi = bracket
+    best = None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        cand_lo = eval_candidate(lo)
+        cand_mid = eval_candidate(mid)
+        if cand_mid is None:
+            hi = mid
+            continue
+        best = cand_mid
+        if abs(cand_mid["throat_height_error"]) <= 1e-10:
+            break
+        if cand_lo is None:
+            lo = mid
+            continue
+        if cand_lo["throat_height_error"] * cand_mid["throat_height_error"] <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+
+    if best is None:
+        raise ValueError("Cowl fixed-lip solve failed during refinement.")
     return best
 
 def build_d2r_result(fs,A_capture_required,h_req_normal,
@@ -2037,13 +2294,27 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         A_throat=throat_k["A_throat"],
     )
 
-    # 3) Solve cowl angle to produce that post-shock Mach
-    cowl = solve_cowl_stage_for_target_postshock(
+    # 3) Keep the ramp-shock focus as the cowl lip anchor. Then solve the
+    # cowl wall/shock so the shock impinges on the Ramp-2 lower-wall
+    # continuation and the Kantrowitz throat height closes.
+    cowl = solve_cowl_stage_from_fixed_lip(
         M2=ramp2["M_down"],
         theta2=ramp2["theta_abs"],
-        M3_target=post_cowl_target["M3_target"],
+        h_throat=throat_k["h_throat"],
+        C=geom["C"],
+        lower_wall_point=geom["P1"],
         T2=ramp2["T_down"],
+        leading_edge_angle_deg= -leading_edge_angle_deg,
     )
+    cowl["M3_target"] = post_cowl_target["M3_target"]
+    cowl["M3_error"] = abs(cowl["M3"] - post_cowl_target["M3_target"])
+    cowl["capture_height_error"] = (
+        cowl["throat_geom"]["capture_height_normal_m"] - h_req_normal
+    )
+    geom = dict(geom)
+    geom["C"] = cowl["throat_geom"]["C"]
+    geom["F"] = cowl["throat_geom"]["F"]
+    geom["lam2_lip"] = float(np.dot(geom["C"] - geom["P1"], geom["shock2_dir"]))
 
     pt_frac_after_cowl = (
         forebody["pt_fore_ratio"]
@@ -2059,14 +2330,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         T3=cowl["T_down"],
     )
 
-    throat_geom = place_throat_on_cowl_and_cowl_shock(
-        C=geom["C"],
-        theta_cowl=cowl["theta_cowl"],
-        cowl_shock_abs=cowl["cowl_shock_abs"],
-        h_throat=throat_k["h_throat"],
-        ramp2_end_point=geom["F"],
-        leading_edge_angle_deg= -leading_edge_angle_deg
-    )
+    throat_geom = cowl["throat_geom"]
 
     diffuser = build_subsonic_diffuser(
         T_upper=throat_geom["T_upper"],
@@ -2108,6 +2372,7 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
         "theta1_deg": ramp1["theta_abs"],
         "theta2_deg": ramp2["theta_abs"],
         "theta_cowl_deg": cowl["theta_cowl"],
+        "theta_lower_wall_deg": throat_geom["lower_wall_angle_deg"],
         "dtheta1_deg": ramp1["dtheta"],
         "dtheta2_deg": ramp2["dtheta"],
         "cowl_turn_mag_deg": cowl["cowl_turn_mag"],
@@ -2147,6 +2412,11 @@ def design_2ramp_shock_matched_inlet(M0,altitude_m,alpha_deg,leading_edge_angle_
 
         "throat_upper_body_x_m": throat_geom["throat_upper_body_x_m"],
         "throat_upper_body_y_m": throat_geom["throat_upper_body_y_m"],
+        "cowl_shock_impingement_xy": throat_geom["cowl_shock_impingement_xy"],
+        "throat_height_error_m": cowl["throat_height_error"],
+        "capture_height_normal_m": throat_geom["capture_height_normal_m"],
+        "capture_height_error_m": cowl["capture_height_error"],
+        "shock_focus_to_cowl_lip_distance_m": float(np.linalg.norm(geom["focus_point"] - geom["C"])),
         "post_cowl_area_m2": throat_k["A_capture_k"],
         "post_cowl_height_m": h_req_normal,
         "A_over_Astar_post_cowl": post_cowl_target["A_over_Astar_target"],
@@ -2229,6 +2499,8 @@ def print_d2r_report(result):
     print(f"Swallowed area                  = {result.get('A_swallowed_m2', float('nan')):.6f} m^2")
     print(f"Swallowed mdot                  = {result.get('mdot_swallowed_kgs', float('nan')):.6f} kg/s")
     print(f"Opening normal to Ramp 2        = {result['opening_normal_to_ramp2_m']:.6f} m")
+    print(f"Solved capture normal height    = {result.get('capture_height_normal_m', float('nan')):.6f} m")
+    print(f"Capture height closure error    = {result.get('capture_height_error_m', float('nan')):.3e} m")
 
     print("\nGEOMETRY / PANEL ANGLES")
     print("------------------------------")
@@ -2240,6 +2512,7 @@ def print_d2r_report(result):
     print(f"Forebody effective turn         = {result['dtheta_fore_eff_deg']:.3f} deg")
     print(f"Ramp 1 angle                    = {result['theta1_deg']:.3f} deg")
     print(f"Ramp 2 angle                    = {result['theta2_deg']:.3f} deg")
+    print(f"Lower wall angle                = {result.get('theta_lower_wall_deg', result['theta2_deg']):.3f} deg")
     print(f"Cowl angle                      = {result['theta_cowl_deg']:.3f} deg")
     print(f"Ramp 1 incremental turn         = {result['dtheta1_deg']:.3f} deg")
     print(f"Ramp 2 incremental turn         = {result['dtheta2_deg']:.3f} deg")
@@ -2277,6 +2550,7 @@ def print_d2r_report(result):
     print(f"Cowl lip                        = ({result['cowl_lip_xy'][0]:.6f}, {result['cowl_lip_xy'][1]:.6f}) m")
     print(f"Ramp 2 normal foot              = ({result['ramp2_normal_foot_xy'][0]:.6f}, {result['ramp2_normal_foot_xy'][1]:.6f}) m")
     print(f"Shock focus point               = ({result['shock_focus_xy'][0]:.6f}, {result['shock_focus_xy'][1]:.6f}) m")
+    print(f"Focus-to-cowl-lip distance      = {result.get('shock_focus_to_cowl_lip_distance_m', float('nan')):.6f} m")
 
 
     print("\nTHROAT")
@@ -2286,6 +2560,7 @@ def print_d2r_report(result):
     print(f"Ideal throat area               = {result['throat_area_ideal_m2']:.6f} m^2")
     print(f"Actual throat area              = {result['throat_area_actual_m2']:.6f} m^2")
     print(f"Throat height                   = {result['throat_height_m']:.6f} m")
+    print(f"Throat height closure error     = {result.get('throat_height_error_m', float('nan')):.3e} m")
     print(f"Throat lower point              = ({result['throat_lower_xy'][0]:.6f}, {result['throat_lower_xy'][1]:.6f}) m")
     print(f"Throat upper point              = ({result['throat_upper_xy'][0]:.6f}, {result['throat_upper_xy'][1]:.6f}) m")
     print(f"Throat top body-frame x          = {result['throat_upper_body_x_m']:.6f} m")
@@ -2861,6 +3136,7 @@ def evaluate_fixed_geometry_at_condition(result, M0, altitude_m, alpha_deg,
         "theta1_deg":      result["theta1_deg"],
         "theta2_deg":      result["theta2_deg"],
         "theta_cowl_deg":  result["theta_cowl_deg"],
+        "theta_lower_wall_deg": result.get("theta_lower_wall_deg", result["theta2_deg"]),
 
         "shock_fore_abs_deg": up["shock_fore_abs_deg"],
         "shock1_abs_deg":     up["shock1_abs_deg"],

@@ -1,0 +1,31 @@
+{
+  "design_digest": "e925938369b9",
+  "boost_handoff_mach": 4.0,
+  "cruise_mach": 4.8,
+  "cruise_alt_m": 19000.0,
+  "phi_cruise": 0.8,
+  "surrogate_grid": {
+    "Mach": [
+      4.0,
+      4.4,
+      4.8,
+      5.0
+    ],
+    "altitude_m": [
+      18000.0,
+      19000.0,
+      20000.0
+    ],
+    "phi": [
+      0.65,
+      0.8,
+      0.9
+    ],
+    "cache_path": "C:\\Users\\hanks\\OneDrive\\Desktop\\tamu-ucah-test\\402 - optimizer rewrite\\trajectory_opt\\.perf_cache\\table_e925938369b9_srbj_m48_19km_4x3x3_ff6f1a474c.pkl"
+  },
+  "files": {
+    "design": "fixed_srbj_outputs\\fixed_srbj_design.json",
+    "validation": "fixed_srbj_outputs\\fixed_srbj_validation.csv",
+    "summary": "fixed_srbj_outputs\\fixed_srbj_summary.json"
+  }
+}

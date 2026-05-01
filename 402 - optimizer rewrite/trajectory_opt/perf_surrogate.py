@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import sys
+import hashlib
 import pickle
 from pathlib import Path
 import numpy as np
@@ -27,17 +28,51 @@ class PerfTable:
     _FIELDS = ('thrust','isp','mdot_a','mdot_f','M4','Tt4',
                 'unstart','Pc','L','D')
 
-    def __init__(self, design: Design, engine: EngineModel):
+    def __init__(
+        self,
+        design: Design,
+        engine: EngineModel,
+        grid_M=None,
+        grid_H=None,
+        grid_PHI=None,
+        cache_label: str | None = None,
+    ):
         self.design = design
         self.engine = engine
+        self.GRID_M = np.asarray(self.GRID_M if grid_M is None else grid_M, dtype=float)
+        self.GRID_H = np.asarray(self.GRID_H if grid_H is None else grid_H, dtype=float)
+        self.GRID_PHI = np.asarray(self.GRID_PHI if grid_PHI is None else grid_PHI, dtype=float)
+        self.cache_label = cache_label
+        self._validate_grids()
         self._interps = None
         self._geom    = None
+
+    def _validate_grids(self):
+        for name in ("GRID_M", "GRID_H", "GRID_PHI"):
+            grid = getattr(self, name)
+            if grid.ndim != 1 or grid.size < 2:
+                raise ValueError(f"{name} must be a 1D array with at least two points.")
+            if not np.all(np.diff(grid) > 0.0):
+                raise ValueError(f"{name} must be strictly increasing.")
+
+    def _grid_tag(self) -> str:
+        payload = {
+            "M": self.GRID_M.tolist(),
+            "H": self.GRID_H.tolist(),
+            "PHI": self.GRID_PHI.tolist(),
+            "label": self.cache_label or "",
+        }
+        digest = hashlib.sha1(repr(payload).encode()).hexdigest()[:10]
+        return (
+            f"{self.cache_label + '_' if self.cache_label else ''}"
+            f"{len(self.GRID_M)}x{len(self.GRID_H)}x{len(self.GRID_PHI)}_{digest}"
+        )
 
     def _cache_path(self) -> Path:
         # Include the grid signature so a grid-bound change (e.g. widening
         # the altitude range) doesn't collide with an older pickle of the
         # same design.
-        grid_tag = f"{len(self.GRID_M)}x{len(self.GRID_H)}x{len(self.GRID_PHI)}"
+        grid_tag = self._grid_tag()
         return CACHE_DIR / f"table_{self.design.digest()}_{grid_tag}.pkl"
 
     def build(self, force: bool=False) -> "PerfTable":

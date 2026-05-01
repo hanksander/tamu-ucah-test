@@ -53,21 +53,23 @@ RE    = 6_371_000.0    # m
 
 # ── HCM mass budget  (total 1088 kg, integral booster design) ─────────────────
 M0             = 1088.0    # kg  gross mass at F-35 release
-M_PROP_BOOST   = 280.0     # kg  solid rocket propellant (boosts to M2.5+)
-M_FUEL_SFRJ    = 130.0     # kg  HTPB solid fuel grain (SFRJ config, kept for reference)
+M_PROP_BOOST   = 400.0     # kg  solid rocket propellant (boosts to M2.5+)
+M_FUEL_SFRJ    = 0     # kg  HTPB solid fuel grain (SFRJ config, kept for reference)
 M_STRUCT       = M0 - M_PROP_BOOST - M_FUEL_SFRJ   # 678 kg (airframe+inlet+nozzle+warhead)
 
 # LFRJ mass budget — liquid JP-10 replaces HTPB grain; same total fuel mass
-M_FUEL_LFRJ    = 130.0     # kg  liquid JP-10 fuel
+M_FUEL_LFRJ    = 270.0     # kg  liquid JP-10 fuel
+M_FUEL_LFRJ_RESERVE = 30.0 # kg  reserve fuel left at end of cruise
+M_DRY_LFRJ     = M0 - M_PROP_BOOST - M_FUEL_LFRJ
 
 # ── Aero reference ────────────────────────────────────────────────────────────
-S_REF    = 0.10           # m²  body cross-section reference area
-D_BODY   = 0.34           # m   body diameter  (matches S_REF ≈ π D²/4)
+S_REF    = 0.3           # m²  body cross-section reference area
+D_BODY   = 0.4           # m   body diameter  (matches S_REF ≈ π D²/4)
 
 # ── SFRJ hardware geometry (preserved, not used in LFRJ cruise) ───────────────
 A_INLET   = 0.012         # m²  inlet capture area (M4 design point, SFRJ)
 A_THROAT  = 0.008         # m²  nozzle throat area
-AREA_RATIO = 6.5          # Ae/At  nozzle expansion ratio
+AREA_RATIO = 4          # Ae/At  nozzle expansion ratio
 
 # ── SFRJ fuel grain (preserved) ───────────────────────────────────────────────
 RHO_FUEL   = 920.0        # kg/m³  HTPB density
@@ -84,8 +86,11 @@ H_FUEL     = 42.5e6       # J/kg  HTPB LHV
 FAR_DESIGN = 0.060
 
 # ── LFRJ-specific constants ───────────────────────────────────────────────────
-PHI_LFRJ        = 0.50    # equivalence ratio for JP-10 cruise combustion
-LFRJ_CRUISE_ALT = 20_000.0  # m  (~65,600 ft) — optimal for ram/scramjet at M4–5
+PHI_LFRJ        = 0.8   # equivalence ratio for JP-10 cruise combustion
+LFRJ_TARGET_MACH = 5
+PHI_LFRJ_MIN    = 0.60
+PHI_LFRJ_MAX    = 0.80
+LFRJ_CRUISE_ALT = 18_500.0  # m  (~65,600 ft) — optimal for ram/scramjet at M4–5
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STANDARD ATMOSPHERE (1976)
@@ -335,6 +340,16 @@ def lfrj_performance(
             float(Pc))
 
 
+def lfrj_phi_schedule(M: float) -> float:
+    """Command more fuel below Mach 4.8 and back off near the cruise target."""
+    M = float(M)
+    return float(np.clip(
+        0.20 + 0.80 * (LFRJ_TARGET_MACH - M),
+        PHI_LFRJ_MIN,
+        PHI_LFRJ_MAX,
+    ))
+
+
 def lfrj_pressure_recovery(M: float, altitude: float,
                             gamma: float = 1.4, R: float = 287.0) -> float:
     """
@@ -365,7 +380,8 @@ def eom_lfrj(state, alpha_deg, phase):
     x_r, h, V, gamma, m, A_burn = state
     h      = float(np.clip(h,     50.0,  79_900.0))
     V      = float(np.clip(V,     20.0,   5_000.0))
-    m      = float(np.clip(m,     M_STRUCT * 0.95, M0 + 10))
+    mass_floor = M0 - M_PROP_BOOST if phase == 'boost' else M_DRY_LFRJ
+    m      = float(np.clip(m,     mass_floor, M0 + 10))
     rho, _, _, a = atmosphere(h)
     M_num  = V / a
     CL, CD, L, D, q = aero(M_num, alpha_deg, rho, V)
@@ -379,7 +395,8 @@ def eom_lfrj(state, alpha_deg, phase):
         dA   = 0.0
 
     elif phase == 'cruise':
-        T_net, isp, mdot_f, Pc = lfrj_performance(M_num, h, PHI_LFRJ)
+        phi_cmd = lfrj_phi_schedule(M_num)
+        T_net, isp, mdot_f, Pc = lfrj_performance(M_num, h, phi_cmd)
         T    = T_net
         # Only fuel mass expended (oxidiser is free ram air)
         mdot = -mdot_f
@@ -430,7 +447,8 @@ def simulate_phase_lfrj(state0, phase, t_end, dt, ctrl_fn,
             isp = boost_isp()
             Pc  = 8.0e6
         elif phase == 'cruise':
-            Tp, isp, _, Pc = lfrj_performance(M_n, h, PHI_LFRJ)
+            phi_cmd = lfrj_phi_schedule(M_n)
+            Tp, isp, _, Pc = lfrj_performance(M_n, h, phi_cmd)
         else:
             Tp = 0.0; isp = 0.0; Pc = 0.0
 
@@ -455,7 +473,8 @@ def simulate_phase_lfrj(state0, phase, t_end, dt, ctrl_fn,
             if m_p <= 0.0:
                 break
         s_new    = s + ds
-        s_new[4] = max(s_new[4], M_STRUCT * 0.95)
+        mass_floor = M0 - M_PROP_BOOST if phase == 'boost' else M_DRY_LFRJ
+        s_new[4] = max(s_new[4], mass_floor)
         s_new[2] = max(s_new[2], 20.0)
         # A_burn (index 5) is not evolved for LFRJ; clamp to initial value
         s_new[5] = np.clip(s_new[5], A_BURN_MIN, A_BURN_0 * 1.05)
@@ -528,10 +547,13 @@ def run_trajectory_lfrj():
     print("\n[Phase 1] Solid Rocket Boost ...")
     print(f"  Target: accelerate to M2.5+ for LFRJ light-off")
     tb = simulate_phase_lfrj(
-        state0, 'boost', t_end=90, dt=0.5,
+        state0, 'boost', t_end=90, dt=0.1,
         ctrl_fn=alpha_boost,
         m_prop_budget=M_PROP_BOOST,
-        stop_fn=lambda s: s[4] <= M0 - M_PROP_BOOST + 0.5
+        stop_fn=lambda s: (
+            s[2] / atmosphere(s[1])[3] >= 4.0
+            or s[4] <= M0 - M_PROP_BOOST + 0.5
+        )
     )
     sf_b = [tb[k][-1] for k in ['x_range', 'h', 'V', 'gamma', 'm', 'A_burn']]
     _, _, _, a_b = atmosphere(sf_b[1])
@@ -542,7 +564,9 @@ def run_trajectory_lfrj():
 
     # Diagnose LFRJ at handoff conditions
     print(f"\n  LFRJ light-off check at M={M_boost:.2f}, h={sf_b[1]/1000:.1f} km:")
-    T_lo, isp_lo, mdot_lo, Pc_lo = lfrj_performance(M_boost, sf_b[1], PHI_LFRJ, verbose=True)
+    T_lo, isp_lo, mdot_lo, Pc_lo = lfrj_performance(
+        M_boost, sf_b[1], lfrj_phi_schedule(M_boost), verbose=True
+    )
     print(f"    T_net={T_lo:.0f} N  Isp={isp_lo:.0f} s  "
           f"mdot_f={mdot_lo:.3f} kg/s  Pc={Pc_lo/1e6:.2f} MPa")
 
@@ -553,10 +577,10 @@ def run_trajectory_lfrj():
     sf_b[3] = np.deg2rad(1.0)    # level off slightly for cruise entry
     t_c0 = tb['t'][-1]
     tc = simulate_phase_lfrj(
-        sf_b, 'cruise', t_end=t_c0 + 900, dt=1.0,
+        sf_b, 'cruise', t_end=t_c0 + 4000, dt=1.0,
         ctrl_fn=alpha_cruise,
-        m_prop_budget=M_FUEL_LFRJ,
-        stop_fn=lambda s: s[4] <= M_STRUCT + 2.0
+        m_prop_budget=M_FUEL_LFRJ - M_FUEL_LFRJ_RESERVE,
+        stop_fn=lambda s: s[4] <= M_DRY_LFRJ + M_FUEL_LFRJ_RESERVE
     )
     tc['t'] += t_c0
     sf_c = [tc[k][-1] for k in ['x_range', 'h', 'V', 'gamma', 'm', 'A_burn']]
@@ -600,10 +624,10 @@ def run_trajectory_lfrj():
 
     print("\n─────────────────────────────────────────")
     print("CONSTRAINT CHECK:")
-    ok_cruise = M_cruise >= 4.0
+    ok_cruise = M_cruise >= LFRJ_TARGET_MACH
     ok_Mi     = M_impact >= 2.0
     ok_fpa    = fpa_impact >= 80.0
-    print(f"  Cruise Mach ≥ 4.0 : {M_cruise:.2f}  {'✓' if ok_cruise else '✗ VIOLATION'}")
+    print(f"  Cruise Mach ≥ {LFRJ_TARGET_MACH:.1f} : {M_cruise:.2f}  {'✓' if ok_cruise else '✗ VIOLATION'}")
     print(f"  Impact Mach ≥ 2.0 : {M_impact:.2f}  {'✓' if ok_Mi     else '✗ VIOLATION'}")
     print(f"  Impact FPA  ≥ 80° : {fpa_impact:.1f}°  {'✓' if ok_fpa    else '✗ VIOLATION'}")
 
@@ -716,7 +740,8 @@ def do_plots_lfrj(tb, tc, td, feats):
     # ── 02  Mach vs Time ─────────────────────────────────────────────────────
     fig, ax = _new_fig()
     triplot(ax, 't', 'M')
-    ax.axhline(4.0, color='#f39c12', lw=1.2, ls=':', label='M=4 (min cruise)')
+    ax.axhline(LFRJ_TARGET_MACH, color='#f39c12', lw=1.2, ls=':',
+               label=f'M={LFRJ_TARGET_MACH:.1f} cruise')
     ax.axhline(2.0, color='#e74c3c', lw=1.2, ls=':', label='M=2 (min impact)')
     ax.set_xlabel('Time [s]', **lkw)
     ax.set_ylabel('Mach Number', **lkw)
@@ -796,7 +821,8 @@ def do_plots_lfrj(tb, tc, td, feats):
     lfrj_T_sw   = []
     lfrj_isp_sw = []
     for M in M_sw_lfrj:
-        Tp, isp_p, _, _ = lfrj_performance(M, h_ref, PHI_LFRJ)
+        phi_cmd = lfrj_phi_schedule(M)
+        Tp, isp_p, _, _ = lfrj_performance(M, h_ref, phi_cmd)
         lfrj_T_sw.append(Tp)
         lfrj_isp_sw.append(isp_p)
     lfrj_T_sw   = np.array(lfrj_T_sw)
@@ -833,7 +859,7 @@ def do_plots_lfrj(tb, tc, td, feats):
     # ── 07  T/D vs Mach ──────────────────────────────────────────────────────
     fig, ax = _new_fig()
     ax.plot(M_sw_fine, td_b, color=PC['boost'],  lw=2.0, label='Solid Rocket (Boost)')
-    ax.plot(M_sw_lfrj, td_l, color=PC['cruise'], lw=2.0, label='LFRJ (JP-10, φ=0.8)')
+    ax.plot(M_sw_lfrj, td_l, color=PC['cruise'], lw=2.0, label='LFRJ (JP-10, scheduled phi)')
     ax.axhline(1.0, color='#8b949e', lw=0.9, ls='--', label='T/D = 1')
     ax.axvline(2.5, color='#f39c12', lw=0.9, ls=':', label='LFRJ light-off M 2.5')
     valid_td = [v for v in td_b + td_l if np.isfinite(v)]
@@ -852,7 +878,7 @@ def do_plots_lfrj(tb, tc, td, feats):
     ax.plot(M_sw_fine, [boost_isp() for _ in M_sw_fine],
             color=PC['boost'], lw=2.0, ls='--', label='Solid Rocket (propellant Isp)')
     ax.plot(M_sw_lfrj, lfrj_isp_sw,
-            color=PC['cruise'], lw=2.0, label='LFRJ (fuel-based Isp, JP-10)')
+            color=PC['cruise'], lw=2.0, label='LFRJ (fuel-based Isp, scheduled phi)')
     ax.axvline(2.5, color='#f39c12', lw=0.9, ls=':', label='LFRJ light-off M 2.5')
     isp_ceil = max(3000, np.nanmax(lfrj_isp_sw) * 1.15) if len(lfrj_isp_sw) else 3000
     ax.set_ylim(0, isp_ceil)
@@ -950,8 +976,10 @@ class LFRJCruiseODE(om.ExplicitComponent):
         rho, _, _, a = atm_vec(h)
         M_n = V / a
         CL, CD, L, D, q = aero(M_n, al, rho, V)
-        lfrj_res = [lfrj_performance(Mi, hi, PHI_LFRJ)
-                    for Mi, hi in zip(M_n, h)]
+        lfrj_res = [
+            lfrj_performance(Mi, hi, lfrj_phi_schedule(Mi))
+            for Mi, hi in zip(M_n, h)
+        ]
         T      = np.array([r[0] for r in lfrj_res])
         isp    = np.array([r[1] if r[1] > 0 else 1.0 for r in lfrj_res])
         mdot_f = np.array([r[2] for r in lfrj_res])

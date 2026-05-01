@@ -1,0 +1,16 @@
+{
+  "kantrowitz_margin": 0.85,
+  "diffuser_AR": 4.5,
+  "combustor_length_m": 1.0,
+  "nozzle_AR": 4.0,
+  "LE_angle_deg": 8.0,
+  "ramp_sep_margin": 0.06,
+  "forebody_sep_margin": 0.7,
+  "inlet_width_m": 0.25,
+  "shock_focus_factor": 1.45,
+  "diffuser_min_shock_accommodation_dh": 4.0,
+  "design_M0": 4.8,
+  "design_alt_m": 19000.0,
+  "design_alpha_deg": 0.0,
+  "design_mdot_kgs": 7.5
+}

@@ -1,0 +1,29 @@
+{
+  "prescribed_handoff": true,
+  "total_range_km": 53.290514827304605,
+  "final_mach": 3.853526537158395,
+  "final_altitude_m": 17963.412585116115,
+  "max_q_kPa": 78.45628332479576,
+  "boost": null,
+  "cruise": {
+    "range_km": 53.290514827304605,
+    "fuel_used_kg": 3.1391692979174195,
+    "mean_mach": 3.9270710082316347,
+    "max_mach": 4.0,
+    "mean_altitude_m": 18634.078558144112,
+    "min_altitude_m": 17963.412585116115,
+    "max_altitude_m": 19000.0,
+    "max_unstart_flag": 0.0,
+    "max_Tt4_K": 1091.5862306366134,
+    "max_M4": 0.20620595127420094
+  },
+  "descent": null,
+  "constraints": {
+    "boost_handoff_mach_met": true,
+    "cruise_reached_mach_4p8": false,
+    "cruise_stayed_in_table_mach": true,
+    "cruise_stayed_in_table_altitude": false,
+    "cruise_no_unstart": true,
+    "fuel_within_budget": true
+  }
+}
