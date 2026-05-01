@@ -2112,6 +2112,7 @@ def main():
         M, PHI_SCHEDULE_M_LO, PHI_SCHEDULE_M_HI,
         PHI_SCHEDULE_PHI_LO, PHI_SCHEDULE_PHI_HI,
     )
+    """
     mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.0), 25)
     phi_command_array = np.array([phi_schedule_fn(M) for M in mach_range])
     print(f'  Mach sweep over {len(mach_range)} points '
@@ -2121,7 +2122,7 @@ def main():
     results = mach_sweep(mach_range, altitude=sweep_altitude_m,
                          phi=phi_command_array, alpha_deg=sweep_alpha_deg)
 
-    """
+    
 
 
     # Altitude sweep: ±2 km around design altitude, M0 and α frozen at design.
@@ -2161,7 +2162,7 @@ def main():
         phi_mach_range, phi_alt_range,
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi=PHI_DEFAULT,         ########################
     )
-    """
+    
 
     print('\n  writing figures:')
     fig_flowpath(
@@ -2197,7 +2198,7 @@ def main():
                              altitude_m=sweep_altitude_m,
                              alpha_deg=sweep_alpha_deg,
                              phi_command=phi_command_array)
-
+    """
 
     """
     fig_performance_vs_alt(
@@ -2218,6 +2219,7 @@ def main():
         alpha_deg=INLET_DESIGN_ALPHA_DEG, phi_request=PHI_DEFAULT,
     )
     """
+    """
     fig_mass_flows(results, mach_range)
     fig_station_T(results, mach_range)
     fig_station_Pt(results, mach_range)
@@ -2226,7 +2228,7 @@ def main():
 
     fig_engine_pressure_profile(design, design_cycle)
     fig_engine_temperature_profile(design, design_cycle)
-    
+    """
 
 
     print(f'\n  generating 3D CAD model (wall={cad_wall_thickness_m*1e3:.1f} mm) ...')

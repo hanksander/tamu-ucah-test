@@ -206,7 +206,7 @@ DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 2.5
 
 COMBUSTOR_LENGTH_M_DEFAULT = 1.6
 COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
-NOZZLE_AR                = 3.8  # nozzle Ae/At committed design knob
+NOZZLE_AR                = 4.5  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Vertical offset (in plot/data y) applied to the combustor + nozzle relative
@@ -259,7 +259,7 @@ ENGINE_MIN_THRUST_N         = 6_000.0
 # 1.0 → shock at throat (weak, least diffusion, safest start margin).
 # 0.7 is a conservative design-intent default — weak shock near throat,
 # mimicking typical started-mode operation.
-PS3_BIAS = 0.6
+PS3_BIAS = 0.9
 
 
 #0.14 m^3

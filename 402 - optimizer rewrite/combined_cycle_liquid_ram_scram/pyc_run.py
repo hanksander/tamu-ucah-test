@@ -2049,8 +2049,8 @@ if __name__ == '__main__':
 
     from pyc_config import PHI_DEFAULT
 
-    off_design_M0 = 4.8
-    off_design_altitude_m = 18_000.0
+    off_design_M0 = 4.0
+    off_design_altitude_m = 16_000.0
     off_design_alpha_deg = 6
     off_design_phi = PHI_DEFAULT
 
