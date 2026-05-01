@@ -382,152 +382,38 @@ def required_opening_from_mdot(mdot_required, rho0, V0, width_m):
 
 def compute_effective_capture_area(result, M0, altitude_m, alpha_deg):
     """
-    Estimate the effective external capture area for the current frozen inlet
-    geometry at a given flight condition.
+    Compatibility wrapper for the current swallowed-streamtube capture model.
 
-    Important modeling assumption for the current inlet family:
-      - The forebody shock does NOT define the cowl-lip focus.
-      - The cowl / ramp-2 entrance geometry is still set by the ramp-shock
-        system.
-      - This helper only asks: at the cowl-lip axial station, what external
-        streamtube height is available between the forebody shock and the
-        lower compression surface?
-
-    First-pass definition:
-      - Capture plane: vertical plane x = cowl_lip_x.
-      - Upper boundary: forebody shock ray evaluated at x = cowl_lip_x.
-      - Lower boundary: lower inlet/body surface evaluated at x = cowl_lip_x.
-      - Effective capture height: y_upper - y_lower, clipped at zero.
-      - Effective capture area: width_m * effective capture height.
-
-    Notes:
-      - This is a geometry-based swallowed-area surrogate only.
-      - It does NOT yet include external spillage, cowl external drag, or
-        density/velocity changes across the external compression field.
-      - It is still the correct first step because it replaces the current
-        fixed required-area assumption with a condition-dependent geometric
-        capture area.
+    Older callers expect A_capture_effective_m2 / h_capture_effective_m keys.
+    The effective area now uses compute_swallowed_streamtube(), whose capture
+    plane is normal to the freestream and whose upper boundary is traced
+    backward from the cowl lip through the external shock regions.
     """
-    fs = freestream_state(M0, altitude_m)
-
-    theta_fore = float(result["theta_fore_deg"])
-    width_m = float(result.get("width_m", np.nan))
-    if not np.isfinite(width_m) or width_m <= 0.0:
-        raise ValueError("Frozen geometry must carry a positive width_m.")
-
-    P_fore = np.asarray(result["forebody_xy"], dtype=float)
-    P0 = np.asarray(result["nose_xy"], dtype=float)
-    P1 = np.asarray(result["break2_xy"], dtype=float)
-    F = np.asarray(result["ramp2_normal_foot_xy"], dtype=float)
-    C = np.asarray(result["cowl_lip_xy"], dtype=float)
-
-    x_cap = float(C[0])
-
-    # Forebody effective turn at the requested condition.
-    dtheta_fore_eff = theta_fore + float(alpha_deg)
-    if dtheta_fore_eff <= 0.0:
-        return {
-            "ok": False,
-            "reason": "Non-positive forebody effective turn",
-            "capture_plane_x_m": x_cap,
-            "h_capture_effective_m": 0.0,
-            "A_capture_effective_m2": 0.0,
-            "mdot_capture_effective_kgs": 0.0,
-        }
-
-    # Recompute the forebody shock for the requested condition. The absolute
-    # shock angle is measured from the freestream direction because the
-    # incoming flow is still aligned with x.
-    shf = oblique_shock_tpg(M0, dtheta_fore_eff, fs["T0"])
-    if shf is None:
-        return {
-            "ok": False,
-            "reason": "Forebody shock unattached",
-            "capture_plane_x_m": x_cap,
-            "h_capture_effective_m": 0.0,
-            "A_capture_effective_m2": 0.0,
-            "mdot_capture_effective_kgs": 0.0,
-        }
-
-    beta_fore_rel_deg = float(shf[0])
-    beta_fore_abs_rad = math.radians(beta_fore_rel_deg)
-    c_beta = math.cos(beta_fore_abs_rad)
-    s_beta = math.sin(beta_fore_abs_rad)
-    if c_beta <= 1.0e-12:
-        return {
-            "ok": False,
-            "reason": "Forebody shock nearly vertical at capture plane",
-            "capture_plane_x_m": x_cap,
-            "h_capture_effective_m": 0.0,
-            "A_capture_effective_m2": 0.0,
-            "mdot_capture_effective_kgs": 0.0,
-        }
-
-    # Upper streamtube boundary: forebody shock ray at the cowl-lip x.
-    lam_cap = (x_cap - P_fore[0]) / c_beta
-    if lam_cap < 0.0:
-        return {
-            "ok": False,
-            "reason": "Capture plane lies upstream of forebody leading edge",
-            "capture_plane_x_m": x_cap,
-            "h_capture_effective_m": 0.0,
-            "A_capture_effective_m2": 0.0,
-            "mdot_capture_effective_kgs": 0.0,
-        }
-    y_upper = P_fore[1] + lam_cap * s_beta
-    upper_xy = np.array([x_cap, y_upper], dtype=float)
-
-    # Lower streamtube boundary: lower compression surface at the same x.
-    # For the current geometry, the lower surface up to the cowl-lip station
-    # is piecewise linear through forebody -> ramp1 -> ramp2.
-    lower_poly = np.vstack([P_fore, P0, P1, F])
-
-    def _polyline_y_at_x_local(polyline_xy, xq):
-        for i in range(polyline_xy.shape[0] - 1):
-            a = polyline_xy[i]
-            b = polyline_xy[i + 1]
-            x1 = float(a[0])
-            x2 = float(b[0])
-            if x1 <= xq <= x2 or x2 <= xq <= x1:
-                dx = x2 - x1
-                if abs(dx) <= 1.0e-12:
-                    return float(max(a[1], b[1]))
-                t = (xq - x1) / dx
-                return float(a[1] + t * (b[1] - a[1]))
-        raise ValueError("Capture plane x is outside lower-surface polyline.")
-
-    try:
-        y_lower = _polyline_y_at_x_local(lower_poly, x_cap)
-    except ValueError as exc:
-        return {
-            "ok": False,
-            "reason": str(exc),
-            "capture_plane_x_m": x_cap,
-            "h_capture_effective_m": 0.0,
-            "A_capture_effective_m2": 0.0,
-            "mdot_capture_effective_kgs": 0.0,
-        }
-
-    lower_xy = np.array([x_cap, y_lower], dtype=float)
-    h_capture_effective = max(0.0, y_lower - y_upper)  #y_upper - y_lower
-    A_capture_effective = width_m * h_capture_effective
-
-    # First-pass mass-flow estimate: use freestream rho and V through the
-    # geometric effective area. A later refinement can replace this with a
-    # shocked-streamtube density/velocity estimate if needed.
-    mdot_capture_effective = fs["rho0"] * fs["V0"] * A_capture_effective
+    swallowed = compute_swallowed_streamtube(
+        result, M0=M0, altitude_m=altitude_m, alpha_deg=alpha_deg,
+    )
+    stream_meta = swallowed.get("streamtube_meta", {})
 
     return {
-        "ok": True,
-        "reason": "",
-        "capture_plane_x_m": x_cap,
-        "beta_fore_abs_deg": beta_fore_rel_deg,
-        "capture_upper_xy": upper_xy,
-        "capture_lower_xy": lower_xy,
-        "h_capture_effective_m": h_capture_effective,
-        "A_capture_effective_m2": A_capture_effective,
-        "mdot_capture_effective_kgs": mdot_capture_effective,
+        "ok": bool(swallowed.get("ok", False)),
+        "reason": str(swallowed.get("reason", "")),
+        "capture_plane_x_m": float(swallowed.get("x_capture_m", np.nan)),
+        "capture_plane_definition": str(stream_meta.get("capture_plane_definition", "")),
+        "capture_plane_dir_xy": np.asarray(
+            stream_meta.get("capture_plane_dir_xy", [np.nan, np.nan]), dtype=float
+        ),
+        "freestream_angle_deg": float(stream_meta.get("freestream_angle_deg", np.nan)),
+        "capture_upper_xy": np.asarray(
+            swallowed.get("upper_capture_xy", [np.nan, np.nan]), dtype=float
+        ),
+        "capture_lower_xy": np.asarray(
+            swallowed.get("lower_capture_xy", [np.nan, np.nan]), dtype=float
+        ),
+        "h_capture_effective_m": float(swallowed.get("h_swallowed_m", 0.0)),
+        "A_capture_effective_m2": float(swallowed.get("A_swallowed_m2", 0.0)),
+        "mdot_capture_effective_kgs": float(swallowed.get("mdot_swallowed_kgs", 0.0)),
         "A_capture_required_m2": float(result.get("A_capture_required_m2", np.nan)),
+        "swallowed_streamtube": swallowed,
     }
 
 
@@ -540,16 +426,15 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
     upstream to a capture plane ahead of the external shocks.
 
     Core definition:
-      - Choose a freestream entrance plane x = x_capture. By default this is
-        the forebody leading-edge station, not an arbitrary plane upstream of
-        the geometry.
-      - Lower boundary: the forebody start at the entrance plane.
+      - Choose a freestream entrance plane through the forebody leading edge,
+        normal to the freestream direction.
+      - Lower boundary: the forebody start on the entrance plane.
       - Upper boundary: a cowl-side streamline traced backward from the cowl
         lip. The streamline bends as it crosses the external shocks, so it is
         piecewise aligned with the local flow directions:
             post-ramp2 -> post-ramp1 -> post-forebody -> freestream.
-      - Swallowed streamtube height is the gap between the lower and upper
-        entrance points on the freestream plane.
+      - Swallowed streamtube height is the distance between the lower and
+        upper entrance points measured along the freestream-normal plane.
       - Because the entrance plane is upstream of compression, swallowed mass
         uses the freestream rho0 and V0 by default.
     """
@@ -589,6 +474,22 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
             return None
         return origin_xy + lam * direction_xy
 
+    def _ray_plane_intersection(origin_xy, direction_xy,
+                                plane_point_xy, plane_dir_xy):
+        origin_xy = np.asarray(origin_xy, dtype=float)
+        direction_xy = np.asarray(direction_xy, dtype=float)
+        plane_point_xy = np.asarray(plane_point_xy, dtype=float)
+        plane_dir_xy = np.asarray(plane_dir_xy, dtype=float)
+        denom = cross2(direction_xy, plane_dir_xy)
+        if abs(denom) <= 1.0e-12:
+            return None
+        delta = plane_point_xy - origin_xy
+        lam = cross2(delta, plane_dir_xy) / denom
+        mu = cross2(delta, direction_xy) / denom
+        if lam < -1.0e-12:
+            return None
+        return origin_xy + lam * direction_xy, float(mu)
+
     if x_capture is None:
         x_capture = float(P_fore[0])
     x_capture = float(x_capture)
@@ -601,6 +502,14 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
             "A_swallowed_m2": 0.0,
             "mdot_swallowed_kgs": 0.0,
         }
+
+    freestream_angle_deg = -float(alpha_deg)
+    freestream_dir = unit_from_angle_deg(freestream_angle_deg)
+    upstream_freestream_dir = -freestream_dir
+    capture_plane_dir = np.array([-freestream_dir[1], freestream_dir[0]], dtype=float)
+    if capture_plane_dir[1] < 0.0:
+        capture_plane_dir = -capture_plane_dir
+    lower_capture_xy = P_fore.copy()
 
     dtheta_fore_eff = theta_fore + float(alpha_deg)
     if dtheta_fore_eff <= 0.0:
@@ -624,6 +533,7 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
             "mdot_swallowed_kgs": 0.0,
         }
     beta_fore_rel, M_fore, p_fore_ratio, pt_fore_ratio, _, T_fore, _ = shf
+    shock_fore_abs_deg = freestream_angle_deg + float(beta_fore_rel)
 
     dtheta1 = theta1 - theta_fore
     if dtheta1 <= 0.0:
@@ -673,8 +583,8 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
         {
             "name": "forebody",
             "origin_xy": P_fore,
-            "angle_deg": float(beta_fore_rel),
-            "dir_xy": unit_from_angle_deg(float(beta_fore_rel)),
+            "angle_deg": float(shock_fore_abs_deg),
+            "dir_xy": unit_from_angle_deg(float(shock_fore_abs_deg)),
             "flow_angle_deg": float(theta_fore),
             "M_down": float(M_fore),
             "T_down": float(T_fore),
@@ -702,8 +612,6 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
         },
     ]
 
-    lower_capture_xy = np.array([x_capture, P_fore[1]], dtype=float)
-
     current_point = np.asarray(C, dtype=float)
     swallowed_path = [current_point.copy()]
     bend_points = {}
@@ -727,41 +635,43 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
         )
         if hit is None:
             continue
-        if hit[0] <= x_capture + 1.0e-12:
-            if abs(upstream_dir[0]) <= 1.0e-12:
-                return {
-                    "ok": False,
-                    "reason": "Backward streamline is nearly vertical at the entrance plane",
-                    "x_capture_m": x_capture,
-                    "h_swallowed_m": 0.0,
-                    "A_swallowed_m2": 0.0,
-                    "mdot_swallowed_kgs": 0.0,
-                }
-            lam = (x_capture - current_point[0]) / upstream_dir[0]
-            current_point = current_point + lam * upstream_dir
-            swallowed_path.append(current_point.copy())
-            break
         current_point = hit
         swallowed_path.append(current_point.copy())
         bend_points[shock_name] = hit.copy()
-    else:
-        current_point = np.array([x_capture, current_point[1]], dtype=float)
-        swallowed_path.append(current_point.copy())
+
+    capture_hit = _ray_plane_intersection(
+        current_point,
+        upstream_freestream_dir,
+        lower_capture_xy,
+        capture_plane_dir,
+    )
+    if capture_hit is None:
+        return {
+            "ok": False,
+            "reason": "Freestream backtrace is parallel to the capture plane",
+            "x_capture_m": x_capture,
+            "h_swallowed_m": 0.0,
+            "A_swallowed_m2": 0.0,
+            "mdot_swallowed_kgs": 0.0,
+        }
+    current_point, capture_plane_coordinate = capture_hit
+    swallowed_path.append(current_point.copy())
 
     upper_capture_xy = np.asarray(swallowed_path[-1], dtype=float)
     y_upper = float(upper_capture_xy[1])
+    h_signed = float(np.dot(upper_capture_xy - lower_capture_xy, capture_plane_dir))
 
-    if y_upper < lower_capture_xy[1] - 1.0e-12:
+    if h_signed < -1.0e-12:
         return {
             "ok": False,
-            "reason": "Computed cowl-side boundary lies above the lower entrance boundary",
+            "reason": "Computed cowl-side boundary lies below the lower entrance boundary",
             "x_capture_m": x_capture,
             "h_swallowed_m": 0.0,
             "A_swallowed_m2": 0.0,
             "mdot_swallowed_kgs": 0.0,
         }
 
-    h_swallowed = max(0.0, y_upper - lower_capture_xy[1])
+    h_swallowed = max(0.0, h_signed)
     A_swallowed = width_m * h_swallowed
 
     region_tag = "freestream"
@@ -791,7 +701,7 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
         Vx2 = V2 * math.cos(math.radians(theta2))
 
         y_mid = 0.5 * (y_upper + lower_capture_xy[1])
-        y_fore = _ray_y_at_x(P_fore, float(beta_fore_rel), x_capture)
+        y_fore = _ray_y_at_x(P_fore, float(shock_fore_abs_deg), x_capture)
         y_s1 = _ray_y_at_x(P0, float(theta_fore + beta1_rel), x_capture)
         y_s2 = _ray_y_at_x(P1, float(theta1 + beta2_rel), x_capture)
 
@@ -829,6 +739,8 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
         "upper_capture_xy": upper_capture_xy,
         "swallowed_boundary_xy": np.asarray(swallowed_path, dtype=float),
         "h_swallowed_m": h_swallowed,
+        "h_swallowed_normal_m": h_swallowed,
+        "h_swallowed_vertical_m": float(upper_capture_xy[1] - lower_capture_xy[1]),
         "A_swallowed_m2": A_swallowed,
         "region_tag": region_tag,
         "rho_capture_kgm3": float(rho_capture),
@@ -840,7 +752,10 @@ def compute_swallowed_streamtube(result, M0, altitude_m, alpha_deg,
             "ramp2_y_m": float(y_s2),
         },
         "streamtube_meta": {
-            "capture_plane_definition": "forebody_leading_edge_plane",
+            "capture_plane_definition": "freestream_normal_through_forebody_leading_edge",
+            "freestream_angle_deg": float(freestream_angle_deg),
+            "capture_plane_dir_xy": capture_plane_dir,
+            "capture_plane_coordinate_m": float(capture_plane_coordinate),
             "upper_boundary_model": "piecewise_reverse_streamline",
             "lower_boundary_model": "forebody_start_point",
             "uses_shocked_density": bool(use_shocked_density),

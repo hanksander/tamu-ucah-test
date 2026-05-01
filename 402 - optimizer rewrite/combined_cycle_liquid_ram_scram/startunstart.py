@@ -12,6 +12,9 @@ import pyc_run
 
 inlet2 = pyc_run._inlet2
 R_AIR = 287.05
+DEFAULT_OFF_DESIGN_MACH = 5
+DEFAULT_OFF_DESIGN_ALTITUDE_M = 18_000.0
+DEFAULT_OFF_DESIGN_ALPHA_DEG = 6
 
 
 def gamma_mass_function(gamma, R):
@@ -161,18 +164,71 @@ def evaluate_inlet_capacity_and_startability(
     }
 
 
+def analyze_pyc_config_fixed_geometry_high_condition(
+        M0=None,
+        altitude_m=None,
+        alpha_deg=None,
+        margin_unstart=0.85,
+):
+    """
+    Evaluate the fixed inlet geometry built from pyc_config at a higher
+    Mach/altitude operating point.
+
+    If M0, altitude_m, or alpha_deg are omitted, this uses the pyc_config
+    design geometry and evaluates it at the DEFAULT_OFF_DESIGN_* settings.
+    """
+    design = pyc_run._get_inlet_design()
+    M_eval = (
+        float(M0) if M0 is not None
+        else DEFAULT_OFF_DESIGN_MACH
+    )
+    altitude_eval = (
+        float(altitude_m) if altitude_m is not None
+        else DEFAULT_OFF_DESIGN_ALTITUDE_M
+    )
+    alpha_eval = (
+        float(alpha_deg) if alpha_deg is not None
+        else DEFAULT_OFF_DESIGN_ALPHA_DEG
+    )
+
+    result = evaluate_inlet_capacity_and_startability(
+        design=design,
+        M0=M_eval,
+        altitude_m=altitude_eval,
+        alpha_deg=alpha_eval,
+        margin_unstart=margin_unstart,
+    )
+    result["geometry_design_M0"] = float(design["design_M0"])
+    result["geometry_design_altitude_m"] = float(design["design_altitude_m"])
+    result["geometry_design_alpha_deg"] = float(design["alpha_deg"])
+    return result
+
+
+def print_startability_result(title, result):
+    print(f"\n{title}")
+    print("-" * len(title))
+    for k, v in result.items():
+        print(f"{k}: {v}")
+
+
 if __name__ == "__main__":
     # Uses your cached/default inlet design from pyc_config + pyc_run.
     design = pyc_run._get_inlet_design()
 
-    result = evaluate_inlet_capacity_and_startability(
+    design_result = evaluate_inlet_capacity_and_startability(
         design=design,
         M0=float(design["design_M0"]),
         altitude_m=float(design["design_altitude_m"]),
-        alpha_deg=float(design["alpha_deg"]),
+        alpha_deg= float(design["alpha_deg"]),
     )
 
-    print("\nINLET CAPACITY / STARTABILITY CHECK")
-    print("-----------------------------------")
-    for k, v in result.items():
-        print(f"{k}: {v}")
+    high_result = analyze_pyc_config_fixed_geometry_high_condition()
+
+    print_startability_result(
+        "INLET CAPACITY / STARTABILITY CHECK - DESIGN CONDITION",
+        design_result,
+    )
+    print_startability_result(
+        "INLET CAPACITY / STARTABILITY CHECK - HIGHER MACH/ALTITUDE",
+        high_result,
+    )

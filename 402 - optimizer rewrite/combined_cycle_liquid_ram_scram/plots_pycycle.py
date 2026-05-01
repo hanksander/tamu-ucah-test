@@ -2107,7 +2107,7 @@ def main():
     PHI_SCHEDULE_M_LO   = 4.0
     PHI_SCHEDULE_M_HI   = 5.0
     PHI_SCHEDULE_PHI_LO = 0.8
-    PHI_SCHEDULE_PHI_HI = 0.5
+    PHI_SCHEDULE_PHI_HI = 0.6
     phi_schedule_fn = lambda M: phi_schedule(
         M, PHI_SCHEDULE_M_LO, PHI_SCHEDULE_M_HI,
         PHI_SCHEDULE_PHI_LO, PHI_SCHEDULE_PHI_HI,

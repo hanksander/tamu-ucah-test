@@ -165,16 +165,16 @@ INLET_DESIGN_M0                    = 4.0
 INLET_DESIGN_ALT_M                 = 16_000.0   # mid of 19–21 km envelope
 INLET_DESIGN_ALPHA_DEG             = 0        # worst-α design anchor
 INLET_DESIGN_LEADING_EDGE_ANGLE_DEG = 8
-INLET_DESIGN_MDOT_KGS              = 5     # design-point air mass flow [kg/s]
+INLET_DESIGN_MDOT_KGS              = 4.5     # design-point air mass flow [kg/s]
 INLET_DESIGN_WIDTH_M               = 0.25   # inlet spanwise width [m] (hard req)
-INLET_FOREBODY_LENGTH_M            = 0.8  # forebody leading edge -> nose [m]
+INLET_FOREBODY_LENGTH_M            = 0.75  # forebody leading edge -> nose [m]
 INLET_FOREBODY_SEP_MARGIN          = 0.7
 INLET_RAMP_SEP_MARGIN              = 0.25
-INLET_KANTROWITZ_MARGIN            = 0.95
-INLET_SHOCK_FOCUS_FACTOR           = 1.25
+INLET_KANTROWITZ_MARGIN            = 0.8
+INLET_SHOCK_FOCUS_FACTOR           = 1.35
 INLET_COWL_LIP_AXIAL_OFFSET_M      = 0.0
 INLET_COWL_LIP_NORMAL_OFFSET_M     = 0.0
-INLET_CAPTURE_RATIO_CORRECTION     = 0.6
+INLET_CAPTURE_RATIO_CORRECTION     = 1
 
 # Air properties used by 402inlet2's cold-air oblique/normal-shock solver
 # (freestream-temperature relations). The thermally-perfect path uses
@@ -206,7 +206,7 @@ DIFFUSER_MIN_SHOCK_ACCOMMODATION_DH = 2.5
 
 COMBUSTOR_LENGTH_M_DEFAULT = 1.6
 COMBUSTOR_WIDTH_M_DEFAULT  = 0.35
-NOZZLE_AR                = 4  # nozzle Ae/At committed design knob
+NOZZLE_AR                = 3.8  # nozzle Ae/At committed design knob
 NOZZLE_AR_DEFAULT        = NOZZLE_AR   # legacy alias
 
 # Vertical offset (in plot/data y) applied to the combustor + nozzle relative

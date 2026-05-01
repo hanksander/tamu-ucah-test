@@ -486,6 +486,485 @@ def _choked_nozzle_mass_param(gamma: float, R: float) -> float:
     return float(np.sqrt(gamma / R) * (2.0 / gp1) ** (gp1 / (2.0 * gm1)))
 
 
+def _fixed_nozzle_capacity_from_face(face: dict, W_air: float,
+                                     A_noz_throat: float) -> dict:
+    """Mass-flow balance terms for the combustor face response and fixed At."""
+    Tt4 = float(face['Tt4'])
+    Pt4 = float(face['Pt4'])
+    gamma4 = float(face['gamma4'])
+    R4 = float(face['R4'])
+    FAR = float(face['f_ratio'])
+    mdot_total = float(W_air) * (1.0 + FAR)
+    Gamma_mass = _choked_nozzle_mass_param(gamma4, R4)
+    mdot_capacity = Pt4 * float(A_noz_throat) * Gamma_mass / np.sqrt(Tt4)
+    return {
+        'mdot_total': float(mdot_total),
+        'mdot_capacity': float(mdot_capacity),
+        'mass_residual': float(mdot_capacity - mdot_total),
+        'Tt4': Tt4,
+        'Pt4': Pt4,
+        'gamma4': gamma4,
+        'R4': R4,
+        'FAR': FAR,
+    }
+
+
+def _nozzle_mass_residual_for_pback(
+    p_back: float,
+    design: dict,
+    M0: float,
+    altitude_m: float,
+    alpha_deg: float,
+    W_air: float,
+    phi: float,
+    thermo,
+) -> dict:
+    """Evaluate fixed-throat mass residual for a trial terminal-shock p_back."""
+    cap = _inlet2.compute_inlet_capability(
+        design,
+        M0=M0,
+        altitude_m=altitude_m,
+        alpha_deg=alpha_deg,
+        p_back=float(p_back),
+    )
+    if not cap.get('ok', False):
+        return {
+            'ok': False,
+            'reason': cap.get('reason', 'capability failed'),
+            'capability': cap,
+            'mass_residual': float('nan'),
+        }
+
+    face = combustor_face_response(
+        Pt3=float(cap['Pt3_deliverable']),
+        Tt3=float(cap['Tt0']),
+        M3=float(cap['M3_diffuser_exit']),
+        phi=float(phi),
+        thermo=thermo,
+        area_ratio=1.0,
+    )
+    balance = _fixed_nozzle_capacity_from_face(
+        face, W_air=W_air, A_noz_throat=float(design['A_noz_throat']),
+    )
+    return {
+        'ok': True,
+        'reason': '',
+        'capability': cap,
+        'face': face,
+        **balance,
+    }
+
+
+def _solve_coupled_inlet_nozzle_capability(
+    design: dict,
+    M0: float,
+    altitude_m: float,
+    alpha_deg: float,
+    W_air: float,
+    phi: float,
+    thermo,
+) -> dict:
+    """Solve terminal-shock p_back so fixed nozzle capacity matches W_air."""
+    base = _get_capability(design, M0, altitude_m, alpha_deg)
+    if not base.get('ok', False):
+        return base
+
+    Pt_after_cowl = float(base['Pt_after_cowl'])
+    Tt0 = float(base['Tt0'])
+    probe = _inlet2.solve_terminal_shock_position(
+        design,
+        p_back=0.5 * max(Pt_after_cowl, 1.0),
+        Pt_after_cowl=Pt_after_cowl,
+        Tt0=Tt0,
+    )
+    Ps_min = float(probe['Ps_min'])
+    Ps_max = float(probe['Ps_max'])
+    if not (np.isfinite(Ps_min) and np.isfinite(Ps_max) and Ps_max > Ps_min > 0.0):
+        return {
+            'ok': False,
+            'reason': 'Invalid terminal-shock pressure bracket.',
+            'terminal_probe': probe,
+            'base_capability': base,
+        }
+
+    eps = 1.0e-5 * (Ps_max - Ps_min)
+    p_lo = Ps_min + eps
+    p_hi = Ps_max - eps
+
+    def _eval(p_back):
+        return _nozzle_mass_residual_for_pback(
+            p_back, design, M0, altitude_m, alpha_deg, W_air, phi, thermo,
+        )
+
+    lo_eval = _eval(p_lo)
+    hi_eval = _eval(p_hi)
+    f_lo = float(lo_eval.get('mass_residual', np.nan))
+    f_hi = float(hi_eval.get('mass_residual', np.nan))
+
+    solved = False
+    p_back_target = float('nan')
+    root_eval = None
+    fallback_reason = ''
+    if (lo_eval.get('ok', False) and hi_eval.get('ok', False) and
+            np.isfinite(f_lo) and np.isfinite(f_hi)):
+        if abs(f_lo) < 1.0e-8:
+            p_back_target = p_lo
+            root_eval = lo_eval
+            solved = True
+        elif abs(f_hi) < 1.0e-8:
+            p_back_target = p_hi
+            root_eval = hi_eval
+            solved = True
+        elif f_lo * f_hi < 0.0:
+            def _res(p_back):
+                return float(_eval(p_back)['mass_residual'])
+            p_back_target = float(_brentq(
+                _res, p_lo, p_hi, xtol=1.0e-4, rtol=1.0e-6, maxiter=60,
+            ))
+            root_eval = _eval(p_back_target)
+            solved = bool(root_eval.get('ok', False))
+        else:
+            fallback_reason = (
+                'Fixed-nozzle mass residual did not bracket over diffuser '
+                'pressure window.'
+            )
+    else:
+        fallback_reason = 'Could not evaluate fixed-nozzle residual bracket.'
+
+    if not solved:
+        p_back_target = Ps_min + float(np.clip(PS3_BIAS, 0.0, 1.0)) * (Ps_max - Ps_min)
+        root_eval = _eval(p_back_target)
+        if not root_eval.get('ok', False):
+            cap = _solve_terminal_target_capability(design, M0, altitude_m, alpha_deg)
+            if cap.get('ok', False):
+                cap['coupled_nozzle_solved'] = False
+                cap['coupled_nozzle_fallback'] = True
+                cap['coupled_nozzle_reason'] = fallback_reason or root_eval.get('reason', '')
+            return cap
+
+    cap = root_eval['capability']
+    cap['terminal_probe'] = probe
+    cap['p_back_target'] = float(p_back_target)
+    cap['shock_target_bias'] = float('nan') if solved else float(PS3_BIAS)
+    cap['coupled_nozzle_solved'] = bool(solved)
+    cap['coupled_nozzle_fallback'] = not bool(solved)
+    cap['coupled_nozzle_reason'] = '' if solved else fallback_reason
+    cap['coupled_nozzle_phi'] = float(phi)
+    cap['coupled_nozzle_mass_residual'] = float(root_eval['mass_residual'])
+    cap['coupled_nozzle_mass_capacity'] = float(root_eval['mdot_capacity'])
+    cap['coupled_nozzle_mdot_total'] = float(root_eval['mdot_total'])
+    if 'face' in root_eval:
+        face = root_eval['face']
+        cap['coupled_face_Tt4'] = float(face.get('Tt4', np.nan))
+        cap['coupled_face_Pt4'] = float(face.get('Pt4', np.nan))
+        cap['coupled_face_gamma4'] = float(face.get('gamma4', np.nan))
+        cap['coupled_face_R4'] = float(face.get('R4', np.nan))
+        cap['coupled_face_M4'] = float(face.get('M4', np.nan))
+        cap['coupled_face_Ps4'] = float(face.get('Ps4', np.nan))
+    cap['coupled_nozzle_bracket'] = {
+        'Ps_min': Ps_min,
+        'Ps_max': Ps_max,
+        'p_lo': float(p_lo),
+        'p_hi': float(p_hi),
+        'res_lo': f_lo,
+        'res_hi': f_hi,
+    }
+    return cap
+
+
+def _static_over_total_pressure(M: float, gamma: float) -> float:
+    return float((1.0 + 0.5 * (gamma - 1.0) * M * M) ** (-gamma / (gamma - 1.0)))
+
+
+def _static_temperature_from_total(Tt: float, M: float, gamma: float) -> float:
+    return float(Tt / (1.0 + 0.5 * (gamma - 1.0) * M * M))
+
+
+def _subsonic_mach_from_area_ratio(A_over_Astar: float, gamma: float,
+                                   tol: float = 1.0e-7,
+                                   max_iter: int = 80) -> float:
+    if A_over_Astar < 1.0:
+        raise ValueError("A/A* must be >= 1 for subsonic nozzle branch.")
+    lo = 1.0e-8
+    hi = 1.0 - 1.0e-8
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        f_mid = _inlet2.area_mach_ratio(mid, gamma=gamma) - A_over_Astar
+        if abs(f_mid) < tol:
+            return float(mid)
+        if f_mid > 0.0:
+            lo = mid
+        else:
+            hi = mid
+    return float(0.5 * (lo + hi))
+
+
+def _expansion_state_from_pressure(Ps_exit: float, Pamb: float,
+                                   rel_tol: float = 0.02) -> str:
+    if Pamb <= 0.0:
+        return "unknown"
+    ratio = Ps_exit / Pamb
+    if ratio > 1.0 + rel_tol:
+        return "under-expanded"
+    if ratio < 1.0 - rel_tol:
+        return "over-expanded"
+    return "ideally expanded"
+
+
+def _normal_shock_exit_pressure_for_area_ratio(
+    shock_area_ratio: float,
+    exit_area_ratio: float,
+    Pt_upstream: float,
+    Tt_upstream: float,
+    gamma: float,
+) -> dict:
+    """Quasi-1D CD-nozzle state with a normal shock at A_s/A_t."""
+    M1 = float(_inlet2.invert_area_mach_ratio_supersonic(
+        shock_area_ratio, gamma=gamma,
+    ))
+    T1 = _static_temperature_from_total(Tt_upstream, M1, gamma)
+    P1 = Pt_upstream * _static_over_total_pressure(M1, gamma)
+    M2, p2_p1, _, _, pt2_pt1 = _inlet2.normal_shock(M1, gamma=gamma)
+    Pt2 = Pt_upstream * pt2_pt1
+    P2 = P1 * p2_p1
+    Astar_downstream = shock_area_ratio / _inlet2.area_mach_ratio(M2, gamma=gamma)
+    exit_sub_area_ratio = exit_area_ratio / max(Astar_downstream, 1.0e-12)
+    M_exit = _subsonic_mach_from_area_ratio(exit_sub_area_ratio, gamma=gamma)
+    T_exit = _static_temperature_from_total(Tt_upstream, M_exit, gamma)
+    P_exit = Pt2 * _static_over_total_pressure(M_exit, gamma)
+    return {
+        "shock_area_ratio": float(shock_area_ratio),
+        "M_before_shock": float(M1),
+        "M_after_shock": float(M2),
+        "P_before_shock": float(P1),
+        "P_after_shock": float(P2),
+        "Pt_after_shock": float(Pt2),
+        "pt_ratio_shock": float(pt2_pt1),
+        "M_exit": float(M_exit),
+        "T_exit": float(T_exit),
+        "P_exit": float(P_exit),
+    }
+
+
+def _solve_fixed_cd_nozzle(
+    Pt4: float,
+    Tt4: float,
+    mdot_total: float,
+    throat_area: float,
+    exit_area: float,
+    Pamb: float,
+    phi: float,
+    thermo,
+    Cv: float,
+    gamma_hint: float | None = None,
+    R_hint: float | None = None,
+) -> dict:
+    """Frozen-geometry CD nozzle performance and expansion regime.
+
+    Cv is applied only to momentum. It is not converted into a Pt loss for
+    expansion-state classification.
+    """
+    Pt4 = float(Pt4)
+    Tt4 = float(Tt4)
+    mdot_total = float(mdot_total)
+    throat_area = float(throat_area)
+    exit_area = float(exit_area)
+    Pamb = float(Pamb)
+    Cv = float(Cv)
+
+    if (Pt4 <= 0.0 or Tt4 <= 0.0 or mdot_total <= 0.0 or
+            throat_area <= 0.0 or exit_area <= 0.0 or Pamb <= 0.0):
+        return {
+            "regime": "invalid",
+            "choked": False,
+            "M_throat": 0.0,
+            "M_exit": 0.0,
+            "T_exit": Tt4,
+            "P_exit": Pamb,
+            "Pt_exit": max(Pt4, 0.0),
+            "gamma_exit": float(gamma_hint if gamma_hint is not None else AIR_GAM),
+            "R_exit": AIR_R,
+            "V_exit": 0.0,
+            "Fg": 0.0,
+            "F_momentum": 0.0,
+            "F_pressure": 0.0,
+            "expansion_state": "invalid",
+            "mass_capacity": 0.0,
+            "mass_residual": -mdot_total,
+            "clean_supersonic_M_exit": float("nan"),
+            "clean_supersonic_P_exit": float("nan"),
+        }
+
+    gamma = float(gamma_hint if gamma_hint is not None else AIR_GAM)
+    gamma = float(np.clip(gamma, 1.05, 1.67))
+    area_ratio = exit_area / throat_area
+    R_ref = float(R_hint if R_hint is not None else thermo.R(Tt4, phi, max(Pt4, 1.0)))
+    Gamma_mass = _choked_nozzle_mass_param(gamma, R_ref)
+    mdot_capacity = Pt4 * throat_area * Gamma_mass / np.sqrt(Tt4)
+    p_crit_ratio = ((gamma + 1.0) / 2.0) ** (gamma / (gamma - 1.0))
+    choked = bool(Pt4 / Pamb >= p_crit_ratio and area_ratio >= 1.0)
+
+    if not choked:
+        pressure_ratio = max(Pt4 / Pamb, 1.0)
+        M_exit = float(np.sqrt(max(
+            0.0,
+            2.0 / (gamma - 1.0) *
+            (pressure_ratio ** ((gamma - 1.0) / gamma) - 1.0),
+        )))
+        M_exit = min(M_exit, 1.0 - 1.0e-8)
+        T_exit = _static_temperature_from_total(Tt4, M_exit, gamma)
+        gamma_exit = float(thermo.gamma(T_exit, phi, Pamb))
+        R_exit = float(thermo.R(T_exit, phi, Pamb))
+        V_ideal = M_exit * np.sqrt(gamma_exit * R_exit * T_exit)
+        V_exit = Cv * V_ideal
+        F_momentum = mdot_total * V_exit
+        return {
+            "regime": "unchoked",
+            "choked": False,
+            "M_throat": float(M_exit),
+            "M_exit": float(M_exit),
+            "T_exit": float(T_exit),
+            "P_exit": float(Pamb),
+            "Pt_exit": float(Pt4),
+            "gamma_exit": gamma_exit,
+            "R_exit": R_exit,
+            "V_exit": float(V_exit),
+            "Fg": float(F_momentum),
+            "F_momentum": float(F_momentum),
+            "F_pressure": 0.0,
+            "expansion_state": "unchoked",
+            "mass_capacity": float(mdot_capacity),
+            "mass_residual": float(mdot_capacity - mdot_total),
+            "clean_supersonic_M_exit": float("nan"),
+            "clean_supersonic_P_exit": float("nan"),
+        }
+
+    M_clean = float(_inlet2.invert_area_mach_ratio_supersonic(
+        area_ratio, gamma=gamma,
+    ))
+    T_clean = _static_temperature_from_total(Tt4, M_clean, gamma)
+    gamma_clean = float(thermo.gamma(T_clean, phi, max(Pamb, 1.0)))
+    R_clean = float(thermo.R(T_clean, phi, max(Pamb, 1.0)))
+    M_clean = float(_inlet2.invert_area_mach_ratio_supersonic(
+        area_ratio, gamma=gamma_clean,
+    ))
+    T_clean = _static_temperature_from_total(Tt4, M_clean, gamma_clean)
+    P_clean = Pt4 * _static_over_total_pressure(M_clean, gamma_clean)
+    V_clean_ideal = M_clean * np.sqrt(gamma_clean * R_clean * T_clean)
+
+    if P_clean >= Pamb * 0.98:
+        V_exit = Cv * V_clean_ideal
+        F_momentum = mdot_total * V_exit
+        F_pressure = (P_clean - Pamb) * exit_area
+        return {
+            "regime": "supersonic_clean",
+            "choked": True,
+            "M_throat": 1.0,
+            "M_exit": float(M_clean),
+            "T_exit": float(T_clean),
+            "P_exit": float(P_clean),
+            "Pt_exit": float(Pt4),
+            "gamma_exit": gamma_clean,
+            "R_exit": R_clean,
+            "V_exit": float(V_exit),
+            "Fg": float(F_momentum + F_pressure),
+            "F_momentum": float(F_momentum),
+            "F_pressure": float(F_pressure),
+            "expansion_state": _expansion_state_from_pressure(P_clean, Pamb),
+            "mass_capacity": float(mdot_capacity),
+            "mass_residual": float(mdot_capacity - mdot_total),
+            "clean_supersonic_M_exit": float(M_clean),
+            "clean_supersonic_P_exit": float(P_clean),
+        }
+
+    shock_solution = None
+    if area_ratio > 1.0 + 1.0e-6:
+        lo = 1.0 + 1.0e-5
+        hi = area_ratio
+
+        def _shock_res(A_ratio):
+            return (_normal_shock_exit_pressure_for_area_ratio(
+                A_ratio, area_ratio, Pt4, Tt4, gamma_clean,
+            )["P_exit"] - Pamb)
+
+        try:
+            f_lo = _shock_res(lo)
+            f_hi = _shock_res(hi)
+            if np.isfinite(f_lo) and np.isfinite(f_hi):
+                root = None
+                if abs(f_lo) < 1.0e-6:
+                    root = lo
+                elif abs(f_hi) < 1.0e-6:
+                    root = hi
+                elif f_lo * f_hi < 0.0:
+                    root = float(_brentq(_shock_res, lo, hi,
+                                         xtol=1.0e-6, rtol=1.0e-6,
+                                         maxiter=60))
+                if root is not None:
+                    shock_solution = _normal_shock_exit_pressure_for_area_ratio(
+                        root, area_ratio, Pt4, Tt4, gamma_clean,
+                    )
+        except Exception:
+            shock_solution = None
+
+    if shock_solution is not None:
+        T_exit = float(shock_solution["T_exit"])
+        P_exit = float(shock_solution["P_exit"])
+        M_exit = float(shock_solution["M_exit"])
+        gamma_exit = float(thermo.gamma(T_exit, phi, P_exit))
+        R_exit = float(thermo.R(T_exit, phi, P_exit))
+        V_ideal = M_exit * np.sqrt(gamma_exit * R_exit * T_exit)
+        V_exit = Cv * V_ideal
+        F_momentum = mdot_total * V_exit
+        F_pressure = (P_exit - Pamb) * exit_area
+        return {
+            "regime": "overexpanded_internal_shock",
+            "choked": True,
+            "M_throat": 1.0,
+            "M_exit": M_exit,
+            "T_exit": T_exit,
+            "P_exit": P_exit,
+            "Pt_exit": float(shock_solution["Pt_after_shock"]),
+            "gamma_exit": gamma_exit,
+            "R_exit": R_exit,
+            "V_exit": float(V_exit),
+            "Fg": float(F_momentum + F_pressure),
+            "F_momentum": float(F_momentum),
+            "F_pressure": float(F_pressure),
+            "expansion_state": "over-expanded",
+            "mass_capacity": float(mdot_capacity),
+            "mass_residual": float(mdot_capacity - mdot_total),
+            "clean_supersonic_M_exit": float(M_clean),
+            "clean_supersonic_P_exit": float(P_clean),
+            "shock_area_ratio": float(shock_solution["shock_area_ratio"]),
+            "M_before_shock": float(shock_solution["M_before_shock"]),
+            "M_after_shock": float(shock_solution["M_after_shock"]),
+        }
+
+    V_exit = 0.8 * Cv * V_clean_ideal
+    F_momentum = mdot_total * V_exit
+    return {
+        "regime": "overexpanded_separated",
+        "choked": True,
+        "M_throat": 1.0,
+        "M_exit": float(M_clean),
+        "T_exit": float(T_clean),
+        "P_exit": float(Pamb),
+        "Pt_exit": float(Pt4),
+        "gamma_exit": gamma_clean,
+        "R_exit": R_clean,
+        "V_exit": float(V_exit),
+        "Fg": float(F_momentum),
+        "F_momentum": float(F_momentum),
+        "F_pressure": 0.0,
+        "expansion_state": "over-expanded separated",
+        "mass_capacity": float(mdot_capacity),
+        "mass_residual": float(mdot_capacity - mdot_total),
+        "clean_supersonic_M_exit": float(M_clean),
+        "clean_supersonic_P_exit": float(P_clean),
+    }
+
+
 def _solve_phi_envelope(capability, A_noz_throat, W_air,
                          Tt4_max, phi_request, thermo,
                          M4_max: float = 0.95,
@@ -1019,23 +1498,40 @@ def analyze(
     # Capture area from the frozen 2-ramp inlet geometry (402inlet2.py).
     # Legacy model kept for reference:
     # A_capture_m2 = float(design['A_capture_required_m2'])
-    capability = _solve_terminal_target_capability(
-        design, M0, altitude_m, eval_alpha_deg,
-    )
-    if not capability.get('ok', False):
+    capture_capability = _get_capability(design, M0, altitude_m, eval_alpha_deg)
+    if not capture_capability.get('ok', False):
         raise RuntimeError(
             f"Inlet capability failed at M0={M0}, alt={altitude_m}: "
-            f"{capability.get('reason','unknown')}"
+            f"{capture_capability.get('reason','unknown')}"
         )
     A_capture_raw_m2 = float(
-        capability.get('A_swallowed_m2',
-                       capability.get('A_capture_effective_m2',
-                                      design.get('A_swallowed_m2',
-                                                 design.get('A_capture_effective_m2',
-                                                            design['A_capture_required_m2']))))
+        capture_capability.get(
+            'A_swallowed_m2',
+            capture_capability.get(
+                'A_capture_effective_m2',
+                design.get(
+                    'A_swallowed_m2',
+                    design.get('A_capture_effective_m2',
+                               design['A_capture_required_m2']),
+                ),
+            ),
+        )
     )
     A_capture_m2 = _corrected_capture_area(
         design['A_capture_required_m2'], A_capture_raw_m2,
+    )
+    inlet_throat_area_m2 = float(design["throat_area_actual_m2"])
+    inlet_contraction_ratio = (
+        A_capture_m2 / inlet_throat_area_m2
+        if inlet_throat_area_m2 > 0.0 else float("nan")
+    )
+    inlet_contraction_ratio_raw = (
+        A_capture_raw_m2 / inlet_throat_area_m2
+        if inlet_throat_area_m2 > 0.0 else float("nan")
+    )
+    inlet_contraction_ratio_required = (
+        float(design["A_capture_required_m2"]) / inlet_throat_area_m2
+        if inlet_throat_area_m2 > 0.0 else float("nan")
     )
     W_kgs   = rho0 * V0 * A_capture_m2         # kg/s
     W_lbms  = W_kgs * KG2LBM                   # lbm/s
@@ -1067,13 +1563,28 @@ def analyze(
 
     # Inlet capability + phi envelope
     A_noz_throat = float(design['A_noz_throat'])
+    thermo = get_thermo()
+    capability = _solve_coupled_inlet_nozzle_capability(
+        design=design,
+        M0=M0,
+        altitude_m=altitude_m,
+        alpha_deg=eval_alpha_deg,
+        W_air=float(W_kgs),
+        phi=float(phi),
+        thermo=thermo,
+    )
+    if not capability.get('ok', False):
+        raise RuntimeError(
+            f"Coupled inlet/nozzle capability failed at M0={M0}, "
+            f"alt={altitude_m}: {capability.get('reason','unknown')}"
+        )
     envelope_info = _solve_phi_envelope(
         capability=capability,
         A_noz_throat=A_noz_throat,
         W_air=float(W_kgs),
         Tt4_max=TT4_MAX_K,
         phi_request=phi,
-        thermo=get_thermo(),
+        thermo=thermo,
         M4_max=M4_MAX,
     )
     if not envelope_info.get('ok', False):
@@ -1082,6 +1593,50 @@ def analyze(
             f"{envelope_info.get('reason', 'unknown')}"
         )
     phi_effective = float(envelope_info['phi_cap'])
+    capability = _solve_coupled_inlet_nozzle_capability(
+        design=design,
+        M0=M0,
+        altitude_m=altitude_m,
+        alpha_deg=eval_alpha_deg,
+        W_air=float(W_kgs),
+        phi=phi_effective,
+        thermo=thermo,
+    )
+    if not capability.get('ok', False):
+        raise RuntimeError(
+            f"Final coupled inlet/nozzle capability failed at M0={M0}, "
+            f"alt={altitude_m}: {capability.get('reason','unknown')}"
+        )
+    envelope_info = _solve_phi_envelope(
+        capability=capability,
+        A_noz_throat=A_noz_throat,
+        W_air=float(W_kgs),
+        Tt4_max=TT4_MAX_K,
+        phi_request=phi,
+        thermo=thermo,
+        M4_max=M4_MAX,
+    )
+    if not envelope_info.get('ok', False):
+        raise RuntimeError(
+            f"Final phi-envelope solve failed at M0={M0}, alt={altitude_m}: "
+            f"{envelope_info.get('reason', 'unknown')}"
+        )
+    phi_effective = float(envelope_info['phi_cap'])
+    if abs(float(capability.get('coupled_nozzle_phi', phi_effective)) - phi_effective) > 1.0e-4:
+        capability = _solve_coupled_inlet_nozzle_capability(
+            design=design,
+            M0=M0,
+            altitude_m=altitude_m,
+            alpha_deg=eval_alpha_deg,
+            W_air=float(W_kgs),
+            phi=phi_effective,
+            thermo=thermo,
+        )
+        if not capability.get('ok', False):
+            raise RuntimeError(
+                f"Post-envelope inlet/nozzle capability failed at M0={M0}, "
+                f"alt={altitude_m}: {capability.get('reason','unknown')}"
+            )
     FAR = phi_effective * F_STOICH_JP10
     prob.set_val("burner.Fl_I:FAR", FAR)
 
@@ -1131,9 +1686,16 @@ def analyze(
     # set at the design point.  Fg is recomputed here at frozen A_exit, with
     # the over/under-expansion pressure term (Ps_exit − P0)·A_exit included.
     # ram_drag comes from pyCycle (inlet momentum deficit is unaffected).
-    Pt4_Pa = _Pa('burner.Fl_O:tot:P')
-    Tt4_K  = _K('burner.Fl_O:tot:T')
-    gamma4_K = float(prob.get_val('burner.Fl_O:stat:gamma')[0])
+    Pt4_Pa = float(capability.get('coupled_face_Pt4', _Pa('burner.Fl_O:tot:P')))
+    Tt4_K = float(capability.get('coupled_face_Tt4', _K('burner.Fl_O:tot:T')))
+    gamma4_K = float(capability.get(
+        'coupled_face_gamma4',
+        float(prob.get_val('burner.Fl_O:stat:gamma')[0]),
+    ))
+    R4 = float(capability.get(
+        'coupled_face_R4',
+        float(prob.get_val('burner.Fl_O:stat:R', units='J/(kg*K)')[0]),
+    ))
 
     Wfuel  = float(prob.get_val('perf.Wfuel', units='kg/s')[0])
     ram_drag_N = float(prob.get_val('perf.ram_drag', units='N')[0])
@@ -1141,53 +1703,40 @@ def analyze(
     throat_area_m2 = float(design['A_noz_throat'])
     exit_area_m2   = float(design['A_noz_exit'])
 
-    # Supersonic exit Mach at frozen area ratio, with a gamma refinement pass.
     mdot_tot_kgs = W_kgs + Wfuel
-    area_ratio_frozen = exit_area_m2 / throat_area_m2
     thermo = get_thermo()
-    if Pt4_Pa <= P0 or area_ratio_frozen < 1.0 + 1.0e-9:
-        # Engine cannot sustain supersonic exit: either no pressure head
-        # (Pt4 ≤ ambient) or a degenerate frozen geometry.  Treat thrust as
-        # zero and net force as pure ram drag.
-        M9     = 1.0
-        T9     = Tt4_K / (1.0 + 0.5 * (gamma4_K - 1.0))
-        gamma9 = gamma4_K
-        R9     = float(thermo.R(T9, phi_effective, max(P0, 1.0)))
-        Ps9    = P0
-        V9     = 0.0
-        Fg_N   = 0.0
-        Fn_N   = -ram_drag_N
-        nozzle_eta_Pt = 1.0
-        Pt9_Pa = Pt4_Pa
-    else:
-        M9 = float(_inlet2.invert_area_mach_ratio_supersonic(area_ratio_frozen,
-                                                              gamma=gamma4_K))
-        T9 = Tt4_K / (1.0 + 0.5 * (gamma4_K - 1.0) * M9 * M9)
-        gamma9 = float(thermo.gamma(T9, phi_effective, P0))
-        R9     = float(thermo.R    (T9, phi_effective, P0))
-        M9 = float(_inlet2.invert_area_mach_ratio_supersonic(area_ratio_frozen,
-                                                              gamma=gamma9))
-        T9 = Tt4_K / (1.0 + 0.5 * (gamma9 - 1.0) * M9 * M9)
-        # Nozzle Pt-loss equivalent to velocity coefficient Cv. The diverging
-        # section generates entropy, so Pt drops between the burner exit and
-        # the nozzle exit. Modeling Pt9 = Pt4 · Cv² makes Ps9 consistent with
-        # V9 = Cv · V9_ideal — both reflect the same lumped nozzle loss.
-        nozzle_eta_Pt = ETA_NOZZLE_CV * ETA_NOZZLE_CV
-        Pt9_Pa = Pt4_Pa * nozzle_eta_Pt
-        Ps9 = Pt9_Pa / (1.0 + 0.5 * (gamma9 - 1.0) * M9 * M9) ** (gamma9 / (gamma9 - 1.0))
-        V9_ideal = M9 * np.sqrt(gamma9 * R9 * T9)
-        V9 = ETA_NOZZLE_CV * V9_ideal
-        Fg_N = mdot_tot_kgs * V9 + (Ps9 - P0) * exit_area_m2
-        Fn_N = Fg_N - ram_drag_N
+    nozzle_solution = _solve_fixed_cd_nozzle(
+        Pt4=Pt4_Pa,
+        Tt4=Tt4_K,
+        mdot_total=mdot_tot_kgs,
+        throat_area=throat_area_m2,
+        exit_area=exit_area_m2,
+        Pamb=P0,
+        phi=phi_effective,
+        thermo=thermo,
+        Cv=ETA_NOZZLE_CV,
+        gamma_hint=gamma4_K,
+        R_hint=R4,
+    )
+    M9 = float(nozzle_solution["M_exit"])
+    T9 = float(nozzle_solution["T_exit"])
+    gamma9 = float(nozzle_solution["gamma_exit"])
+    R9 = float(nozzle_solution["R_exit"])
+    Ps9 = float(nozzle_solution["P_exit"])
+    V9 = float(nozzle_solution["V_exit"])
+    Fg_N = float(nozzle_solution["Fg"])
+    Fn_N = Fg_N - ram_drag_N
+    Pt9_Pa = float(nozzle_solution["Pt_exit"])
+    nozzle_eta_Pt = Pt9_Pa / max(Pt4_Pa, 1.0e-12)
+
     F_sp = Fn_N / max(W_kgs, 1.0e-12)
     Isp  = Fn_N / max(Wfuel * G0, 1.0e-12)
 
     # Thrust decomposition for diagnostics (see fig_thrust_decomposition).
-    F_momentum_N = float(mdot_tot_kgs * V9)
-    F_pressure_N = float((Ps9 - P0) * exit_area_m2)
+    F_momentum_N = float(nozzle_solution["F_momentum"])
+    F_pressure_N = float(nozzle_solution["F_pressure"])
+    nozzle_choked = bool(nozzle_solution["choked"])
     p_crit_ratio = float(((gamma9 + 1.0) / 2.0) ** (gamma9 / (gamma9 - 1.0)))
-    nozzle_choked = bool(Pt4_Pa / max(P0, 1.0) >= p_crit_ratio
-                         and area_ratio_frozen >= 1.0 + 1.0e-9)
 
     nozzle_throat = {
         "area":  throat_area_m2,
@@ -1198,19 +1747,14 @@ def analyze(
         "Tt":    Tt4_K,
         "gamma": float(prob.get_val('nozz.Throat:stat:gamma')[0]),
     }
-    if Ps9 > P0 * 1.02:
-        expansion_state = "under-expanded"
-    elif Ps9 < P0 * 0.98:
-        expansion_state = "over-expanded"
-    else:
-        expansion_state = "ideally expanded"
+    expansion_state = str(nozzle_solution["expansion_state"])
     nozzle_exit = {
         "area":  exit_area_m2,
         "T":     float(T9),
         "P":     float(Ps9),
         "M":     float(M9),
-        "Pt":    _Pa('nozz.Fl_O:tot:P'),
-        "Tt":    _K('nozz.Fl_O:tot:T'),
+        "Pt":    float(Pt9_Pa),
+        "Tt":    float(Tt4_K),
         "gamma": float(gamma9),
     }
     nozzle_perf = {
@@ -1288,6 +1832,9 @@ def analyze(
         phi_effective=phi_effective,
         envelope=envelope_info,
         capability=capability,
+        inlet_contraction_ratio=float(inlet_contraction_ratio),
+        inlet_contraction_ratio_raw=float(inlet_contraction_ratio_raw),
+        inlet_contraction_ratio_required=float(inlet_contraction_ratio_required),
         Isp=Isp, F_sp=F_sp, thrust=Fn_N,
         mdot_air=W_kgs, mdot_fuel=Wfuel,
         # Thrust-decomposition diagnostics
@@ -1303,6 +1850,30 @@ def analyze(
         nozzle_eta_Pt=float(nozzle_eta_Pt),
         p_crit_ratio=p_crit_ratio,
         nozzle_choked=nozzle_choked,
+        nozzle_regime=str(nozzle_solution.get("regime", "")),
+        nozzle_mass_capacity=float(nozzle_solution.get("mass_capacity", np.nan)),
+        nozzle_mass_residual=float(nozzle_solution.get("mass_residual", np.nan)),
+        nozzle_clean_supersonic_M_exit=float(
+            nozzle_solution.get("clean_supersonic_M_exit", np.nan)
+        ),
+        nozzle_clean_supersonic_P_exit=float(
+            nozzle_solution.get("clean_supersonic_P_exit", np.nan)
+        ),
+        nozzle_shock_area_ratio=float(
+            nozzle_solution.get("shock_area_ratio", np.nan)
+        ),
+        coupled_nozzle_solved=bool(capability.get('coupled_nozzle_solved', False)),
+        coupled_nozzle_fallback=bool(capability.get('coupled_nozzle_fallback', False)),
+        coupled_nozzle_reason=str(capability.get('coupled_nozzle_reason', '')),
+        coupled_nozzle_mass_residual=float(
+            capability.get('coupled_nozzle_mass_residual', np.nan)
+        ),
+        coupled_nozzle_mass_capacity=float(
+            capability.get('coupled_nozzle_mass_capacity', np.nan)
+        ),
+        coupled_nozzle_mdot_total=float(
+            capability.get('coupled_nozzle_mdot_total', np.nan)
+        ),
         eta_pt=ram_closure['inlet_inputs']['ram_recovery'],
         choked=choked,
         unstart_flag=ram_closure['inlet_inputs']['unstart_flag'],
@@ -1426,6 +1997,7 @@ def _print_cycle(r):
     print(f"  capture area cor = {inlet_geom.get('capture_area_corrected_m2', float('nan')):>8.5f} m^2")
     print(f"  post-cowl area   = {inlet_geom.get('post_cowl_area_m2', float('nan')):>8.5f} m^2")
     print(f"  throat area      = {inlet_geom.get('throat_area_m2', float('nan')):>8.5f} m^2")
+    print(f"  contraction A0/At= {r.get('inlet_contraction_ratio', float('nan')):>8.5f}")
     print(f"  throat height    = {inlet_geom.get('throat_height_m', float('nan')):>8.5f} m")
     print(f"  width            = {inlet_geom.get('width_m', float('nan')):>8.5f} m")
     print(f"  diffuser exit    = {inlet_geom.get('diffuser_exit_shape', 'n/a')}")
@@ -1477,9 +2049,9 @@ if __name__ == '__main__':
 
     from pyc_config import PHI_DEFAULT
 
-    off_design_M0 = 5.0
-    off_design_altitude_m = 19_000.0
-    off_design_alpha_deg = 2
+    off_design_M0 = 4.8
+    off_design_altitude_m = 18_000.0
+    off_design_alpha_deg = 6
     off_design_phi = PHI_DEFAULT
 
     print("\n--- Design Point Performance")
@@ -1489,7 +2061,7 @@ if __name__ == '__main__':
         M0=INLET_DESIGN_M0,
         altitude_m=INLET_DESIGN_ALT_M,
         phi=PHI_DEFAULT,
-        alpha_deg=2,
+        alpha_deg=INLET_DESIGN_ALPHA_DEG,
         verbose=True,
     )
 
@@ -1502,7 +2074,7 @@ if __name__ == '__main__':
         alpha_deg=off_design_alpha_deg,
         verbose=True,
     )
-    
+
     print("\n--- Off-Design Delta vs Design")
     print(f"  dThrust   = {(off_design_result['thrust'] - design_result['thrust'])/1e3:>8.2f} kN")
     print(f"  dIsp      = {off_design_result['Isp'] - design_result['Isp']:>8.1f} s")
@@ -1528,19 +2100,18 @@ if __name__ == '__main__':
 
 
     '''
-    
+
     BEFORE RUNNING IN VIRTUAL ENVIRONMENTS OR ROOT DIRECTORY INTERPRETER PYCYCLE MUST BE MODIFIED
-    
+
 #    - pycycle\thermo\cea\props_rhs.py
     change outputs['rhs_P'][num_element] = inputs['n_moles'] to inputs['n_moles'][0]
-    
+
 #    - pycycle\ thermo\cea\props_calcs.py
     change both n_moles = inputs['n_moles'] assignments to inputs['n_moles'][0]
-    
+
     '''
 
 
 
 #mach 4-5
 #altitude 15-24km
-
