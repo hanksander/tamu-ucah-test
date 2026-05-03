@@ -35,6 +35,10 @@ import numpy as np
 import openmdao.api as om
 import dymos as dm
 import matplotlib
+import contextlib
+import hashlib
+import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -54,7 +58,7 @@ from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
 from sklearn.preprocessing import StandardScaler
 
 # ── LFRJ cycle solver ─────────────────────────────────────────────────────────
-from combined_cycle_liquid_ram_scram.main import analyze
+from combined_cycle_liquid_ram_scram import pyc_run
 from combined_cycle_liquid_ram_scram.inlet import compute_inlet
 from combined_cycle_liquid_ram_scram.atmosphere import freestream
 from combined_cycle_liquid_ram_scram.gas_dynamics import FlowState
@@ -113,7 +117,7 @@ LFRJ_MACH_MAX   = 6.0     # maximum Mach — physical limit of ram/scramjet cycl
 #   Range = M_FUEL_LFRJ / (phi * F_STOICH * rho(h) * A_INLET)
 # Solve for rho, then invert the ISA to find h.
 # Uses F_STOICH from config so it stays consistent with analyze().
-from combined_cycle_liquid_ram_scram.config import F_STOICH as _F_STOICH_CFG
+from combined_cycle_liquid_ram_scram.pyc_config import F_STOICH as _F_STOICH_CFG
 _R_TARGET_M   = 500_000.0   # m  design range target for cruise phase
 _rho_cruise   = M_FUEL_LFRJ / (_R_TARGET_M * PHI_LFRJ * _F_STOICH_CFG * A_INLET)
 # Invert ISA stratosphere (11–25 km): rho = P/(R*T), P=22632*exp(-1.577e-4*(h-11000)), T=216.65
@@ -138,8 +142,32 @@ LFRJ_CRUISE_ALT = float(round(_h_strato / 500) * 500)  # round to nearest 500 m
 # The missile inlet is A_INLET = 0.012 m².  Every thrust and mdot_fuel value
 # returned by analyze() must be scaled by this ratio before use in the EOM.
 # Importing here keeps the scale factor derived from both sources — no hardcoding.
-from combined_cycle_liquid_ram_scram.config import A_CAPTURE as _A_CAPTURE_CFG
-LFRJ_AREA_SCALE = A_INLET / _A_CAPTURE_CFG   # 0.012 / 0.05 = 0.24
+from combined_cycle_liquid_ram_scram.pyc_config import A_CAPTURE as _A_CAPTURE_CFG
+LFRJ_AREA_SCALE = A_INLET / _A_CAPTURE_CFG   # legacy direct-analyze scale, unused by table path
+
+# Fixed pyCycle LFRJ geometry. These values size the hardware once; trajectory
+# calls then evaluate that same frozen geometry off-design through the table.
+LFRJ_DESIGN_MACH = 4.0
+LFRJ_DESIGN_ALT = 16000
+LFRJ_DESIGN_ALPHA = 0.0
+LFRJ_DESIGN_MDOT = 4.5
+LFRJ_DESIGN_WIDTH = 0.25
+LFRJ_DESIGN_LE_ANGLE = 8.0
+LFRJ_DESIGN_DIFFUSER_AR = 6.0
+LFRJ_DESIGN_COMBUSTOR_LENGTH = 1.6
+LFRJ_DESIGN_NOZZLE_AR = 4.5
+LFRJ_DESIGN_PHI = PHI_LFRJ
+
+# Compact local performance surrogate grid. This v3 file owns its own cache.
+LFRJ_TABLE_MACH = np.array([3.5, 4.0, 4.25, 4.5, 4.75])
+LFRJ_TABLE_ALT = np.array([11000, 13000, 14500, 16000, 17_500.0, 18_500.0])
+LFRJ_TABLE_PHI = np.array([0.0, 0.2, 0.4, 0.60, 0.80])
+LFRJ_TABLE_ALPHA = np.array([0.0, 3.0, 6.0])
+LFRJ_TABLE_CACHE = Path(__file__).with_name(
+    "power_flight_aero_database_integration_traj_v3_lfrj_table.npz"
+)
+LFRJ_TABLE_WORKERS = max(1, min(5, os.cpu_count() or 1))
+LFRJ_MIN_POWERED_MACH = max(LFRJ_MACH_MIN, float(LFRJ_TABLE_MACH[0]))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STANDARD ATMOSPHERE (1976)
@@ -786,7 +814,7 @@ def sfrj_thrust_and_isp(M, h, A_burn, verbose=False):
 # PROPULSION — LIQUID FUEL RAMJET (LFRJ)
 # Wraps the dual-mode ram/scramjet cycle solver in combined_cycle_liquid_ram_scram
 # ──────────────────────────────────────────────────────────────────────────────
-def lfrj_performance(
+def lfrj_performance_legacy(
         M: float,
         h: float,
         phi: float,
@@ -856,6 +884,320 @@ def lfrj_performance(
             float(Pc))
 
 
+_LFRJ_FIXED_DESIGN = None
+_LFRJ_PERF_TABLE = None
+
+
+def get_lfrj_fixed_design():
+    """Build and cache the fixed pyCycle LFRJ geometry."""
+    global _LFRJ_FIXED_DESIGN
+    if _LFRJ_FIXED_DESIGN is None:
+        _LFRJ_FIXED_DESIGN = pyc_run.build_design(
+            M0=LFRJ_DESIGN_MACH,
+            altitude_m=LFRJ_DESIGN_ALT,
+            alpha_deg=LFRJ_DESIGN_ALPHA,
+            mdot_required=LFRJ_DESIGN_MDOT,
+            width_m=LFRJ_DESIGN_WIDTH,
+            leading_edge_angle_deg=LFRJ_DESIGN_LE_ANGLE,
+            diffuser_area_ratio=LFRJ_DESIGN_DIFFUSER_AR,
+            combustor_length_m=LFRJ_DESIGN_COMBUSTOR_LENGTH,
+            nozzle_AR=LFRJ_DESIGN_NOZZLE_AR,
+            design_phi=LFRJ_DESIGN_PHI,
+        )
+    return _LFRJ_FIXED_DESIGN
+
+
+@contextlib.contextmanager
+def quiet_solver_output(enabled: bool = True):
+    """Suppress pyCycle/OpenMDAO solver chatter during trajectory calls."""
+    if not enabled:
+        yield
+        return
+    with open(os.devnull, "w") as sink:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            yield
+
+
+def lfrj_table_digest() -> str:
+    """Digest for deciding whether the cached table matches this geometry/grid."""
+    payload = {
+        "design": {
+            "mach": LFRJ_DESIGN_MACH,
+            "alt": LFRJ_DESIGN_ALT,
+            "alpha": LFRJ_DESIGN_ALPHA,
+            "mdot": LFRJ_DESIGN_MDOT,
+            "width": LFRJ_DESIGN_WIDTH,
+            "le_angle": LFRJ_DESIGN_LE_ANGLE,
+            "diffuser_ar": LFRJ_DESIGN_DIFFUSER_AR,
+            "combustor_length": LFRJ_DESIGN_COMBUSTOR_LENGTH,
+            "nozzle_ar": LFRJ_DESIGN_NOZZLE_AR,
+            "phi": LFRJ_DESIGN_PHI,
+        },
+        "grid": {
+            "mach": LFRJ_TABLE_MACH.tolist(),
+            "alt": LFRJ_TABLE_ALT.tolist(),
+            "phi": LFRJ_TABLE_PHI.tolist(),
+            "alpha": LFRJ_TABLE_ALPHA.tolist(),
+        },
+    }
+    blob = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:12]
+
+
+def _empty_lfrj_table():
+    shape = (
+        len(LFRJ_TABLE_MACH),
+        len(LFRJ_TABLE_ALT),
+        len(LFRJ_TABLE_PHI),
+        len(LFRJ_TABLE_ALPHA),
+    )
+    return {
+        "thrust": np.zeros(shape),
+        "isp": np.zeros(shape),
+        "mdot_f": np.zeros(shape),
+        "Pc": np.zeros(shape),
+        "status": np.ones(shape),
+    }
+
+
+def lfrj_performance_direct(
+        M: float,
+        h: float,
+        phi: float,
+        alpha_deg: float = 0.0,
+        ramp_angles: list | None = None,
+        verbose: bool = False,
+) -> tuple[float, float, float, float]:
+    """Direct pyCycle LFRJ performance call for table generation/debugging."""
+    M = float(M)
+    if phi <= 0.0 or M < LFRJ_MIN_POWERED_MACH or M > LFRJ_MACH_MAX:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        with quiet_solver_output(enabled=not verbose):
+            result = pyc_run.analyze(
+                M0=M,
+                altitude_m=h,
+                phi=phi,
+                alpha_deg=alpha_deg,
+                ramp_angles=ramp_angles,
+                design=get_lfrj_fixed_design(),
+                verbose=verbose,
+            )
+    except Exception as exc:
+        if verbose:
+            print(f"  [lfrj_performance] pyc_run.analyze() failed at M={M:.2f} h={h/1e3:.1f}km: {exc}")
+        return 0.0, 0.0, 0.0, 0.0
+
+    T_net = float(result["thrust"])
+    Isp = float(result["Isp"])
+    mdot_f = float(result["mdot_fuel"])
+    Pt3 = float(result["Pt_stations"][3])
+    M3 = float(result["M_stations"][3])
+    Pc = Pt3 / (1.0 + (GAMMA - 1.0) / 2.0 * M3**2) ** (GAMMA / (GAMMA - 1.0))
+
+    return (float(np.clip(T_net, -5_000.0, 200_000.0)),
+            float(np.clip(Isp, 0.0, 4_000.0)),
+            float(max(0.0, mdot_f)),
+            float(max(0.0, Pc)))
+
+
+def _lfrj_table_worker(task):
+    """Evaluate one table point in a child process."""
+    idx, i, j, k, l, M, h, phi, alpha = task
+    T, isp, mdot_f, Pc = lfrj_performance_direct(
+        M, h, phi, alpha_deg=alpha, verbose=False
+    )
+    status = 0.0 if (T > 0.0 and isp > 0.0) or phi <= 0.0 else 1.0
+    return idx, i, j, k, l, T, isp, mdot_f, Pc, status
+
+
+def save_lfrj_perf_table(table: dict):
+    np.savez_compressed(
+        LFRJ_TABLE_CACHE,
+        digest=np.array(lfrj_table_digest()),
+        mach=LFRJ_TABLE_MACH,
+        alt=LFRJ_TABLE_ALT,
+        phi=LFRJ_TABLE_PHI,
+        alpha=LFRJ_TABLE_ALPHA,
+        thrust=table["thrust"],
+        isp=table["isp"],
+        mdot_f=table["mdot_f"],
+        Pc=table["Pc"],
+        status=table["status"],
+    )
+
+
+def load_lfrj_perf_table() -> dict | None:
+    if not LFRJ_TABLE_CACHE.exists():
+        return None
+    try:
+        data = np.load(LFRJ_TABLE_CACHE)
+        if str(data["digest"]) != lfrj_table_digest():
+            return None
+        if not (
+            np.array_equal(data["mach"], LFRJ_TABLE_MACH)
+            and np.array_equal(data["alt"], LFRJ_TABLE_ALT)
+            and np.array_equal(data["phi"], LFRJ_TABLE_PHI)
+            and np.array_equal(data["alpha"], LFRJ_TABLE_ALPHA)
+        ):
+            return None
+        return {
+            "thrust": np.array(data["thrust"], dtype=float),
+            "isp": np.array(data["isp"], dtype=float),
+            "mdot_f": np.array(data["mdot_f"], dtype=float),
+            "Pc": np.array(data["Pc"], dtype=float),
+            "status": np.array(data["status"], dtype=float),
+            "source": "cache",
+        }
+    except Exception:
+        return None
+
+
+def build_lfrj_perf_table(force: bool = False, workers: int | None = None) -> dict:
+    """Load or build the fixed-geometry LFRJ performance table."""
+    global _LFRJ_PERF_TABLE
+    if _LFRJ_PERF_TABLE is not None and not force:
+        return _LFRJ_PERF_TABLE
+
+    if not force:
+        loaded = load_lfrj_perf_table()
+        if loaded is not None:
+            _LFRJ_PERF_TABLE = loaded
+            return _LFRJ_PERF_TABLE
+
+    n_workers = LFRJ_TABLE_WORKERS if workers is None else max(1, int(workers))
+    table = _empty_lfrj_table()
+    total = table["thrust"].size
+    print(f"\n[LFRJ table] Building {total} pyCycle points "
+          f"with {n_workers} worker(s) -> {LFRJ_TABLE_CACHE}")
+
+    tasks = []
+    idx = 0
+    for i, M in enumerate(LFRJ_TABLE_MACH):
+        for j, h in enumerate(LFRJ_TABLE_ALT):
+            for k, phi in enumerate(LFRJ_TABLE_PHI):
+                for l, alpha in enumerate(LFRJ_TABLE_ALPHA):
+                    idx += 1
+                    tasks.append((idx, i, j, k, l, float(M), float(h), float(phi), float(alpha)))
+
+    def store_result(result):
+        idx, i, j, k, l, T, isp, mdot_f, Pc, status = result
+        table["thrust"][i, j, k, l] = T
+        table["isp"][i, j, k, l] = isp
+        table["mdot_f"][i, j, k, l] = mdot_f
+        table["Pc"][i, j, k, l] = Pc
+        table["status"][i, j, k, l] = status
+        print(f"  [{idx:03d}/{total}] done M={LFRJ_TABLE_MACH[i]:.2f} "
+              f"h={LFRJ_TABLE_ALT[j]/1000:.1f}km phi={LFRJ_TABLE_PHI[k]:.2f} "
+              f"alpha={LFRJ_TABLE_ALPHA[l]:.1f} T={T:.0f} N Isp={isp:.0f} s")
+
+    if n_workers == 1:
+        for task in tasks:
+            store_result(_lfrj_table_worker(task))
+    else:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            future_map = {pool.submit(_lfrj_table_worker, task): task for task in tasks}
+            for future in as_completed(future_map):
+                try:
+                    store_result(future.result())
+                except Exception as exc:
+                    idx, i, j, k, l, *_ = future_map[future]
+                    table["status"][i, j, k, l] = 1.0
+                    print(f"  [{idx:03d}/{total}] failed M={LFRJ_TABLE_MACH[i]:.2f} "
+                          f"h={LFRJ_TABLE_ALT[j]/1000:.1f}km phi={LFRJ_TABLE_PHI[k]:.2f} "
+                          f"alpha={LFRJ_TABLE_ALPHA[l]:.1f}: {exc}")
+
+    save_lfrj_perf_table(table)
+    table["source"] = "built"
+    _LFRJ_PERF_TABLE = table
+    ok = int(np.count_nonzero(table["status"] < 0.5))
+    print(f"[LFRJ table] Complete: {ok}/{total} successful points.")
+    return _LFRJ_PERF_TABLE
+
+
+def _bracket(grid, value):
+    grid = np.asarray(grid, dtype=float)
+    x = float(value)
+    if len(grid) == 1:
+        return 0, 0, 0.0
+    if x <= grid[0]:
+        return 0, 1, 0.0
+    if x >= grid[-1]:
+        return len(grid) - 2, len(grid) - 1, 1.0
+    hi = int(np.searchsorted(grid, x))
+    lo = hi - 1
+    w = (x - grid[lo]) / (grid[hi] - grid[lo])
+    return lo, hi, float(w)
+
+
+def _interp4(values, M, h, phi, alpha_deg):
+    axes = [
+        _bracket(LFRJ_TABLE_MACH, M),
+        _bracket(LFRJ_TABLE_ALT, h),
+        _bracket(LFRJ_TABLE_PHI, phi),
+        _bracket(LFRJ_TABLE_ALPHA, alpha_deg),
+    ]
+    out = 0.0
+    for a in (0, 1):
+        ia = axes[0][a]
+        wa = axes[0][2] if a else 1.0 - axes[0][2]
+        for b in (0, 1):
+            ib = axes[1][b]
+            wb = axes[1][2] if b else 1.0 - axes[1][2]
+            for c in (0, 1):
+                ic = axes[2][c]
+                wc = axes[2][2] if c else 1.0 - axes[2][2]
+                for d in (0, 1):
+                    id_ = axes[3][d]
+                    wd = axes[3][2] if d else 1.0 - axes[3][2]
+                    out += wa * wb * wc * wd * values[ia, ib, ic, id_]
+    return float(out)
+
+
+def interpolate_lfrj_table(M, h, phi, alpha_deg=0.0):
+    table = build_lfrj_perf_table(force=False)
+    return (
+        float(np.clip(_interp4(table["thrust"], M, h, phi, alpha_deg), -5_000.0, 200_000.0)),
+        float(np.clip(_interp4(table["isp"], M, h, phi, alpha_deg), 0.0, 4_000.0)),
+        float(max(0.0, _interp4(table["mdot_f"], M, h, phi, alpha_deg))),
+        float(max(0.0, _interp4(table["Pc"], M, h, phi, alpha_deg))),
+    )
+
+
+def lfrj_performance(
+        M: float,
+        h: float,
+        phi: float,
+        alpha_deg: float = 0.0,
+        ramp_angles: list | None = None,
+        verbose: bool = False,
+        use_table: bool = True,
+) -> tuple[float, float, float, float]:
+    """LFRJ performance using the local table by default, direct pyCycle on request."""
+    M = float(M)
+    if phi <= 0.0 or M < LFRJ_MIN_POWERED_MACH or M > LFRJ_MACH_MAX:
+        if verbose:
+            print(f"  [lfrj_performance] M={M:.2f} outside LFRJ envelope "
+                  f"[{LFRJ_MIN_POWERED_MACH}, {LFRJ_MACH_MAX}] - returning zero thrust")
+        return 0.0, 0.0, 0.0, 0.0
+    if use_table and ramp_angles is None and not verbose:
+        return interpolate_lfrj_table(M, h, phi, alpha_deg)
+    return lfrj_performance_direct(
+        M, h, phi, alpha_deg=alpha_deg, ramp_angles=ramp_angles, verbose=verbose
+    )
+
+
+def parse_engine_workers(argv) -> int:
+    """Read --engine-workers N from argv, falling back to the configured default."""
+    if "--engine-workers" not in argv:
+        return LFRJ_TABLE_WORKERS
+    idx = argv.index("--engine-workers")
+    try:
+        return max(1, int(argv[idx + 1]))
+    except (IndexError, ValueError):
+        raise ValueError("--engine-workers requires a positive integer")
+
+
 def lfrj_pressure_recovery(M: float, altitude: float,
                             gamma: float = 1.4, R: float = 287.0) -> float:
     """
@@ -900,7 +1242,9 @@ def eom_lfrj(state, alpha_deg, phase):
         dA   = 0.0
 
     elif phase == 'cruise':
-        T_net, isp, mdot_f, Pc = lfrj_performance(M_num, h, PHI_LFRJ)
+        T_net, isp, mdot_f, Pc = lfrj_performance(
+            M_num, h, PHI_LFRJ, alpha_deg=alpha_deg
+        )
         T    = T_net
         mdot = -mdot_f
         dA   = 0.0   # no solid grain — A_burn does not evolve for LFRJ
@@ -950,7 +1294,7 @@ def simulate_phase_lfrj(state0, phase, t_end, dt, ctrl_fn,
             isp = boost_isp()
             Pc  = 8.0e6
         elif phase == 'cruise':
-            Tp, isp, _, Pc = lfrj_performance(M_n, h, PHI_LFRJ)
+            Tp, isp, _, Pc = lfrj_performance(M_n, h, PHI_LFRJ, alpha_deg=al)
         else:
             Tp = 0.0; isp = 0.0; Pc = 0.0
 
@@ -1068,7 +1412,9 @@ def run_trajectory_lfrj():
     print(f"  Peak thrust ≈ {np.max(tb['T'])/1000:.1f} kN")
 
     print(f"\n  LFRJ light-off check at M={M_boost:.2f}, h={sf_b[1]/1000:.1f} km:")
-    T_lo, isp_lo, mdot_lo, Pc_lo = lfrj_performance(M_boost, sf_b[1], PHI_LFRJ, verbose=True)
+    T_lo, isp_lo, mdot_lo, Pc_lo = lfrj_performance(
+        M_boost, sf_b[1], PHI_LFRJ, alpha_deg=alpha_boost(tb["t"][-1], sf_b), verbose=True
+    )
     print(f"    T_net={T_lo:.0f} N  Isp={isp_lo:.0f} s  "
           f"mdot_f={mdot_lo:.3f} kg/s  Pc={Pc_lo/1e6:.2f} MPa")
 
@@ -1345,7 +1691,7 @@ def do_plots_lfrj(tb, tc, td, feats):
     lfrj_T_sw   = []
     lfrj_isp_sw = []
     for M in M_sw_lfrj:
-        Tp, isp_p, _, _ = lfrj_performance(M, h_ref, PHI_LFRJ)
+        Tp, isp_p, _, _ = lfrj_performance(M, h_ref, PHI_LFRJ, alpha_deg=trim_alpha(M))
         lfrj_T_sw.append(Tp)
         lfrj_isp_sw.append(isp_p)
     lfrj_T_sw   = np.array(lfrj_T_sw)
@@ -1529,7 +1875,7 @@ class LFRJCruiseODE(om.ExplicitComponent):
         for n, u in [('x_range_dot','m/s'),('h_dot','m/s'),('V_dot','m/s**2'),
                      ('gamma_dot','rad/s'),('m_dot','kg/s')]:
             self.add_output(n, val=np.zeros(nn), units=u)
-        self.declare_partials('*', '*', method='cs')
+        self.declare_partials('*', '*', method='fd')
 
     def compute(self, inputs, outputs):
         h   = np.clip(inputs['h'],  500., 79_000.)
@@ -1540,8 +1886,8 @@ class LFRJCruiseODE(om.ExplicitComponent):
         rho, _, _, a = atm_vec(h)
         M_n = V / a
         CL, CD, L, D, q = aero(M_n, al, rho, V)
-        lfrj_res = [lfrj_performance(Mi, hi, PHI_LFRJ)
-                    for Mi, hi in zip(M_n, h)]
+        lfrj_res = [lfrj_performance(Mi, hi, PHI_LFRJ, alpha_deg=ali)
+                    for Mi, hi, ali in zip(M_n, h, al)]
         T      = np.array([r[0] for r in lfrj_res])
         isp    = np.array([r[1] if r[1] > 0 else 1.0 for r in lfrj_res])
         mdot_f = np.array([r[2] for r in lfrj_res])
@@ -1669,6 +2015,15 @@ def build_dymos_problem_lfrj(h0_m, V0):
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     import sys
+
+    if '--build-engine-table' in sys.argv or '--rebuild-engine-table' in sys.argv:
+        force = '--rebuild-engine-table' in sys.argv
+        table = build_lfrj_perf_table(force=force, workers=parse_engine_workers(sys.argv))
+        n_total = table["thrust"].size
+        n_ok = int(np.count_nonzero(table["status"] < 0.5))
+        print(f"\n[LFRJ table] {table.get('source', 'memory')} | "
+              f"{n_ok}/{n_total} valid points | {LFRJ_TABLE_CACHE}")
+        sys.exit(0)
 
     # Physics-based simulation (init_aero_models is called inside run_trajectory_lfrj)
     tb, tc, td, feats = run_trajectory_lfrj()

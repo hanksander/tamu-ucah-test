@@ -2056,7 +2056,7 @@ if __name__ == '__main__':
 
     print("\n--- Design Point Performance")
     design = _get_inlet_design()
-
+    """
     design_result = analyze(
         M0=INLET_DESIGN_M0,
         altitude_m=INLET_DESIGN_ALT_M,
@@ -2064,8 +2064,9 @@ if __name__ == '__main__':
         alpha_deg=INLET_DESIGN_ALPHA_DEG,
         verbose=True,
     )
-
     """
+
+
     print("\n--- Off-Design Point Performance")
     off_design_result = analyze(
         M0=off_design_M0,
@@ -2074,7 +2075,7 @@ if __name__ == '__main__':
         alpha_deg=off_design_alpha_deg,
         verbose=True,
     )
-
+    """
     print("\n--- Off-Design Delta vs Design")
     print(f"  dThrust   = {(off_design_result['thrust'] - design_result['thrust'])/1e3:>8.2f} kN")
     print(f"  dIsp      = {off_design_result['Isp'] - design_result['Isp']:>8.1f} s")
