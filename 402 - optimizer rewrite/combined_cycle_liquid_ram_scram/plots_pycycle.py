@@ -2014,6 +2014,165 @@ def fig_engine_temperature_profile(design, design_cycle):
 
 
 # ---------------------------------------------------------------------------
+# Helper: save to file AND display
+# ---------------------------------------------------------------------------
+
+def _show_and_save(fig, name):
+    path = os.path.join(OUTDIR, name + '.png')
+    fig.savefig(path, bbox_inches='tight', dpi=130)
+    print(f'  wrote {path}')
+    plt.show()
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# New individual plots: nozzle geometry + performance vs Mach/altitude
+# ---------------------------------------------------------------------------
+
+def fig_nozzle_geometry(design, design_cycle):
+    """Bell nozzle contour at the design point (upper and lower wall)."""
+    layout = _flowpath_layout(
+        design, design_cycle,
+        combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
+        converging_length=NOZZLE_CONVERGING_LENGTH_DEFAULT,
+        diverging_length=NOZZLE_DIVERGING_LENGTH_DEFAULT,
+        throat_angle_deg=NOZZLE_THROAT_ANGLE_DEFAULT,
+        exit_angle_deg=NOZZLE_EXIT_ANGLE_DEFAULT,
+        n_points=NOZZLE_BELL_POINTS_DEFAULT,
+    )
+    bell = layout['bell']
+    bx   = bell['x']          # x=0 is the throat
+    upper = bell['upper_wall']
+    lower = bell['lower_wall']
+
+    fig, ax = plt.subplots(figsize=(12, 5.0))
+    ax.plot(bx, upper, '-', color='steelblue', lw=2.2)
+    ax.plot(bx, lower, '-', color='steelblue', lw=2.2)
+    ax.fill_between(bx, lower, upper, alpha=0.12, color='steelblue')
+    ax.axvline(0.0, color='0.55', lw=1.0, ls='--', label='Throat (x = 0)')
+    ax.set_xlabel('Axial position [m]  (0 = throat)')
+    ax.set_ylabel('Half-height [m]')
+    ax.set_title('Nozzle Geometry — Bell Contour (Design Point)')
+    ax.legend(fontsize=9)
+    ax.set_aspect('equal')
+    _show_and_save(fig, 'nozzle_geometry')
+
+
+def fig_specific_thrust_vs_mach(results, mach_range, altitude_m, alpha_deg, phi):
+    """Specific thrust (F/ṁ_air) vs Mach at fixed altitude, AoA, and φ."""
+    F_sp = _arr(results, 'F_sp')
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(mach_range, F_sp, 'o-', color='darkgreen', lw=2.0)
+    ax.set_xlabel('Mach number M0')
+    ax.set_ylabel('Specific thrust  F/ṁ_air  [N·s/kg]')
+    ax.set_title(f'Specific Thrust vs Mach\n'
+                 f'(alt = {altitude_m/1e3:.0f} km, α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    _show_and_save(fig, 'specific_thrust_vs_mach')
+
+
+def fig_isp_vs_mach(results, mach_range, altitude_m, alpha_deg, phi):
+    """Specific impulse vs Mach at fixed altitude, AoA, and φ."""
+    Isp = _arr(results, 'Isp')
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(mach_range, Isp, 'o-', color='navy', lw=2.0)
+    ax.set_xlabel('Mach number M0')
+    ax.set_ylabel('Isp [s]')
+    ax.set_title(f'Specific Impulse vs Mach\n'
+                 f'(alt = {altitude_m/1e3:.0f} km, α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    _show_and_save(fig, 'isp_vs_mach')
+
+
+def fig_thrust_vs_mach(results, mach_range, altitude_m, alpha_deg, phi):
+    """Net thrust vs Mach at fixed altitude, AoA, and φ."""
+    thrust = _arr(results, 'thrust')
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(mach_range, thrust / 1e3, 'o-', color='firebrick', lw=2.0)
+    ax.set_xlabel('Mach number M0')
+    ax.set_ylabel('Net thrust [kN]')
+    ax.set_title(f'Thrust vs Mach\n'
+                 f'(alt = {altitude_m/1e3:.0f} km, α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    _show_and_save(fig, 'thrust_vs_mach')
+
+
+def fig_specific_thrust_vs_altitude(results, alt_range, M0, alpha_deg, phi):
+    """Specific thrust (F/ṁ_air) vs altitude at fixed Mach, AoA, and φ."""
+    F_sp   = _arr(results, 'F_sp')
+    alt_km = np.asarray(alt_range, dtype=float) / 1e3
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(alt_km, F_sp, 's-', color='darkgreen', lw=2.0)
+    ax.set_xlabel('Altitude [km]')
+    ax.set_ylabel('Specific thrust  F/ṁ_air  [N·s/kg]')
+    ax.set_title(f'Specific Thrust vs Altitude\n'
+                 f'(M0 = {M0:.1f}, α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    _show_and_save(fig, 'specific_thrust_vs_altitude')
+
+
+def fig_isp_vs_altitude(results, alt_range, M0, alpha_deg, phi):
+    """Specific impulse vs altitude at fixed Mach, AoA, and φ."""
+    Isp    = _arr(results, 'Isp')
+    alt_km = np.asarray(alt_range, dtype=float) / 1e3
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(alt_km, Isp, 's-', color='navy', lw=2.0)
+    ax.set_xlabel('Altitude [km]')
+    ax.set_ylabel('Isp [s]')
+    ax.set_title(f'Specific Impulse vs Altitude\n'
+                 f'(M0 = {M0:.1f}, α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    _show_and_save(fig, 'isp_vs_altitude')
+
+
+def fig_thrust_vs_altitude(results, alt_range, M0, alpha_deg, phi):
+    """Net thrust vs altitude at fixed Mach, AoA, and φ."""
+    thrust = _arr(results, 'thrust')
+    alt_km = np.asarray(alt_range, dtype=float) / 1e3
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(alt_km, thrust / 1e3, 's-', color='firebrick', lw=2.0)
+    ax.set_xlabel('Altitude [km]')
+    ax.set_ylabel('Net thrust [kN]')
+    ax.set_title(f'Thrust vs Altitude\n'
+                 f'(M0 = {M0:.1f}, α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    _show_and_save(fig, 'thrust_vs_altitude')
+
+
+def _cfg_from_result(r):
+    """Cfg = Fg / (Pt4 * A_throat)."""
+    Fg       = float(r['Fg'])
+    Pt4      = float(r['Pt_stations'][4])
+    A_throat = float(r['nozzle_throat_area'])
+    denom = Pt4 * A_throat
+    return Fg / denom if denom > 0.0 else np.nan
+
+
+def fig_cfg_vs_thrust(mach_results, mach_range,
+                      alt_results, alt_range,
+                      altitude_m, M0, alpha_deg, phi):
+    """Gross thrust coefficient (Fg / Pt4·A*) vs net thrust.
+
+    Both the Mach sweep and altitude sweep are overlaid so the relationship
+    between nozzle loading and overall thrust output can be read off a single
+    plot.
+    """
+    cfg_mach   = np.array([_cfg_from_result(r) if r is not None else np.nan
+                            for r in mach_results])
+    thrust_mach = _arr(mach_results, 'thrust') / 1e3
+
+    cfg_alt    = np.array([_cfg_from_result(r) if r is not None else np.nan
+                            for r in alt_results])
+    thrust_alt  = _arr(alt_results, 'thrust') / 1e3
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.plot(thrust_mach, cfg_mach, 'o-', color='steelblue', lw=2.0,
+            label=f'Mach sweep  (alt = {altitude_m/1e3:.0f} km)')
+    ax.plot(thrust_alt,  cfg_alt,  's-', color='darkorange', lw=2.0,
+            label=f'Altitude sweep  (M0 = {M0:.1f})')
+    ax.set_xlabel('Net thrust [kN]')
+    ax.set_ylabel(r'Gross thrust coefficient  $C_{fg}$ = $F_g$ / ($P_{t4}$ · $A^*$)')
+    ax.set_title(f'Gross Thrust Coefficient vs Thrust\n'
+                 f'(α = {alpha_deg:.1f}°, φ = {phi:.2f})')
+    ax.legend(fontsize=9)
+    _show_and_save(fig, 'cfg_vs_thrust')
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2098,6 +2257,58 @@ def main():
         combustor_length_m=COMBUSTOR_LENGTH_M_DEFAULT,
     )
 
+    # -----------------------------------------------------------------------
+    # New individual plots
+    # -----------------------------------------------------------------------
+    _NP_ALT_M   = 17_000.0   # altitude held fixed for Mach-sweep plots
+    _NP_MACH    = 4.5         # Mach held fixed for altitude-sweep plots
+    _NP_ALPHA   = 2.0         # AoA for all new plots
+    _NP_PHI     = 0.7         # equivalence ratio held fixed for all new plots
+
+    print('\n  [1/7] nozzle geometry ...')
+    fig_nozzle_geometry(design, design_cycle)
+
+    print(f'\n  Mach sweep (alt={_NP_ALT_M/1e3:.0f} km, α={_NP_ALPHA:.1f}°) '
+          f'for plots [2/7] – [4/7] ...')
+    _np_mach_range = np.linspace(max(M_MIN, 4.0), min(M_MAX, 5.5), 15)
+    _np_mach_results = mach_sweep(
+        _np_mach_range, altitude=_NP_ALT_M,
+        phi=_NP_PHI, alpha_deg=_NP_ALPHA,
+    )
+    """
+    print('\n  [2/7] specific thrust vs Mach ...')
+    fig_specific_thrust_vs_mach(_np_mach_results, _np_mach_range, _NP_ALT_M, _NP_ALPHA, _NP_PHI)
+
+    print('\n  [3/7] Isp vs Mach ...')
+    fig_isp_vs_mach(_np_mach_results, _np_mach_range, _NP_ALT_M, _NP_ALPHA, _NP_PHI)
+
+    print('\n  [4/7] thrust vs Mach ...')
+    fig_thrust_vs_mach(_np_mach_results, _np_mach_range, _NP_ALT_M, _NP_ALPHA, _NP_PHI)
+    """
+    print(f'\n  Altitude sweep (M0={_NP_MACH}, α={_NP_ALPHA:.1f}°) '
+          f'for plots [5/7] – [7/7] ...')
+    _np_alt_range = np.linspace(14_000.0, 22_000.0, 15)
+    _np_alt_results = altitude_sweep(
+        _np_alt_range, M0=_NP_MACH,
+        alpha_deg=_NP_ALPHA, phi=_NP_PHI,
+    )
+    """
+    print('\n  [5/7] specific thrust vs altitude ...')
+    fig_specific_thrust_vs_altitude(_np_alt_results, _np_alt_range, _NP_MACH, _NP_ALPHA, _NP_PHI)
+
+    print('\n  [6/7] Isp vs altitude ...')
+    fig_isp_vs_altitude(_np_alt_results, _np_alt_range, _NP_MACH, _NP_ALPHA, _NP_PHI)
+
+    print('\n  [7/7] thrust vs altitude ...')
+    fig_thrust_vs_altitude(_np_alt_results, _np_alt_range, _NP_MACH, _NP_ALPHA, _NP_PHI)
+
+    """
+    print('\n  [8/8] gross thrust coefficient vs thrust ...')
+    fig_cfg_vs_thrust(
+        _np_mach_results, _np_mach_range,
+        _np_alt_results,  _np_alt_range,
+        _NP_ALT_M, _NP_MACH, _NP_ALPHA, _NP_PHI,
+    )
 
     # Mach sweep with linear φ schedule:
     #   φ = PHI_SCHEDULE_PHI_LO at M = PHI_SCHEDULE_M_LO  (rich → max thrust)

@@ -2569,63 +2569,38 @@ def plot_2ramp_shock_matched_inlet(result,shock_extension_factor=_SHOCK_EXT_FACT
 
     # Geometry
     ax.plot([P_fore[0], P0[0]], [P_fore[1], P0[1]],
-        linewidth=2, label="Forebody")
+        linewidth=2)
     ax.plot([P0[0], P1[0]], [P0[1], P1[1]],
-        linewidth=2, label="Ramp 1")
+        linewidth=2)
     ax.plot([P1[0], T_lower[0]], [P1[1], T_lower[1]],
-        linewidth=2, label="Lower inlet surface")
-    ax.plot([F[0], C[0]], [F[1], C[1]],
-        linewidth=2, label="Opening (normal to Ramp 2)")
+        linewidth=2)
     ax.plot(cowl_curve[:, 0], cowl_curve[:, 1],
-        linewidth=2, label="Cowl")
+        linewidth=2)
     ax.plot([T_lower[0], T_upper[0]], [T_lower[1], T_upper[1]],
-        linewidth=2, label="Throat Shock", linestyle= "--")
+        linewidth=2, linestyle="--")
 
     # Shocks
-    # Legacy plotting kept for reference: force the forebody shock through the
-    # common focus.
-    # ax.plot([P_fore[0], focus[0]], [P_fore[1], focus[1]],
-    #     linestyle="--", linewidth=1.5, label="Forebody shock")
     ax.plot([P_fore[0], x_end], [P_fore[1], y_fore_end],
-        linestyle="--", linewidth=1.5, label="Forebody shock")
+        linestyle="--", linewidth=1.5)
     ax.plot([P0[0], x_end], [P0[1], y_s1_end],
-        linestyle="--", linewidth=1.5, label="Ramp 1 shock")
+        linestyle="--", linewidth=1.5)
     ax.plot([P1[0], x_end], [P1[1], y_s2_end],
-        linestyle="--", linewidth=1.5, label="Ramp 2 shock")
-    cowl_label_used = False
+        linestyle="--", linewidth=1.5)
     for seg in shock_segments:
         start = seg["start"]
         end = seg["end"]
         if seg["kind"] == "cowl":
             ax.plot([start[0], end[0]], [start[1], end[1]],
-                linestyle="--", linewidth=1.5, label="Cowl shock")
-            cowl_label_used = True
+                linestyle="--", linewidth=1.5)
         elif seg["kind"] == "terminal":
             ax.plot([start[0], end[0]], [start[1], end[1]],
-                linestyle="-", linewidth=1.5, label="Terminal normal shock")
-
-    # Focus point
-    ax.plot(focus[0], focus[1], marker="x", markersize=8)
-    ax.text(focus[0], focus[1], "  Shock focus", va="bottom")
-
-    # Key points
-    for P in [P_fore, P0, P1, F, C, T_lower, T_upper]:
-        ax.plot(P[0], P[1], marker="o")
-
-    ax.text(P_fore[0], P_fore[1], "  Forebody start", va="bottom")
-    ax.text(P0[0], P0[1], "  Forebody/Ramp 1", va="bottom")
-    ax.text(P1[0], P1[1], "  Ramp 1/Ramp 2", va="bottom")
-    ax.text(F[0], F[1], "  Ramp 2 end", va="top")
-    ax.text(C[0], C[1], "  Cowl lip", va="bottom")
-    ax.text(T_lower[0], T_lower[1], "  Throat lower", va="top")
-    ax.text(T_upper[0], T_upper[1], "  Throat upper", va="bottom")
+                linestyle="-", linewidth=1.5)
 
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_title("2-Ramp Shock-Matched Inlet with Cowl Angle and Throat")
     ax.axis("equal")
     ax.grid(True)
-    ax.legend()
 
     shock_y = []
     for seg in shock_segments:
